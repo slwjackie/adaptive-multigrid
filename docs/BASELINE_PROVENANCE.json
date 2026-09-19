@@ -1,0 +1,8 @@
+{
+  "baseline_file": "adaptive_neural_multigrid_v6_6_final.zip",
+  "baseline_sha256": "b588487b648053a9eadf7df97931ad9eb3d2ba7e9d81e9b60e95bb52252b8ef3",
+  "delivered_version": "6.7",
+  "new_production_namespace": "adaptive_mg.v67",
+  "old_legacy_code_retained": true,
+  "automatic_legacy_performance_certificate_migration": false
+}

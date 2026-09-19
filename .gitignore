@@ -1,0 +1,11 @@
+# 가상환경 및 캐시
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# 대용량 결과물 및 모델 가중치 폴더
+artifacts/
+checkpoints/
+*.pt
+*.pth

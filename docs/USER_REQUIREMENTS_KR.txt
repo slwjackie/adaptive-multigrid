@@ -1,0 +1,928 @@
+첨부된 adaptive_neural_multigrid_v6_6_final.zip을 기준 코드로 사용해서
+새 최종 버전 Adaptive Neural Multigrid를 구현해줘.
+
+이번 버전의 가장 중요한 목표는 다음 두 가지다.
+
+1. Classical MG의 수렴 안정성과 정확성을 절대 희생하지 않는다.
+2. Neural MG가 classical 계산 위에 추가 비용으로 붙는 구조를 버리고,
+   필요한 classical work를 learned work가 "대체(replace)"하도록 만들어
+   end-to-end time-to-tolerance를 Classical MG보다 줄이는 것을 목표로 한다.
+
+외부 Krylov solver(FGMRES/GMRES/CG 등)는 메인 solver에서 사용하지 않는다.
+비교 대상은 반드시 standalone
+
+    Classical MG
+    vs
+    Adaptive Neural MG
+
+로 한다.
+
+============================================================
+A. 최종 아키텍처
+============================================================
+
+전체 production solver는 다음 구조로 구현한다.
+
+                         A
+                         │
+               Classical hierarchy
+                    eager cache
+                         │
+            Cheap temporal controller
+                         │
+          ┌──────────────┼─────────────┐
+          │              │             │
+     CLASSICAL         HYBRID      CLASSICAL LOCK
+          │              │             │
+          │        lazy NN setup        │
+          │              │             │
+          │       learned P replaces    │
+          │        classical P          │
+          │              │             │
+          │       spatial detector      │
+          │       only when needed      │
+          │              │             │
+          │       NN smoother replaces  │
+          │       classical work        │
+          │              │             │
+          └──────────────┴─────────────┘
+
+
+핵심 철학은 다음과 같다.
+
+    Heavy NN = operator generation, A당 최대 한 번
+    Cheap controller = solve 중 online adaptation
+    Inner V-cycle = 가능한 한 순수 numerical kernel
+
+즉 heavy CNN/NN이 매 V-cycle마다 residual을 받아 correction을 직접
+생성하는 기존 online 구조를 최소화한다.
+
+대신
+
+    A
+     ↓
+    NN
+     ↓
+    learned smoother stencil C_theta
+    gain g_theta
+    learned prolongation P_theta
+     ↓
+    cache
+
+형태로 solver coefficients/operators를 생성한다.
+
+실제 V-cycle에서는 이미 cache된 learned operator를 numerical kernel로
+적용하며 heavy PyTorch forward는 반복하지 않는다.
+
+이 구조를 "Adaptive Neural Multigrid"로 유지하되,
+NN이 PDE solution 자체를 대체하는 것이 아니라
+operator-dependent MG components를 생성하는 방식으로 구현한다.
+
+
+============================================================
+B. Classical hierarchy는 항상 먼저 만들고 cache
+============================================================
+
+A가 주어지면 가장 먼저 strong classical hierarchy를 생성한다.
+
+예:
+
+    A
+     ↓
+    P_c, R_c
+     ↓
+    A_c = R_c A P_c
+     ↓
+    all coarse levels
+     ↓
+    coarse LU / line factors / smoother metadata
+     ↓
+    cache
+
+이 classical hierarchy는 solver의 safety backbone이다.
+
+A가 변하지 않는 한 다음을 절대 다시 계산하지 않는다.
+
+- classical P/R
+- Galerkin coarse operators
+- coarse LU/factorization
+- line smoother factors
+- semicoarsening information
+- selected classical strategy
+
+같은 A에 여러 RHS를 풀 경우 모두 재사용한다.
+
+Classical state와 CLASSICAL LOCK state에서는
+NN setup, spatial detector, learned-P computation이 전부 0회가 될 수 있어야 한다.
+
+
+============================================================
+C. Budget-neutral replacement
+============================================================
+
+이전 구조의
+
+    classical MG
+    + NN correction
+    + learned-P auxiliary correction
+
+처럼 classical 계산을 전부 수행한 뒤 NN을 추가하는 구조를 버린다.
+
+목표는
+
+    classical work + neural work
+
+가 아니라
+
+    classical work 일부를 learned work로 교체
+
+하는 것이다.
+
+HYBRID cycle의 목표 비용은 가능하면
+
+    T_hybrid_cycle <= 1.05 ~ 1.15 * T_classical_cycle
+
+범위가 되도록 설계한다.
+
+예를 들어 classical cycle이
+
+    pre smoother x2
+    classical coarse correction
+    post smoother x2
+
+라면 HYBRID에서는 가능한 경우
+
+    pre classical smoother x1
+    NN-generated smoother x1
+    learned-P coarse correction
+    post classical smoother x1~2
+
+처럼 classical operation 일부를 대체한다.
+
+같은 역할을 classical과 neural이 중복 수행하지 않도록 한다.
+
+
+============================================================
+D. Learned P는 classical P 위에 추가하지 말고 대체
+============================================================
+
+A마다 다음 두 hierarchy/operator bank를 만들 수 있게 한다.
+
+    Classical bank:
+        P_c, R_c, A_c
+
+    Learned bank:
+        P_theta, R_theta = P_theta^T,
+        A_c_theta = P_theta^T A P_theta
+
+단, classical bank는 eager하게 항상 생성하고,
+learned bank는 실제 HYBRID 진입 가능성이 생길 때만 lazy하게 생성한다.
+
+HYBRID에서는 learned P correction을 classical coarse correction에
+추가하는 것이 아니라 classical P/R path를 learned P/R path로 교체한다.
+
+즉:
+
+    CLASSICAL:
+        classical P/R/A_c
+
+    HYBRID:
+        learned P_theta/R_theta/A_c_theta
+
+    CLASSICAL LOCK:
+        classical P/R/A_c
+
+로 한다.
+
+HYBRID → CLASSICAL 전환 시 hierarchy를 새로 생성하지 말고
+이미 cache된 classical bank로 즉시 pointer/state만 전환한다.
+
+중요:
+spatial detector 결과에 따라 P_theta 자체를 patch마다 다시 생성하거나
+A_c_theta를 다시 만드는 구조는 금지한다.
+
+Learned P는 A-dependent static operator로 cache되어야 한다.
+
+
+============================================================
+E. NN smoother도 operator-generation 방식으로
+============================================================
+
+NN smoother는 매 cycle마다 heavy CNN을 실행하지 않는다.
+
+A 또는 local operator stencil을 입력으로 하여 setup 시
+
+    A
+     ↓
+    NN
+     ↓
+    normalized 9-point stencil C_theta
+    gain g_theta
+
+를 생성한다.
+
+이후 V-cycle에서는
+
+    delta u = g_theta * (C_theta * r)
+
+를 전용 stencil numerical kernel로 계산한다.
+
+가능하면 PyTorch를 호출하지 않는다.
+
+기존 방향/크기 분리 구조를 유지한다.
+
+    C_theta = direction
+    g_theta = magnitude
+
+direction은 반드시 normalize해서 scale ambiguity를 제거한다.
+
+NN smoother가 classical smoother에 추가되는 구조보다는
+HYBRID mode에서 classical smoother sweep 일부를 대체하도록 한다.
+
+Pre/post smoother의 역할도 비대칭으로 실험한다.
+
+예:
+
+    Hybrid pre:
+        NN smoother
+
+    Hybrid post:
+        strong classical smoother
+
+또는
+
+    pre classical x1
+    NN x1
+    post classical x1
+
+등을 ablation해서
+end-to-end time-to-tolerance가 가장 좋은 구성을 선택한다.
+
+
+============================================================
+F. FP32 NN + FP64 numerical solver
+============================================================
+
+Precision을 명확히 분리한다.
+
+NN/operator generation:
+
+    FP32
+
+대상:
+
+- smoother stencil C_theta
+- gain g_theta
+- learned P_theta weights
+- temporal controller output
+- spatial detector score
+
+최종 numerical MG:
+
+    FP64
+
+대상:
+
+- solution u
+- residual r
+- A/P/R/A_c numerical application
+- coarse solve
+- final residual check
+- convergence certification
+
+즉
+
+    NN inference: FP32
+    MG solver + true residual: FP64
+
+로 한다.
+
+NN output은 생성 후 FP64 coefficient/operator로 변환해서 cache한다.
+
+M2 Pro에서는:
+
+    PyTorch/MPS FP32
+       ↓
+    C_theta, g_theta, P_theta 생성
+       ↓
+    CPU FP64로 transfer/cache
+       ↓
+    C++/OpenMP solver
+
+구조를 우선 지원한다.
+
+A100에서는 CUDA FP32 inference를 사용할 수 있게 하되
+solver correctness 기준은 동일한 FP64 true residual로 유지한다.
+
+
+============================================================
+G. Inner V-cycle에서 PyTorch 제거
+============================================================
+
+가능한 production 목표:
+
+    A가 처음 들어올 때:
+        PyTorch/MPS/CUDA heavy NN forward
+
+    실제 V-cycle:
+        C++/OpenMP or optimized numerical kernels only
+
+즉 V-cycle inner loop에서는 heavy PyTorch dispatch,
+Python loop, CPU↔GPU synchronization을 최소화한다.
+
+9-point learned smoother는
+SciPy CSR SpMV보다 전용 fused C++/OpenMP stencil kernel을 우선 사용한다.
+
+Learned P/R도 가능하면 sparse native kernel을 사용한다.
+
+같은 A에서 여러 RHS를 풀 경우 NN setup과 learned operators는
+모두 한 번만 계산하고 재사용한다.
+
+
+============================================================
+H. Cheap Global Temporal Controller
+============================================================
+
+온라인 adaptivity의 첫 번째 계층은 아주 싼 temporal controller다.
+
+매 cycle 다음과 같은 저비용 feature만 사용한다.
+
+예:
+
+- current relative residual
+- previous contraction rho_k
+- 최근 2~3 cycle 평균 contraction
+- current cycle time
+- convergence efficiency
+- stagnation count
+- current mode
+- remaining estimated work
+- setup cost already paid 여부
+- learned operator cache 존재 여부
+
+Heavy CNN을 사용하지 말고
+tiny MLP 또는 매우 작은 rule-based/ML controller로 구성한다.
+
+Controller state는:
+
+    CLASSICAL
+    HYBRID
+    CLASSICAL_LOCK
+
+세 가지를 기본으로 한다.
+
+허용 transition:
+
+    CLASSICAL <-> HYBRID
+    CLASSICAL -> CLASSICAL_LOCK
+    HYBRID -> CLASSICAL_LOCK
+
+CLASSICAL_LOCK에 들어가면 다시 NN을 사용하지 않는다.
+
+
+============================================================
+I. End-to-end break-even controller
+============================================================
+
+Temporal controller가 단순 contraction만 보고 HYBRID에 들어가지 않게 한다.
+
+핵심 결정 기준은:
+
+    예상되는 실제 절약 시간
+        >
+    NN setup + HYBRID 추가 실행 비용
+
+이어야 한다.
+
+예를 들어 다음과 같은 break-even estimate를 사용한다.
+
+    DeltaN * T_classical_cycle
+        >
+    T_NN_setup_remaining
+      + N_hybrid * (T_hybrid_cycle - T_classical_cycle)
+
+또는 equivalent learned utility를 사용한다.
+
+즉 single-RHS 문제에서는 NN setup 비용까지 반드시 포함하고,
+이미 NN setup이 amortized된 multi-RHS에서는 그에 맞춰 utility가 달라져야 한다.
+
+Controller는 contraction이 약간 좋은 정도로는 HYBRID를 선택하면 안 된다.
+
+최종 optimize 대상은:
+
+    T_tolerance
+
+즉 동일 tolerance까지 도달하는 전체 end-to-end computational time이다.
+
+
+============================================================
+J. Convergence-efficiency
+============================================================
+
+cycle별 효율을
+
+    eta_k =
+        -log(||r_{k+1}|| / ||r_k||)
+        --------------------------------
+                     Delta t_k
+
+로 정의한다.
+
+즉 "1초 또는 1ms당 residual을 얼마나 감소시키는가"를 측정한다.
+
+Hybrid를 선택하기 위해서는 단순
+
+    rho_hybrid < rho_classical
+
+뿐 아니라
+
+    eta_hybrid > eta_classical
+
+이어야 한다.
+
+Timing noise 때문에 1~2% 이득은 neural-positive로 보지 않는다.
+
+기본 tie margin:
+
+    3~5%
+
+즉 최소 3~5% 이상의 end-to-end 또는 efficiency improvement가
+validation에서 반복적으로 확인될 때만 neural-positive label로 사용한다.
+
+
+============================================================
+K. Spatial detector: WHEN과 WHERE 분리
+============================================================
+
+Spatial detector는 항상 실행하지 않는다.
+
+Temporal controller가 HYBRID를 선택했을 때만 실행한다.
+
+역할을 명확히 분리한다.
+
+    Temporal controller:
+        WHEN should neural operators be used?
+
+    Spatial detector:
+        WHERE should neural smoother be applied?
+
+Spatial detector는 learned P를 공간적으로 변경하지 않는다.
+
+Spatial detector는 primarily NN smoother region selection에만 사용한다.
+
+Hybrid correction concept:
+
+    learned transfer:
+        global/cache된 learned P 사용
+
+    learned smoother:
+        spatial hard region에서만 사용 가능
+
+Gate가 0인 영역에서는 selected strong classical smoother가 그대로 동작해야 한다.
+
+가능하면 detector feature를 residual restriction과 함께 계산한다.
+
+즉 별도의 fine-grid pass 대신:
+
+    restriction
+    + block residual energy
+    + roughness features
+
+를 fused computation으로 만든다.
+
+Detector input은 예를 들어 최대 16x16 coarse feature map 수준으로 제한한다.
+
+
+============================================================
+L. Spatial detector refresh 비용 최소화
+============================================================
+
+Spatial detector를 매 cycle 실행하지 않는다.
+
+HYBRID 진입 시 실행 후 gate map을 cache하고 재사용한다.
+
+Refresh 조건 예:
+
+- HYBRID에 새로 진입
+- 3~5 cycle 경과
+- recent contraction 급격히 악화
+- residual spatial statistics 변화
+- stagnation 발생
+
+Gate hysteresis를 사용해 작은 변화로 patch가 계속 on/off되지 않게 한다.
+
+Spatial detector 없이도 충분한 경우 detector call = 0이어야 한다.
+
+
+============================================================
+M. Active fraction별 execution backend
+============================================================
+
+Spatial active fraction에 따라 실행 방식을 자동 선택한다.
+
+예:
+
+    active < 5%
+        -> neural smoother skip
+
+    5~40%
+        -> selective patch NN stencil kernel
+
+    >40~60%
+        -> full-grid cached neural stencil kernel
+
+정확한 threshold는 benchmark에서 calibration한다.
+
+Patch bookkeeping이 full-grid kernel보다 비싸지는 구간에서는
+자동으로 global learned smoother application으로 전환한다.
+
+
+============================================================
+N. Classical robustness
+============================================================
+
+Classical MG는 항상 safety backbone이다.
+
+다음 경우 즉시 CLASSICAL_LOCK:
+
+- residual increases beyond allowed tolerance
+- rho >= 1
+- NaN
+- Inf
+- learned coarse correction failure
+- instability condition
+- repeated HYBRID underperformance
+- tolerance 근처에서 neural benefit이 충분하지 않음
+
+CLASSICAL_LOCK 이후:
+
+- spatial detector 실행 0회
+- heavy NN 실행 0회
+- learned operator 사용 0회
+- cached classical hierarchy만 사용
+
+Gate/Hybrid가 완전히 꺼졌을 때 solver trajectory가
+pure strong classical MG와 동일해야 한다.
+
+
+============================================================
+O. Temporal training of neural smoother and learned P
+============================================================
+
+기존 objective를 그대로 사용하지 않는다.
+
+NN smoother와 learned P 모두 초기/중간 accelerated phase에 맞게 재학습한다.
+
+Training 순서:
+
+Stage 1
+    Temporal NN smoother pretraining
+
+Stage 2
+    Temporal learned-P pretraining
+
+Stage 3
+    smoother + learned P
+    joint temporal fine-tuning
+
+Stage 4
+    spatial detector training
+
+Stage 5
+    temporal/break-even controller training
+
+Stage 6
+    full hierarchical adaptive fine-tuning
+
+Smoother + learned P training에서는 여러 cycle을 unroll한다.
+
+    r0 -> r1 -> ... -> rK
+
+Loss 기본형:
+
+    L_temporal =
+        sum_k w_k log(||r_k|| / ||r_0||)
+        + lambda_C * L_compute
+
+추가적으로 convergence-efficiency loss를 사용할 수 있다.
+
+    eta_k =
+        -log(||r_{k+1}|| / ||r_k||) / Delta t_k
+
+단, 실제 wall-clock time을 직접 differentiable loss로 위장하지 말 것.
+
+Training에서는 calibrated compute proxy를 사용하고,
+checkpoint acceptance는 반드시 실제 measured end-to-end time으로 판단한다.
+
+
+============================================================
+P. 데이터셋 확대
+============================================================
+
+12개 training case 수준으로는 부족하다.
+
+최소 training grid:
+
+    n = 15, 31, 63, 127
+
+OOD/generalization:
+
+    n = 255
+
+를 사용한다.
+
+각 PDE family에서 parameter variation을 만들어
+최소 100~300+ operator를 생성한다.
+
+포함:
+
+- Poisson
+- aligned anisotropy
+- rotated anisotropy
+- local anisotropic patch
+- checkerboard
+- channel
+- variable coefficient
+
+variation 예:
+
+- anisotropy strength
+- rotation angle
+- patch 위치/크기
+- contrast
+- channel width/direction
+- coefficient scale
+
+실제 learned method가 classical보다 명확하게 이긴 경우는
+training에서 oversampling 가능하지만
+가짜 positive label은 만들지 않는다.
+
+
+============================================================
+Q. Level pruning
+============================================================
+
+NN을 모든 MG level에서 무조건 쓰지 않는다.
+
+다음 ablation을 제공한다.
+
+- fine level only
+- first 2 levels
+- all levels
+
+각각에 대해
+
+    end-to-end time
+    convergence
+    eta = -log(rho)/T
+
+를 비교해서 가장 효율적인 범위를 선택한다.
+
+기본 가설은:
+
+    heavy learned operations = fine/first levels
+    lower coarse levels = classical
+
+이다.
+
+
+============================================================
+R. Lazy NN setup
+============================================================
+
+처음부터 learned smoother/P를 계산하지 않는다.
+
+Solver initialization:
+
+    A
+     ↓
+    classical hierarchy eager cache
+     ↓
+    cheap temporal predictor
+     ↓
+    classical이 충분할 것으로 예상
+        -> NN setup = 0
+
+    Hybrid 가능성이 충분히 큼
+        -> lazy NN setup
+
+NN setup 후에는 A hash/model version/device/dtype 등을 key로 cache한다.
+
+같은 A의 여러 RHS에서는 learned operator setup을 한 번만 한다.
+
+
+============================================================
+S. Benchmark / acceptance criteria
+============================================================
+
+메인 비교:
+
+    Standalone Strong Classical MG
+    vs
+    Standalone Adaptive Neural MG
+
+외부 Krylov solver를 사용하지 않는다.
+
+동일 조건:
+
+- same A
+- same RHS
+- same x0
+- same FP64 true residual definition
+- same tolerance
+- same maximum cycle budget
+
+반드시 측정:
+
+1. setup time
+2. solve time
+3. total end-to-end time
+4. V-cycle count
+5. cycle time
+6. contraction factor
+7. time-normalized convergence efficiency
+8. NN setup time
+9. temporal controller time
+10. detector time
+11. learned smoother time
+12. learned-P time
+13. hierarchy construction time
+14. active fraction
+15. detector refresh count
+16. HYBRID entry count
+17. CLASSICAL/HYBRID dwell cycles
+18. CLASSICAL LOCK cycle
+19. fallback count
+20. final FP64 true residual
+
+Speedup definition:
+
+    speedup =
+        Classical total time
+        --------------------
+        Neural total time
+
+1보다 커야 Neural이 빠른 것이다.
+
+실패한 solve를 빠른 것으로 집계하지 않는다.
+
+
+============================================================
+T. 반드시 수행할 ablation
+============================================================
+
+최종 결과에서 최소한 다음을 분리해서 비교한다.
+
+A. Classical MG
+
+B. Operator-generated smoother only
+
+C. Operator-generated learned P only
+
+D. Smoother + learned P
+
+E. + temporal controller
+
+F. + spatial detector
+
+G. + break-even logic
+
+H. + lazy setup/cache
+
+I. + mixed precision
+
+J. final full architecture
+
+추가:
+
+- additive vs replacement
+- FP32 NN vs FP64 NN
+- fine-level only vs multi-level NN
+- detector every cycle vs refresh/cache
+- single RHS vs multiple RHS
+
+
+============================================================
+U. M2 Pro와 A100 측정
+============================================================
+
+가능하면 다음을 구분해서 report한다.
+
+M2 Pro:
+
+    MPS FP32 NN operator generation
+    +
+    CPU FP64 C++/OpenMP MG
+
+A100:
+
+    CUDA FP32 NN operator generation
+
+단, 현재 실행 환경에 해당 hardware가 없으면
+실제 측정한 것처럼 주장하지 말고
+"not measured"라고 명시한다.
+
+M2 Pro에서 MPS<->CPU transfer/synchronization 비용도 별도 계측한다.
+
+
+============================================================
+V. 구현 품질
+============================================================
+
+기존 v6.6의 working numerical components와 regression tests를 최대한 보존한다.
+
+하지만 spatial-only, old exact-K one-way production path 등
+최종 architecture에서 불필요한 경로는 legacy/ablation으로 분리한다.
+
+새 architecture는 하나의 명확한 production path를 가져야 한다.
+
+버그가 발견되면 함께 수정한다.
+
+특히 확인:
+
+- gate off = exact strong classical
+- CLASSICAL LOCK 후 NN calls = 0
+- lazy setup 이전 heavy NN calls = 0
+- learned hierarchy가 residual 때문에 rebuild되지 않음
+- same A multiple RHS cache reuse
+- FP32 generated coefficients -> FP64 solver conversion correctness
+- P/R dimensions and Galerkin consistency
+- learned P failure -> safe classical fallback
+- no hidden FGMRES/GMRES/CG production path
+- no benchmark leakage between train/tune/audit
+
+
+============================================================
+W. 최종 출력
+============================================================
+
+최종적으로 다음을 만들어줘.
+
+1. 최종 ZIP
+2. README_KR.md
+3. CHANGELOG
+4. architecture 설명
+5. training configuration
+6. benchmark configuration
+7. raw CSV/JSON results
+8. ablation table
+9. speedup summary
+10. convergence/stability summary
+11. SHA-256
+12. regression/stress-test results
+
+마지막에는 반드시 간단히 다음을 출력해줘.
+
+    Classical 대비 end-to-end speedup: ___x
+    Classical cycles: ___
+    Adaptive Neural cycles: ___
+    Accuracy/tolerance:
+        Classical ___/___
+        Neural ___/___
+    Stability improvement: Yes / No
+    NN setup amortized: Yes / No
+    Total-time improvement certified: True / False
+
+결과가 나쁘더라도 숨기지 말 것.
+
+특히 cycle 수가 줄었지만 전체 시간이 증가했다면
+"speedup achieved"라고 표현하지 않는다.
+
+최종 성공 기준은
+
+    same FP64 tolerance
+    +
+    no worse convergence robustness
+    +
+    end-to-end speedup > 1
+
+이다.
+
+============================================================
+핵심 연구 메시지
+============================================================
+
+이 architecture의 논문적 핵심은:
+
+"Heavy neural networks do not replace the PDE solver itself.
+They generate problem-dependent multigrid operators once during setup.
+A lightweight online controller decides when learned operators are worth
+their computational cost, while spatial adaptation determines where
+learned smoothing is useful. The numerical solve itself remains a
+high-performance multigrid algorithm with a cached classical safety path."
+
+즉 최종적으로:
+
+    Heavy NN
+        = WHAT operators should MG use?
+
+    Temporal controller
+        = WHEN are learned operators worth using?
+
+    Spatial detector
+        = WHERE is learned smoothing worth using?
+
+    Classical MG
+        = guaranteed safety/accuracy backbone
+
+이 네 역할이 명확히 분리되어야 한다.

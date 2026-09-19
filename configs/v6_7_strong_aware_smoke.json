@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "phase": "develop",
+  "smoke": true,
+  "seed": 2026091601,
+  "base_research": "artifacts/my_v6_7_research",
+  "rules": "artifacts/my_v6_7_strong_baseline/calibration/selector_rules.json",
+  "inference_device": "cpu",
+  "support": "standard",
+  "complexity_caps": {
+    "max_row_nnz": 8,
+    "max_p_ratio": 4.0,
+    "max_ac_ratio": 3.0,
+    "max_operator_complexity": 3.0
+  },
+  "training": {
+    "seed": 2026091601,
+    "updates": 7,
+    "kd_updates": 3,
+    "learning_rate": 0.0001,
+    "prefix_cycles": 2,
+    "tail_cycles": 1,
+    "lambda_mg": 1.0,
+    "lambda_kd": 0.25,
+    "lambda_stability": 0.1,
+    "lambda_complexity": 0.01,
+    "lambda_compute": 0.02,
+    "gradient_clip": 2.0,
+    "lambda_feasibility": 1.0
+  },
+  "validation_repeats": 3,
+  "multi_repeats": 3,
+  "generation_repeats": 3,
+  "warmups": 1,
+  "adoption_min_cases": 5,
+  "adoption_time_reduction": 0.03,
+  "teacher_task_reduction": 0.05,
+  "smoother_teacher": "teacher_cnn",
+  "final_repeats": 5,
+  "final_min_cases": 20,
+  "policy": {
+    "seed": 2026091601,
+    "epochs": {
+      "detector": 3,
+      "controller": 3
+    },
+    "detector_states": 1,
+    "controller_states": 1,
+    "timing_repeats": 1,
+    "policy_lr": 0.002,
+    "which_minimum_cases": 3
+  }
+}

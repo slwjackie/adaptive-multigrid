@@ -1,0 +1,323 @@
+{
+  "asset_status": "trained verification asset; raw and safeguarded ablations are required before any paper-performance claim",
+  "training_config": {
+    "n": null,
+    "train_sizes": [
+      7,
+      15
+    ],
+    "validation_sizes": [
+      15,
+      31
+    ],
+    "ood_validation_sizes": [],
+    "coarsest_n": 3,
+    "pool_size": 2,
+    "validation_pool_size": 2,
+    "samples_per_epoch": 2,
+    "validation_samples_per_problem": 1,
+    "cycles_per_sample": 2,
+    "pre_steps": 1,
+    "post_steps": 1,
+    "selector_epochs": 1,
+    "smoother_epochs": 2,
+    "transfer_epochs": 2,
+    "combined_epochs": 1,
+    "detector_epochs": 1,
+    "adaptive_epochs": 1,
+    "learning_rate": 0.002,
+    "detector_learning_rate": 0.001,
+    "selector_learning_rate": 0.001,
+    "weight_decay": 1e-06,
+    "gradient_clip": 2.0,
+    "validation_min_delta": 0.0001,
+    "detector_failure_ratio": 0.35,
+    "detector_benefit_margin": 0.02,
+    "detector_temperature": 0.15,
+    "adaptive_gate_cost": 0.03,
+    "raw_instability_penalty": 1.0,
+    "training_strategy_source": "fixed",
+    "fixed_strategy_name": "jacobi_bilinear_full",
+    "selector_label_max_n": 15,
+    "selector_work_penalty": 0.01,
+    "common_validation_smooth_steps": 1,
+    "max_training_levels": null,
+    "require_cross_grid_validation": true,
+    "allow_two_grid_training": true,
+    "jacobi_omega": 0.72,
+    "operator_sweeps": 3,
+    "operator_omega": 0.7,
+    "operator_blend": 0.75,
+    "operator_drop_tolerance": 0.0001,
+    "operator_candidate_topk": 8,
+    "seed": 7,
+    "device": "cpu",
+    "dtype": "float32"
+  },
+  "records": [
+    {
+      "stage": "global_selector",
+      "epoch": 1,
+      "loss": 2.7315772771835327,
+      "energy_contraction": null,
+      "validation_contraction": 1.0,
+      "validation_objective": 2.7251529693603516,
+      "gate_mean": null,
+      "accepted": true
+    },
+    {
+      "stage": "nn_smoother",
+      "epoch": 1,
+      "loss": -1.462492287158966,
+      "energy_contraction": 0.2316581843808616,
+      "validation_contraction": 0.2098651336671817,
+      "validation_objective": -1.5612901151180267,
+      "gate_mean": 0.0,
+      "accepted": true
+    },
+    {
+      "stage": "nn_smoother",
+      "epoch": 2,
+      "loss": -1.6482479572296143,
+      "energy_contraction": 0.19238666850425107,
+      "validation_contraction": 0.20615327891270202,
+      "validation_objective": -1.5791352689266205,
+      "gate_mean": 0.0,
+      "accepted": true
+    },
+    {
+      "stage": "learned_transfer",
+      "epoch": 1,
+      "loss": -0.839192122220993,
+      "energy_contraction": 0.43205942818945436,
+      "validation_contraction": 0.3327560730454274,
+      "validation_objective": -1.1003455966711044,
+      "gate_mean": 0.0,
+      "accepted": false
+    },
+    {
+      "stage": "learned_transfer",
+      "epoch": 2,
+      "loss": -1.3746339678764343,
+      "energy_contraction": 0.2529321480060209,
+      "validation_contraction": 0.3328418195268443,
+      "validation_objective": -1.1000879108905792,
+      "gate_mean": 0.0,
+      "accepted": false
+    },
+    {
+      "stage": "combined",
+      "epoch": 1,
+      "loss": -1.1090366840362549,
+      "energy_contraction": 0.32987657654146135,
+      "validation_contraction": 0.2629009126779554,
+      "validation_objective": -1.3359780311584473,
+      "gate_mean": 0.0,
+      "accepted": true
+    },
+    {
+      "stage": "detector",
+      "epoch": 1,
+      "loss": 0.1337825506925583,
+      "energy_contraction": 0.02198031300213188,
+      "validation_contraction": 0.04140369992819615,
+      "validation_objective": 0.18228932283818722,
+      "gate_mean": 0.0758042186498642,
+      "accepted": true
+    },
+    {
+      "stage": "adaptive",
+      "epoch": 1,
+      "loss": -1.3375003337860107,
+      "energy_contraction": 0.2620539398028949,
+      "validation_contraction": 0.2949457704846037,
+      "validation_objective": -1.218772679567337,
+      "gate_mean": 0.0568183995783329,
+      "accepted": true
+    }
+  ],
+  "stage_summaries": [
+    {
+      "stage": "global_selector",
+      "evaluation_mode": "cross_entropy",
+      "smooth_error_steps": 0,
+      "entry_objective": 2.733656406402588,
+      "best_objective": 2.7251529693603516,
+      "entry_validation": 2.733656406402588,
+      "best_validation": 2.7251529693603516,
+      "best_epoch": 1,
+      "accepted": true
+    },
+    {
+      "stage": "nn_smoother",
+      "evaluation_mode": "nn_smoother",
+      "smooth_error_steps": 0,
+      "entry_objective": -1.5538749992847443,
+      "best_objective": -1.5791352689266205,
+      "entry_validation": 0.2114270893620945,
+      "best_validation": 0.20615327891270202,
+      "best_epoch": 2,
+      "accepted": true
+    },
+    {
+      "stage": "learned_transfer",
+      "evaluation_mode": "learned_transfer",
+      "smooth_error_steps": 3,
+      "entry_objective": -1.1006194651126862,
+      "best_objective": -1.1006194651126862,
+      "entry_validation": 0.33266494672830466,
+      "best_validation": 0.33266494672830466,
+      "best_epoch": 0,
+      "accepted": false
+    },
+    {
+      "stage": "combined",
+      "evaluation_mode": "combined",
+      "smooth_error_steps": 1,
+      "entry_objective": -1.3186688274145126,
+      "best_objective": -1.3359780311584473,
+      "entry_validation": 0.2674911324182271,
+      "best_validation": 0.2629009126779554,
+      "best_epoch": 1,
+      "accepted": true
+    },
+    {
+      "stage": "detector",
+      "evaluation_mode": "binary_cross_entropy",
+      "smooth_error_steps": 0,
+      "entry_objective": 0.1823989748954773,
+      "best_objective": 0.18228932283818722,
+      "entry_validation": 0.1823989748954773,
+      "best_validation": 0.18228932283818722,
+      "best_epoch": 1,
+      "accepted": true
+    },
+    {
+      "stage": "adaptive",
+      "evaluation_mode": "adaptive",
+      "smooth_error_steps": 1,
+      "entry_objective": -1.2163901031017303,
+      "best_objective": -1.218772679567337,
+      "entry_validation": 0.29565237533883365,
+      "best_validation": 0.2949457704846037,
+      "best_epoch": 1,
+      "accepted": true
+    }
+  ],
+  "common_validation": {
+    "protocol": {
+      "metric": "geometric mean full-V-cycle A-norm contraction",
+      "smooth_error_steps": 1,
+      "cycles_per_sample": 2,
+      "validation_samples_per_problem": 1,
+      "strategy_source": "fixed",
+      "max_training_levels": null
+    },
+    "aggregate": {
+      "classical": {
+        "objective": -1.2525254637002945,
+        "geometric_energy_contraction": 0.2857821453815489,
+        "gate_mean": 0.0
+      },
+      "nn_smoother": {
+        "objective": -1.3153647184371948,
+        "geometric_energy_contraction": 0.26837641123245914,
+        "gate_mean": 0.0
+      },
+      "learned_transfer": {
+        "objective": -1.252496287226677,
+        "geometric_energy_contraction": 0.2857904808639465,
+        "gate_mean": 0.0
+      },
+      "combined": {
+        "objective": -1.3153034299612045,
+        "geometric_energy_contraction": 0.2683928552731148,
+        "gate_mean": 0.0
+      },
+      "adaptive": {
+        "objective": -1.255588710308075,
+        "geometric_energy_contraction": 0.2842844934762824,
+        "gate_mean": 0.07303540781140327
+      }
+    },
+    "by_grid": {
+      "15": {
+        "classical": {
+          "objective": -1.0541859567165375,
+          "geometric_energy_contraction": 0.3484759881269589,
+          "gate_mean": 0.0
+        },
+        "nn_smoother": {
+          "objective": -1.090506136417389,
+          "geometric_energy_contraction": 0.33604635203998023,
+          "gate_mean": 0.0
+        },
+        "learned_transfer": {
+          "objective": -1.0538672506809235,
+          "geometric_energy_contraction": 0.34858707497276703,
+          "gate_mean": 0.0
+        },
+        "combined": {
+          "objective": -1.0901485979557037,
+          "geometric_energy_contraction": 0.33616652134435093,
+          "gate_mean": 0.0
+        },
+        "adaptive": {
+          "objective": -1.0550676584243774,
+          "geometric_energy_contraction": 0.34742537620149044,
+          "gate_mean": 0.07125778496265411
+        }
+      },
+      "31": {
+        "classical": {
+          "objective": -1.429344356060028,
+          "geometric_energy_contraction": 0.2394658548903266,
+          "gate_mean": 0.0
+        },
+        "nn_smoother": {
+          "objective": -1.5242860317230225,
+          "geometric_energy_contraction": 0.21777646823268093,
+          "gate_mean": 0.0
+        },
+        "learned_transfer": {
+          "objective": -1.429295003414154,
+          "geometric_energy_contraction": 0.23947768023746685,
+          "gate_mean": 0.0
+        },
+        "combined": {
+          "objective": -1.524173378944397,
+          "geometric_energy_contraction": 0.21780100738404756,
+          "gate_mean": 0.0
+        },
+        "adaptive": {
+          "objective": -1.4352613687515259,
+          "geometric_energy_contraction": 0.23751944507658157,
+          "gate_mean": 0.07481289654970169
+        }
+      }
+    }
+  },
+  "training_root_sizes": [
+    7,
+    15
+  ],
+  "validation_root_sizes": [
+    15,
+    31
+  ],
+  "in_distribution_validation_sizes": [
+    15,
+    31
+  ],
+  "ood_validation_sizes": [],
+  "validation_aggregation": "geometric mean of full-V-cycle A-norm contractions",
+  "full_v_cycle_training": true,
+  "training_transfer_levels": {
+    "7": 1,
+    "15": 2
+  },
+  "minimum_training_transfer_levels": 1,
+  "smoother_coefficient_scale": 0.75,
+  "model_dtype": "float32",
+  "checkpoint_format_version": 3
+}

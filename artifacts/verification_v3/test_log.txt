@@ -1,0 +1,5 @@
+UTC 2026-08-25T11:19:01Z
+........................................                                 [100%]
+40 passed; exit status 0
+Extracted ZIP manifest: 54/54 OK
+Extracted ZIP tests: 40 passed; exit status 0

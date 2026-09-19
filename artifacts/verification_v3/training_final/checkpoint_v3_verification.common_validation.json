@@ -1,0 +1,93 @@
+{
+  "protocol": {
+    "metric": "geometric mean full-V-cycle A-norm contraction",
+    "smooth_error_steps": 1,
+    "cycles_per_sample": 2,
+    "validation_samples_per_problem": 1,
+    "strategy_source": "fixed",
+    "max_training_levels": null
+  },
+  "aggregate": {
+    "classical": {
+      "objective": -1.2525254637002945,
+      "geometric_energy_contraction": 0.2857821453815489,
+      "gate_mean": 0.0
+    },
+    "nn_smoother": {
+      "objective": -1.3153647184371948,
+      "geometric_energy_contraction": 0.26837641123245914,
+      "gate_mean": 0.0
+    },
+    "learned_transfer": {
+      "objective": -1.252496287226677,
+      "geometric_energy_contraction": 0.2857904808639465,
+      "gate_mean": 0.0
+    },
+    "combined": {
+      "objective": -1.3153034299612045,
+      "geometric_energy_contraction": 0.2683928552731148,
+      "gate_mean": 0.0
+    },
+    "adaptive": {
+      "objective": -1.255588710308075,
+      "geometric_energy_contraction": 0.2842844934762824,
+      "gate_mean": 0.07303540781140327
+    }
+  },
+  "by_grid": {
+    "15": {
+      "classical": {
+        "objective": -1.0541859567165375,
+        "geometric_energy_contraction": 0.3484759881269589,
+        "gate_mean": 0.0
+      },
+      "nn_smoother": {
+        "objective": -1.090506136417389,
+        "geometric_energy_contraction": 0.33604635203998023,
+        "gate_mean": 0.0
+      },
+      "learned_transfer": {
+        "objective": -1.0538672506809235,
+        "geometric_energy_contraction": 0.34858707497276703,
+        "gate_mean": 0.0
+      },
+      "combined": {
+        "objective": -1.0901485979557037,
+        "geometric_energy_contraction": 0.33616652134435093,
+        "gate_mean": 0.0
+      },
+      "adaptive": {
+        "objective": -1.0550676584243774,
+        "geometric_energy_contraction": 0.34742537620149044,
+        "gate_mean": 0.07125778496265411
+      }
+    },
+    "31": {
+      "classical": {
+        "objective": -1.429344356060028,
+        "geometric_energy_contraction": 0.2394658548903266,
+        "gate_mean": 0.0
+      },
+      "nn_smoother": {
+        "objective": -1.5242860317230225,
+        "geometric_energy_contraction": 0.21777646823268093,
+        "gate_mean": 0.0
+      },
+      "learned_transfer": {
+        "objective": -1.429295003414154,
+        "geometric_energy_contraction": 0.23947768023746685,
+        "gate_mean": 0.0
+      },
+      "combined": {
+        "objective": -1.524173378944397,
+        "geometric_energy_contraction": 0.21780100738404756,
+        "gate_mean": 0.0
+      },
+      "adaptive": {
+        "objective": -1.4352613687515259,
+        "geometric_energy_contraction": 0.23751944507658157,
+        "gate_mean": 0.07481289654970169
+      }
+    }
+  }
+}

@@ -90,6 +90,21 @@ class Components:
     def eval(self):
         for m in self.modules(): m.eval()
         return self
+    def frozen_inference_copy(self):
+        """Own an evaluation snapshot and cache weight hashes by tensor revision.
+
+        Training uses the original object. Never mutate snapshot weights via
+        ``.data``/external NumPy views; replace the snapshot after such edits.
+        Ordinary in-place torch updates are detected by version counters.
+        """
+        from copy import deepcopy
+        result=deepcopy(self).eval()
+        for module in result.modules():
+            for p in module.parameters():p.requires_grad_(False)
+            module._mg_frozen_inference=True
+            module_signature(module)
+        return result
+
     def generation_signature(self):
         from .research_runtime import expert_signature
         return expert_signature(self.smoother)+expert_signature(self.transfer)

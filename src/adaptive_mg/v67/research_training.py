@@ -27,7 +27,7 @@ from .research_transfer import make_graph_transfer, differentiable_transfer_cost
 from .research_controls import ControlledTransferCNN
 
 
-def transfer_feasibility(root, model, cfg):
+def transfer_feasibility(root, model, cfg, reference_root=None):
     """Exact detached runtime caps, with a separate differentiable repair term.
 
     Infeasible proposals may be optimized toward feasibility, but their task
@@ -66,10 +66,21 @@ def transfer_feasibility(root, model, cfg):
             reports.append(dict(level=level.index,**report))
         level=level.coarse
     complexity=nnz/max(root.raw_scipy.count_nonzero(),1)
-    if complexity>caps['max_operator_complexity']:
-        violations.append(dict(level='all',reason='aggregate_operator_complexity'))
+    from .research_transfer import hierarchy_complexity_report
+    if reference_root is None:
+        reference_root=make_graph(root.raw_scipy,root.shape,model,cfg,learned=False)
+    def counts(level):
+        result=[]
+        while level is not None:
+            result.append(level.raw_scipy.count_nonzero());level=level.coarse
+        return result
+    try:
+        aggregate=hierarchy_complexity_report(counts(root),counts(reference_root),caps)
+    except TransferComplexityError as error:
+        aggregate=error.report
+        violations.append(dict(level='all',reason=str(error)))
     # Weight the continuous repair signal by observed discrete budget excess.
-    severity=max([1.,complexity/caps['max_operator_complexity']]+[
+    severity=max([1.,aggregate.get('operator_complexity_ratio',1.)/caps.get('max_operator_complexity_ratio',1.15) if caps.get('complexity_reference')=='parent' else complexity/caps['max_operator_complexity']]+[
         max(r.get('p_ratio',1.)/caps['max_p_ratio'],r.get('ac_ratio',1.)/caps['max_ac_ratio']) for r in reports])
     penalty=torch.stack(penalties).mean()*severity if penalties and violations else zero
     return dict(feasible=not violations,violations=violations,levels=reports,
@@ -142,7 +153,7 @@ def full_cycle_objective(example, model, cfg, *, prefix=2, tail=1, teacher=None,
     if prefix<1 or tail<0:raise ValueError('At least one full learned V-cycle is required')
     learned=make_graph(example.a,(example.n,example.n),model,cfg,learned=True)
     classical=make_graph(example.a,(example.n,example.n),model,cfg,learned=False)
-    feasibility,repair=transfer_feasibility(learned,model,cfg)
+    feasibility,repair=transfer_feasibility(learned,model,cfg,classical)
     b=torch.tensor(example.b,dtype=torch.float64);x=torch.zeros_like(b)
     norm0=torch.linalg.vector_norm(b).clamp_min(1e-100)
     history=[]
@@ -167,7 +178,7 @@ def full_cycle_objective(example, model, cfg, *, prefix=2, tail=1, teacher=None,
     if teacher is not None and lambda_kd>0:
         with torch.no_grad():
             target=make_graph(example.a,(example.n,example.n),teacher,cfg,learned=True)
-            teacher_feasibility,_=transfer_feasibility(target,teacher,cfg)
+            teacher_feasibility,_=transfer_feasibility(target,teacher,cfg,classical)
         if teacher_feasibility['feasible']:
             kd=distillation_loss(learned,target,cfg.branch);kd_status='applied'
         else:kd_status='teacher_proposal_infeasible_on_training_operator'

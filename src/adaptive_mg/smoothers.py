@@ -36,13 +36,28 @@ class _LineBlock:
 
 
 @dataclass
+class _ZebraColour:
+    """All lines of one zebra colour, solved as one block-diagonal system."""
+
+    indices: np.ndarray
+    solve: object
+    columns: sp.csr_matrix
+    block_nnz: int
+    solve_work: float
+
+
+@dataclass
 class LineSmootherCache:
     a: sp.csr_matrix
     shape: int | GridShape
     blocks: dict[str, list[_LineBlock]] = field(default_factory=dict)
+    # direction -> [even colour, odd colour], or None when lines of one colour
+    # are coupled (then the exact sequential per-line sweep is kept).
+    zebra: dict[str, list[_ZebraColour | None] | None] = field(default_factory=dict)
     chebyshev_lambda_max: float | None = None
     build_seconds: float = 0.0
     factorization_count: int = 0
+    line_blocks_factorized: int = 0
 
     def __post_init__(self) -> None:
         self.shape = as_shape(self.shape)
@@ -90,7 +105,67 @@ class LineSmootherCache:
         self.blocks[direction] = result
         self.build_seconds += perf_counter() - build_start
         self.factorization_count += len(result)
+        self.line_blocks_factorized += len(result)
         return result
+
+    def zebra_batches(self, direction: LineDirection) -> list[_ZebraColour | None] | None:
+        """Batched zebra colours, exact whenever same-colour lines are uncoupled.
+
+        The sequential sweep visits even lines, then odd lines, and updates the
+        residual after every line. If no line couples to another line of the
+        same colour (x/y lines of any 9-point operator; +45-degree lines of the
+        7-point P1 operator), solving one colour at once is the same operator up
+        to floating-point rounding, at O(N) cost instead of one Python-level
+        SuperLU call and one full-length residual update per line. Wider
+        Galerkin stencils return None and keep the sequential sweep.
+        """
+        if direction in self.zebra:
+            return self.zebra[direction]
+        build_start = perf_counter()
+        lines = self._line_sets(direction)
+        order = _zebra_order(len(lines), False)
+        half = (len(lines) + 1) // 2
+        line_id = np.full(self.a.shape[0], -1, dtype=np.int64)
+        for k, indices in enumerate(lines):
+            line_id[indices] = k
+        # Prove both colour partitions first. Do not factor an even partition
+        # only to discard it when the odd partition has same-colour coupling.
+        partitions = []
+        for group in (order[:half], order[half:]):
+            if not group:
+                partitions.append(None)
+                continue
+            indices = np.concatenate([lines[k] for k in group])
+            sub = self.a[indices][:, indices].tocoo()
+            same_line = line_id[indices[sub.row]] == line_id[indices[sub.col]]
+            if np.any(sub.data[~same_line] != 0.0):
+                self.zebra[direction] = None
+                self.build_seconds += perf_counter() - build_start
+                return None
+            block = sp.csc_matrix((sub.data[same_line],
+                                   (sub.row[same_line], sub.col[same_line])), shape=sub.shape)
+            counts = np.bincount(line_id[indices[sub.row[same_line]]], minlength=len(lines))
+            solve_work = sum(max(2.0 * counts[k], 2.0 * len(lines[k])) for k in group)
+            partitions.append((indices, block, float(solve_work), len(group)))
+        result = []
+        for part in partitions:
+            if part is None:
+                result.append(None)
+                continue
+            indices, block, solve_work, line_count = part
+            lu = spla.splu(block, permc_spec="NATURAL")
+            self.factorization_count += 1
+            self.line_blocks_factorized += line_count
+            result.append(_ZebraColour(indices, lu.solve, self.a[:, indices].tocsr(),
+                                       block.nnz, solve_work))
+        self.zebra[direction] = result
+        self.build_seconds += perf_counter() - build_start
+        return result
+
+    def prepare(self, direction: LineDirection) -> None:
+        """Eager setup: batched colours when exact, otherwise per-line factors."""
+        if self.zebra_batches(direction) is None:
+            self.get(direction)
 
     def spectral_upper_bound(self) -> float:
         """Gershgorin upper bound for eigenvalues of D^-1 A."""
@@ -127,6 +202,35 @@ def _directional(
             m = block.indices.size
             work.add_sparse_flops(
                 2.0 * block.columns.nnz + max(2.0 * block.block_nnz, 2.0 * m),
+                safety=safety,
+            )
+    return correction, current
+
+
+def _line_sweep(
+    correction: np.ndarray,
+    current: np.ndarray,
+    cache: LineSmootherCache,
+    direction: LineDirection,
+    *,
+    reverse: bool,
+    work: WorkRecorder | None,
+    safety: bool,
+) -> tuple[np.ndarray, np.ndarray]:
+    colours = cache.zebra_batches(direction)
+    if colours is None:
+        return _directional(
+            correction, current, cache.get(direction), reverse=reverse, work=work, safety=safety
+        )
+    for colour in (reversed(colours) if reverse else colours):
+        if colour is None:
+            continue
+        increment = np.asarray(colour.solve(current[colour.indices]), dtype=np.float64)
+        correction[colour.indices] += increment
+        current -= np.asarray(colour.columns @ increment, dtype=np.float64).reshape(-1)
+        if work is not None:
+            work.add_sparse_flops(
+                2.0 * colour.columns.nnz + colour.solve_work,
                 safety=safety,
             )
     return correction, current
@@ -210,35 +314,18 @@ def classical_smoothing_correction(
             work=work,
             safety=safety,
         )
+    directions = {
+        "line_x": ("x",),
+        "line_y": ("y",),
+        "line_alt": ("y", "x") if reverse else ("x", "y"),
+        "line_diag45": ("diag45",),
+    }.get(smoother)
+    if directions is None:
+        raise ValueError(f"unknown smoother: {smoother}")
     correction = np.zeros_like(residual)
     current = residual.copy()
-    if smoother == "line_x":
-        return _directional(
-            correction, current, cache.get("x"), reverse=reverse, work=work, safety=safety
-        )[0]
-    if smoother == "line_y":
-        return _directional(
-            correction, current, cache.get("y"), reverse=reverse, work=work, safety=safety
-        )[0]
-    if smoother == "line_alt":
-        directions = ("y", "x") if reverse else ("x", "y")
-        for direction in directions:
-            correction, current = _directional(
-                correction,
-                current,
-                cache.get(direction),  # type: ignore[arg-type]
-                reverse=reverse,
-                work=work,
-                safety=safety,
-            )
-        return correction
-    if smoother == "line_diag45":
-        return _directional(
-            correction,
-            current,
-            cache.get("diag45"),
-            reverse=reverse,
-            work=work,
-            safety=safety,
-        )[0]
-    raise ValueError(f"unknown smoother: {smoother}")
+    for direction in directions:
+        correction, current = _line_sweep(
+            correction, current, cache, direction, reverse=reverse, work=work, safety=safety  # type: ignore[arg-type]
+        )
+    return correction

@@ -170,8 +170,8 @@ class GraphTransferNet(nn.Module):
         allowed = {0} if architecture == "edge_mlp" else range(3, 7) if teacher else {1, 2}
         if layers not in allowed:
             raise ValueError("edge_mlp needs 0 layers, Student GNN 1-2, Teacher GNN 3-6")
-        if support not in {"standard", "expanded"}:
-            raise ValueError("Support must be standard (16) or expanded (36)")
+        if support not in {"standard", "expanded", "support_preserving"}:
+            raise ValueError("Support must be standard, expanded or support_preserving")
         if not np.isfinite(max_delta) or not 0 < max_delta <= 2:
             raise ValueError("max_delta must be finite in (0,2]")
         self.architecture = architecture
@@ -188,7 +188,7 @@ class GraphTransferNet(nn.Module):
 
     def architecture_config(self):
         return dict(architecture=self.architecture, width=self.width, layers=self.layers,
-                    max_delta=self.max_delta, support=self.support, complexity_caps=dict(self.complexity_caps), schema=1, training_only=self.training_only)
+                    max_delta=self.max_delta, support=self.support, complexity_caps=dict(self.complexity_caps), schema=2 if self.support=="support_preserving" else 1, training_only=self.training_only)
 
     def forward(self, *args, **kwargs):
         raise TypeError("GraphTransferNet requires forward_graph(A, pattern, baseline); image-only input loses sparse connectivity")
@@ -216,9 +216,9 @@ class GraphTransferNet(nn.Module):
 
 
 def make_graph_transfer(architecture="small_gnn", **kwargs):
-    schema = kwargs.pop("schema", 1)
+    schema = kwargs.pop("schema", 2 if kwargs.get("support")=="support_preserving" else 1)
     training_only = kwargs.pop("training_only", architecture == "gnn_teacher")
-    if schema != 1 or bool(training_only) != (architecture == "gnn_teacher"):
+    if schema != (2 if kwargs.get("support")=="support_preserving" else 1) or bool(training_only) != (architecture == "gnn_teacher"):
         raise ValueError("Incompatible graph transfer architecture metadata")
     return GraphTransferNet(architecture, **kwargs)
 
@@ -269,6 +269,10 @@ def project_transfer_weights(module, pattern, delta, baseline):
     """
     if isinstance(baseline, np.ndarray):
         baseline = np.array(baseline, copy=True)
+    if getattr(module,'support','standard')=='support_preserving':
+        # Mask the softmax domain itself. Invalid candidate logits have zero
+        # gradient and can never activate edges outside the parent support.
+        return weights_from_deltas_torch(pattern,delta,baseline,support=baseline!=0)
     weights = weights_from_deltas_torch(pattern, delta, baseline)
     limit = int(getattr(module, "complexity_caps", {"max_row_nnz": 16})["max_row_nnz"])
     if limit >= pattern.n_candidates:
@@ -318,11 +322,20 @@ class TransferComplexityCaps:
     max_row_nnz: int = 16
     max_p_ratio: float = 4.0
     max_ac_ratio: float = 3.0
-    max_operator_complexity: float = 3.0
+    max_operator_complexity: float = 3.0  # legacy absolute policy only
+    complexity_reference: str = 'absolute'  # 'parent' for the primary safe P
+    max_operator_complexity_ratio: float = 1.15
+    hard_max_operator_complexity: float | None = None
 
     def __post_init__(self):
         if isinstance(self.max_row_nnz, bool) or not isinstance(self.max_row_nnz, int) or self.max_row_nnz <= 0 or not all(np.isfinite(x) and x >= 1 for x in (self.max_p_ratio, self.max_ac_ratio, self.max_operator_complexity)):
             raise ValueError("Invalid transfer complexity caps")
+        if self.complexity_reference not in {'absolute','parent'}:
+            raise ValueError('Invalid complexity reference')
+        if (not np.isfinite(self.max_operator_complexity_ratio) or self.max_operator_complexity_ratio < 1
+                or (self.hard_max_operator_complexity is not None and
+                    (not np.isfinite(self.hard_max_operator_complexity) or self.hard_max_operator_complexity < 1))):
+            raise ValueError('Invalid relative or hard complexity caps')
 
 
 class TransferComplexityError(ValueError):
@@ -359,8 +372,18 @@ def enforce_transfer_complexity(a, p, ac, *, baseline_p=None, baseline_ac=None, 
     reasons = []
     if report["p_row_nnz_max"] > caps.max_row_nnz:
         reasons.append("max_row_nnz")
-    if report["operator_complexity"] > caps.max_operator_complexity:
-        reasons.append("max_operator_complexity")
+    if caps.complexity_reference == 'parent':
+        if baseline_ac is None:
+            raise ValueError('parent-relative caps require baseline_ac')
+        base_complexity = (a.nnz + _actual_csr(baseline_ac).nnz)/max(a.nnz,1)
+        report['parent_operator_complexity'] = base_complexity
+        report['operator_complexity_ratio'] = report['operator_complexity']/base_complexity
+        if report['operator_complexity_ratio'] > caps.max_operator_complexity_ratio:
+            reasons.append('max_operator_complexity_ratio')
+    elif report['operator_complexity'] > caps.max_operator_complexity:
+        reasons.append('max_operator_complexity')
+    if caps.hard_max_operator_complexity is not None and report['operator_complexity'] > caps.hard_max_operator_complexity:
+        reasons.append('hard_max_operator_complexity')
     for key, candidate, baseline, limit in (("p_ratio", p, baseline_p, caps.max_p_ratio), ("ac_ratio", ac, baseline_ac, caps.max_ac_ratio)):
         if baseline is not None:
             reference = _actual_csr(baseline)
@@ -371,6 +394,61 @@ def enforce_transfer_complexity(a, p, ac, *, baseline_p=None, baseline_ac=None, 
                 reasons.append("max_" + key)
     if reasons:
         raise TransferComplexityError(reasons, report)
+    return report
+
+
+def hierarchy_complexity_report(candidate_counts, parent_counts, caps):
+    """Same aggregate cap implementation for deployment and differentiable training."""
+    caps = TransferComplexityCaps(**caps) if isinstance(caps, dict) else caps
+    candidate = sum(candidate_counts)/max(candidate_counts[0], 1)
+    parent = sum(parent_counts)/max(parent_counts[0], 1)
+    ratio = candidate/parent
+    limit = caps.max_operator_complexity_ratio if caps.complexity_reference == 'parent' else caps.max_operator_complexity
+    value = ratio if caps.complexity_reference == 'parent' else candidate
+    reasons = []
+    if value > limit:
+        reasons.append('aggregate_operator_complexity_ratio' if caps.complexity_reference == 'parent' else 'aggregate_operator_complexity')
+    if caps.hard_max_operator_complexity is not None and candidate > caps.hard_max_operator_complexity:
+        reasons.append('hard_aggregate_operator_complexity')
+    report = dict(operator_complexity=candidate, parent_operator_complexity=parent,
+                  operator_complexity_ratio=ratio, limit=limit,
+                  reference=caps.complexity_reference, feasible=not reasons, violations=reasons)
+    if reasons:
+        raise TransferComplexityError(reasons, report)
+    return report
+
+
+def precheck_transfer_support(a, pattern, support, *, baseline_p, caps):
+    """Check bounded row support before numeric Galerkin (or before NN for fixed support).
+
+    Boolean SpGEMM estimates a *structural upper bound*, not exact numerical nnz.
+    Parent-relative structural ratios use the parent's structural bound too;
+    numerical cancellation is checked separately after the actual Galerkin.
+    """
+    from ..transfer import scipy_prolongation_from_weights
+    caps = TransferComplexityCaps(**caps) if isinstance(caps, dict) else caps
+    support = np.asarray(support, bool) & (pattern.columns >= 0)
+    rows = support.sum(1)
+    report = dict(p_row_nnz_max=int(rows.max(initial=0)), p_nnz=int(rows.sum()),
+                  precheck=True, numeric_galerkin_executed=False)
+    if report['p_row_nnz_max'] > caps.max_row_nnz:
+        raise TransferComplexityError(['precheck_max_row_nnz'], report)
+    base = _actual_csr(baseline_p)
+    if report['p_nnz'] > caps.max_p_ratio*max(base.nnz,1):
+        raise TransferComplexityError(['precheck_max_p_ratio'], report)
+    p = scipy_prolongation_from_weights(pattern, support.astype(float)).astype(bool)
+    ab = _actual_csr(a).astype(bool)
+    # Positive boolean arithmetic cannot cancel or overflow on long sparse paths.
+    structural = (p.T @ ab @ p).tocsr()
+    baseb = base.astype(bool)
+    same = p.shape == baseb.shape and (p != baseb).nnz == 0
+    parent_bound = structural.nnz if same else (baseb.T @ ab @ baseb).nnz
+    report.update(symbolic_ac_nnz=structural.nnz, parent_symbolic_ac_nnz=parent_bound,
+                  symbolic_ratio=structural.nnz/max(parent_bound,1))
+    if structural.nnz > caps.max_ac_ratio*max(parent_bound,1):
+        raise TransferComplexityError(['precheck_symbolic_ac_ratio'], report)
+    if caps.hard_max_operator_complexity is not None and (ab.nnz+structural.nnz)/max(ab.nnz,1)>caps.hard_max_operator_complexity:
+        raise TransferComplexityError(['precheck_hard_structural_bound'], report)
     return report
 
 

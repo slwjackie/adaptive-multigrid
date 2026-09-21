@@ -6,8 +6,8 @@ import numpy as np
 import scipy.sparse.linalg as sla
 import torch
 from ..hierarchy import (WorkStats,FixedLevel,StencilBank,build_fixed_hierarchy,
-    baseline_kwargs,stencil_from_coefficients,matvec,apply_transfer,classical_step,classical_cycle)
-from ..smoothers import LineSmootherCache,_zebra_order
+    baseline_kwargs,stencil_from_coefficients,stencil_data,ensure_features,matvec,apply_transfer,classical_step,classical_cycle)
+from ..smoothers import LineSmootherCache,_zebra_order,_line_sweep
 from ..grid import terminal,next_shape
 from ..transfer import (matrix_feature_array,baseline_weights,build_transfer_pattern,
     weights_from_deltas_torch,scipy_prolongation_from_weights,galerkin_coarse_operator,
@@ -17,6 +17,11 @@ from .native import apply_rows
 
 @dataclass
 class Stats(WorkStats):
+    inference_model_preparations: int = 0
+    operator_feature_builds: int = 0
+    operator_feature_seconds: float = 0.
+    transfer_precheck_rejections: int = 0
+    transfer_identity_levels: int = 0
     smoother_operator_cache_hits: int = 0
     smoother_bank_builds: int = 0
     transfer_bank_builds: int = 0
@@ -95,8 +100,10 @@ class CachedGenerationFailure(RuntimeError):
 def selected_level(index,cfg):
     return cfg.mg.nn_levels==-1 or index<cfg.mg.nn_levels
 
-def resolve_device(cfg):
+def resolve_device(cfg, *, cells=None):
     d=cfg.inference_device
+    if d=='auto' and cells is not None and cells < cfg.auto_device_min_cells:
+        d='cpu'
     if d=='auto': d='cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu')
     if d=='cuda' and not torch.cuda.is_available(): raise ValueError('CUDA unavailable')
     if d=='mps' and not torch.backends.mps.is_available(): raise ValueError('MPS unavailable')
@@ -115,10 +122,19 @@ def _inference(module,features,device,dtype,fn,stats):
     # Generation must not alter checkpoint weights/dtype or invalidate a policy
     # merely by preparing a bank. Conversion is charged to this setup.
     tensors=tuple(module.parameters())+tuple(module.buffers())
-    if any(t.device!=device or (t.is_floating_point() and t.dtype!=dtype) for t in tensors):
-        module=deepcopy(module).to(device=device,dtype=dtype)
-    module.eval()
-    f=torch.as_tensor(features,dtype=dtype,device=device).unsqueeze(0)
+    key=(id(module),str(device),str(dtype),module.training,
+         tuple((id(t),t._version,str(t.device),str(t.dtype)) for t in tensors))
+    sessions=getattr(stats,'_inference_sessions',None)
+    if sessions is None:
+        sessions={};stats._inference_sessions=sessions
+    if key not in sessions:
+        converted=module
+        if module.training or any(t.device!=device or (t.is_floating_point() and t.dtype!=dtype) for t in tensors):
+            converted=deepcopy(module).to(device=device,dtype=dtype).eval()
+            stats.inference_model_preparations+=1
+        sessions[key]=converted
+    module=sessions[key]
+    f=None if features is None else torch.as_tensor(features,dtype=dtype,device=device).unsqueeze(0)
     synchronize(device)
     stats.cpu_device_transfer_seconds+=perf_counter()-start
     start=perf_counter()
@@ -127,25 +143,41 @@ def _inference(module,features,device,dtype,fn,stats):
         synchronize(device)
     finally:stats.operator_generation_seconds+=perf_counter()-start
     start=perf_counter()
-    def cp(t): return t.detach().cpu().double().numpy()
+    def cp(t):
+        t=t.detach().cpu()
+        return (t.double() if t.is_floating_point() else t).numpy()
     result=tuple(cp(v) for v in values) if isinstance(values,tuple) else cp(values)
     synchronize(device)
     stats.cpu_device_transfer_seconds+=perf_counter()-start
     return result
 
 
+def _features(level, stats):
+    start=perf_counter();missing=level.features is None
+    owner=getattr(level,'_feature_owner',level)
+    missing=owner.features is None
+    result=ensure_features(owner)
+    level.features=result
+    stats.operator_feature_builds+=int(missing)
+    stats.operator_feature_seconds+=perf_counter()-start
+    return result
+
+
 def generated_stencil(level,components,cfg,stats,device,dtype):
     stats.smoother_nn_calls+=1;stats.neural_setup_calls+=1
-    d,g=_inference(components.smoother,matrix_feature_array(level.a,level.shape),device,dtype,
+    d,g=_inference(components.smoother,_features(level,stats),device,dtype,
                    lambda m,f:m.direction_and_gain(f),stats)
     d=d[0,:1];g=g[0,:1]*cfg.mg.smoother_gain_multiplier
     if not np.isfinite(d).all() or not np.isfinite(g).all(): raise ValueError('nonfinite generated smoother')
-    csr=stencil_from_coefficients(d[0],float(g[0]),level.diagonal,level.shape)
+    factory=lambda:stencil_from_coefficients(d[0],float(g[0]),level.diagonal,level.shape)
     native=None
     if cfg.mg.stencil_backend=='native' or (cfg.mg.stencil_backend=='auto' and level.a.shape[0]>=cfg.mg.native_min_cells and native_available()):
         native=NativeStencil.from_directions(d,diagonal=level.diagonal,gains=g,
             threads=cfg.mg.native_threads,parallel_min=cfg.mg.native_parallel_min)
-    return StencilBank(csr,native)
+    if native is not None:
+        nnz=np.count_nonzero(stencil_data(d[0],float(g[0]),level.diagonal,level.shape))
+        return StencilBank(None,native,csr_factory=factory,work_nnz=nnz)
+    return StencilBank(factory())
 
 
 def generated_p(level,components,cfg,stats,device,dtype):
@@ -155,13 +187,17 @@ def generated_p(level,components,cfg,stats,device,dtype):
         base=torch.tensor(level.base_weights,device=device,dtype=dtype)
         if hasattr(m,'complexity_caps'):
             from .research_transfer import project_transfer_weights
-            learned=project_transfer_weights(m,level.pattern,delta,base)
+            learned=project_transfer_weights(m,level.pattern,delta,level.base_weights)
         else:learned=weights_from_deltas_torch(level.pattern,delta,base)
         # Cast a learned DELTA back to FP64. Zero head preserves baseline exactly.
-        return (learned-base,learned!=0) if hasattr(m,'complexity_caps') else learned-base
-    delta=_inference(components.transfer,matrix_feature_array(level.a,level.shape),device,dtype,evaluate,stats)
+        mask=torch.as_tensor(level.base_weights!=0,device=device) if getattr(m,'support','standard')=='support_preserving' else learned!=0
+        return (learned-base,mask) if hasattr(m,'complexity_caps') else learned-base
+    delta=_inference(components.transfer,None if hasattr(components.transfer,'forward_graph') else _features(level,stats),device,dtype,evaluate,stats)
     support=None
     if isinstance(delta,tuple):delta,support=delta;support=support.astype(bool)
+    if not np.any(delta) and getattr(level,'_classical_p',None) is not None:
+        stats.transfer_identity_levels+=1
+        return level._classical_p
     weights=level.base_weights+delta
     valid=level.pattern.columns>=0
     if support is not None:valid=valid & support
@@ -178,11 +214,14 @@ def generated_p(level,components,cfg,stats,device,dtype):
 def prepare_transfer_bank(base,components,cfg,stats):
     """Construct P/R/Ac only. Factors are formed from each actual learned Ac."""
     start=perf_counter();gen0=stats.operator_generation_seconds;copy0=stats.cpu_device_transfer_seconds
-    device=resolve_device(cfg);dtype=torch.float32 if cfg.inference_dtype=='float32' else torch.float64
+    device=resolve_device(cfg,cells=base.a.shape[0]);dtype=torch.float32 if cfg.inference_dtype=='float32' else torch.float64
     def build(a,shape,index,base_level):
         same=(a is base_level.a) if base_level is not None else False
         level=FixedLevel(a,shape,index,base.strategy,np.maximum(np.abs(a.diagonal()),1e-14))
         level.learned_transfer=False
+        if same:
+            level.features=base_level.features
+            level._feature_owner=base_level
         if terminal(shape,cfg.mg.coarsest_n):
             if same: level.lu=base_level.lu
             else: level.lu=sla.splu(a.tocsc());stats.learned_factorizations+=1
@@ -190,24 +229,46 @@ def prepare_transfer_bank(base,components,cfg,stats):
         shape_c=next_shape(shape,base.strategy.coarsening,cfg.mg.coarsest_n,level_index=index)
         level.pattern=base_level.pattern if same else build_transfer_pattern(shape,shape_c)
         level.base_weights=base_level.base_weights if same else baseline_weights(a,shape,base.strategy.transfer,coarse=shape_c,**baseline_kwargs(cfg.mg))
-        classical_p=scipy_prolongation_from_weights(level.pattern,level.base_weights) if hasattr(components.transfer,'complexity_caps') else None
+        classical_p=(base_level.p if same else scipy_prolongation_from_weights(level.pattern,level.base_weights)) if hasattr(components.transfer,'complexity_caps') else None
+        level._classical_p=classical_p
         level.cache=base_level.cache if same else LineSmootherCache(a,shape)
         if not same:
             for direction in {'line_x':('x',),'line_y':('y',),'line_alt':('x','y'),'line_diag45':('diag45',)}.get(base.strategy.smoother,()):
-                level.cache.get(direction)
+                level.cache.prepare(direction)
             stats.learned_factorizations+=level.cache.factorization_count
         if selected_level(index,cfg):
             if hasattr(components.transfer,'complexity_caps'):
                 from .research_transfer import transfer_pattern_for_model
                 level.pattern,level.base_weights=transfer_pattern_for_model(level.pattern,components.transfer,level.base_weights)
+            constrained=hasattr(components.transfer,'complexity_caps')
+            preserving=getattr(components.transfer,'support','standard')=='support_preserving'
+            if constrained and preserving:
+                from .research_transfer import precheck_transfer_support,TransferComplexityError
+                try:
+                    level.transfer_precheck=precheck_transfer_support(a,level.pattern,level.base_weights!=0,
+                        baseline_p=classical_p,caps=components.transfer.complexity_caps)
+                except TransferComplexityError:
+                    stats.transfer_precheck_rejections+=1
+                    raise
             level.p=generated_p(level,components,cfg,stats,device,dtype)
             level.learned_transfer=True
-            ac=galerkin_coarse_operator(a,level.p)
-            if hasattr(components.transfer,'complexity_caps'):
+            if constrained and not preserving:
+                from .research_transfer import precheck_transfer_support,TransferComplexityError
+                # Expanded support is known only after projection/inference.
+                from ..transfer import weights_from_sparse_matrix
+                support=weights_from_sparse_matrix(level.pattern,level.p)!=0
+                try:
+                    level.transfer_precheck=precheck_transfer_support(a,level.pattern,support,
+                        baseline_p=classical_p,caps=components.transfer.complexity_caps)
+                except TransferComplexityError:
+                    stats.transfer_precheck_rejections+=1
+                    raise
+            ac=base_level.coarse.a if same and level.p is classical_p else galerkin_coarse_operator(a,level.p)
+            if constrained:
                 from .research_transfer import enforce_transfer_complexity
+                reference_ac=base_level.coarse.a if same else galerkin_coarse_operator(a,classical_p)
                 level.transfer_complexity_report=enforce_transfer_complexity(a,level.p,ac,
-                    baseline_p=classical_p,baseline_ac=galerkin_coarse_operator(a,classical_p),
-                    caps=components.transfer.complexity_caps)
+                    baseline_p=classical_p,baseline_ac=reference_ac,caps=components.transfer.complexity_caps)
         elif same:
             level.p=base_level.p;ac=base_level.coarse.a
         else:
@@ -225,10 +286,14 @@ def prepare_transfer_bank(base,components,cfg,stats):
                 nnz_a+=item.a.count_nonzero();nnz_p+=item.p.count_nonzero() if item.p is not None else 0
                 item=item.coarse
             complexity=nnz_a/max(root.a.count_nonzero(),1)
-            cap=components.transfer.complexity_caps['max_operator_complexity']
-            if complexity>cap:
-                raise TransferComplexityError(['aggregate_operator_complexity'],dict(operator_complexity=complexity,limit=cap))
-            root.research_complexity=dict(operator_complexity=complexity,transfer_complexity=nnz_p/root.a.shape[0])
+            from .research_transfer import hierarchy_complexity_report
+            def counts(item):
+                values=[]
+                while item is not None:
+                    values.append(item.a.count_nonzero());item=item.coarse
+                return values
+            report=hierarchy_complexity_report(counts(root),counts(base),components.transfer.complexity_caps)
+            root.research_complexity=dict(**report,transfer_complexity=nnz_p/root.a.shape[0])
         stats.transfer_bank_builds+=1
         return root
     finally:
@@ -238,7 +303,7 @@ def prepare_transfer_bank(base,components,cfg,stats):
 
 def prepare_smoother_bank(base,components,cfg,stats,operator_cache=None):
     """Overlay stencils on an immutable actual hierarchy; never generate P."""
-    start=perf_counter();device=resolve_device(cfg)
+    start=perf_counter();device=resolve_device(cfg,cells=base.a.shape[0])
     dtype=torch.float32 if cfg.inference_dtype=='float32' else torch.float64
     from ..provenance import operator_digest
     generation_key=(components.expert_signature('smoother'),str(device),str(dtype),
@@ -249,7 +314,9 @@ def prepare_smoother_bank(base,components,cfg,stats,operator_cache=None):
         if level.coarse is not None:
             result.coarse=build(level.coarse)
             if selected_level(level.index,cfg) and cfg.mg.smoother_gain_multiplier>0 and (cfg.replace_pre or cfg.replace_post):
-                key=(operator_digest(level.a),level.shape,generation_key)
+                if not hasattr(level,'_operator_digest'):
+                    level._operator_digest=operator_digest(level.a)
+                key=(level._operator_digest,level.shape,generation_key)
                 if operator_cache is not None and key in operator_cache:
                     cached=operator_cache[key]
                     if isinstance(cached,GenerationFailure):cached.reject_cached(stats,'smoother')
@@ -328,7 +395,15 @@ def replacement_step(level,r,mask,cfg,stats,reverse=False):
                 'line_alt':('y','x') if reverse else ('x','y')}[smoother]
     d=np.zeros_like(r);current=r.copy()
     for direction in directions:
+        if not any(mask[rows].all() for rows in level.cache._line_sets(direction)):
+            d,current=_line_sweep(d,current,level.cache,direction,reverse=reverse,work=stats,safety=False)
+            continue
+        before=level.cache.factorization_count;bt=perf_counter()
         blocks=level.cache.get(direction)
+        created=level.cache.factorization_count-before
+        if created:
+            stats.lazy_line_factorizations+=created
+            stats.lazy_line_setup_seconds+=perf_counter()-bt
         for j in _zebra_order(len(blocks),reverse):
             block=blocks[j];rows=block.indices
             if mask[rows].all():
@@ -351,9 +426,12 @@ def hybrid_cycle(level,x,b,cfg,stats,spatial,cycle,refresh=False,root_gate=None)
     stats.level_visits+=1
     enabled=cfg.use_smoother and level.neural_stencil is not None
     if enabled:
-        residual=b-matvec(level.a,x,stats)
-        if root_gate is None:stats.spatial_gate_calls+=1
-        gate=root_gate if root_gate is not None else spatial.gate(level,residual,cycle,stats,refresh)
+        if root_gate is not None:
+            gate=root_gate
+        else:
+            residual=b-matvec(level.a,x,stats)
+            stats.spatial_gate_calls+=1
+            gate=spatial.gate(level,residual,cycle,stats,refresh)
     else: gate=np.zeros_like(b,dtype=bool)
     for i in range(cfg.mg.pre_steps):
         r=b-matvec(level.a,x,stats)

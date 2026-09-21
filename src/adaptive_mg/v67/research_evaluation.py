@@ -248,7 +248,7 @@ def measured_research(example, arm, cfg, rules, *, regime='cold', rhs_count=1):
         setup_failures=counters.get('setup_failures', 0),
         fallback_count=counters.get('fallback_cycles', 0),
         fallback_count_scope='actual classical recovery/gate-closed fallback cycles; setup failures and rollback events reported separately',
-        inference_device=str(resolve_device(cfg)) if arm.get('model') is not None or arm.get('policy') is not None else None,
+        inference_device=str(resolve_device(cfg,cells=example.a.shape[0])) if arm.get('model') is not None or arm.get('policy') is not None else None,
         inference_dtype=cfg.inference_dtype, numerical_dtype='float64',
         expected_rhs_mode=arm.get('expected_rhs_mode', 'actual'),
         expected_rhs_hint=1 if arm.get('expected_rhs_mode') == 'blind' else rhs_count,

@@ -240,6 +240,16 @@ def scipy_prolongation_from_weights(pattern: TransferPattern, weights: np.ndarra
     return p
 
 
+def weights_from_sparse_matrix(pattern, p):
+    """Read only bounded candidate slots from a sparse transfer operator."""
+    columns=pattern.columns
+    rows=np.broadcast_to(np.arange(columns.shape[0])[:,None],columns.shape)
+    valid=columns>=0
+    result=np.zeros(columns.shape,dtype=np.float64)
+    result[valid]=np.asarray(p.tocsr()[rows[valid],columns[valid]]).ravel()
+    return result
+
+
 def classical_prolongation(
     fine: int | GridShape,
     coarse: GridShape | None = None,
@@ -505,6 +515,7 @@ def weights_from_deltas_torch(
     deltas: torch.Tensor,
     baseline: torch.Tensor | np.ndarray | None = None,
     gate: torch.Tensor | None = None,
+    *, support: torch.Tensor | np.ndarray | None = None,
 ) -> torch.Tensor:
     nx, ny = pattern.fine_shape
     k = pattern.n_candidates
@@ -522,6 +533,10 @@ def weights_from_deltas_torch(
     valid = torch.as_tensor(
         np.array(pattern.columns >= 0, copy=True), dtype=torch.bool, device=device
     )
+    if support is not None:
+        allowed=torch.as_tensor(support,dtype=torch.bool,device=device)
+        if allowed.shape!=valid.shape:raise ValueError('support shape mismatch')
+        valid=valid & allowed
     logits = deltas.permute(0, 2, 3, 1).reshape(-1, k)
     target_sum = base.sum(dim=1, keepdim=True)
     count = valid.sum(dim=1, keepdim=True).clamp(min=1)

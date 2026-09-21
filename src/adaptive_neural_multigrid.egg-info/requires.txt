@@ -1,7 +1,0 @@
-numpy>=1.24
-scipy>=1.10
-torch>=2.10
-threadpoolctl>=3.1
-
-[dev]
-pytest>=8.0

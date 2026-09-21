@@ -9,7 +9,8 @@ import numpy as np
 import scipy
 import scipy.sparse as sp
 import torch
-from threadpoolctl import threadpool_info
+from threadpoolctl import threadpool_info, ThreadpoolController
+from functools import lru_cache
 
 
 def operator_digest(a: sp.spmatrix, *, scale_invariant=False) -> str:
@@ -29,6 +30,14 @@ def operator_digest(a: sp.spmatrix, *, scale_invariant=False) -> str:
 def module_signature(module) -> str:
     if module is None:
         return "none"
+    tensors=tuple(module.parameters())+tuple(module.buffers())
+    frozen=bool(getattr(module,'_mg_frozen_inference',False) and not module.training
+                and not any(t.requires_grad for t in tensors))
+    token=(tuple((id(t),t._version,str(t.device),str(t.dtype),tuple(t.shape)) for t in tensors),
+           tuple((k,repr(getattr(module,k))) for k in ('body_kind','basis_count','coefficient_scale',
+                 'split_direction_gain','direction_epsilon','k_values') if hasattr(module,k)))
+    if frozen and getattr(module,'_mg_signature_cache',(None,None))[0]==token:
+        return module._mg_signature_cache[1]
     h = hashlib.sha256(type(module).__qualname__.encode())
     attrs = {k: getattr(module, k) for k in ("body_kind", "basis_count", "coefficient_scale", "split_direction_gain", "direction_epsilon", "k_values") if hasattr(module, k)}
     h.update(json.dumps(attrs, sort_keys=True).encode())
@@ -36,10 +45,13 @@ def module_signature(module) -> str:
         value = v.detach().cpu().contiguous()
         h.update(k.encode()); h.update(str(value.dtype).encode()); h.update(repr(tuple(value.shape)).encode())
         h.update(value.numpy().tobytes())
-    return h.hexdigest()
+    result=h.hexdigest()
+    if frozen:module._mg_signature_cache=(token,result)
+    return result
 
 
-def hardware_environment():
+@lru_cache(maxsize=1)
+def _hardware_static():
     cpu = platform.processor()
     try:
         for line in Path('/proc/cpuinfo').read_text().splitlines():
@@ -47,8 +59,19 @@ def hardware_environment():
                 cpu = line.split(':', 1)[1].strip(); break
     except OSError:
         pass
-    pools = [{k: p.get(k) for k in ('internal_api', 'num_threads', 'version', 'architecture')} for p in threadpool_info()]
-    return dict(machine=platform.machine(), system=platform.system(), cpu_model=cpu,
+    return dict(machine=platform.machine(),system=platform.system(),cpu_model=cpu)
+
+
+_POOL_CONTROLLER=None
+def hardware_environment(*,refresh=False):
+    # Discovery is cached, but actual library thread limits are queried live.
+    # Refresh after loading a new BLAS/OpenMP library or changing CPU metadata.
+    global _POOL_CONTROLLER
+    if _POOL_CONTROLLER is None or refresh:
+        _POOL_CONTROLLER=ThreadpoolController()
+        if refresh:_hardware_static.cache_clear()
+    pools=[{k:p.get(k) for k in ('internal_api','num_threads','version','architecture')} for p in _POOL_CONTROLLER.info()]
+    return dict(**_hardware_static(),
                 affinity_count=len(os.sched_getaffinity(0)) if hasattr(os, 'sched_getaffinity') else os.cpu_count(),
                 numpy=np.__version__, scipy=scipy.__version__, torch=str(torch.__version__),
                 torch_threads=torch.get_num_threads(), pools=pools, runtime='scipy_fp64_cpu')

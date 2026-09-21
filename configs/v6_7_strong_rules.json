@@ -1,5 +1,5 @@
 {
-  "version": "a_only_moment_rules_v1",
+  "version": "a_only_portfolio_rules_v2",
   "anisotropy_min": 4.0,
   "isotropic_ratio_max": 1.5,
   "alignment_angle_deg": 12.0,
@@ -14,13 +14,20 @@
     "unsupported_stencil": "line_alt_operator_full",
     "unresolved_tensor": "line_alt_operator_full",
     "heterogeneous_orientation": "line_alt_operator_alternating",
-    "heterogeneous": "line_alt_operator_full",
+    "heterogeneous": "line_alt_bilinear_full",
     "aligned_x": "line_x_operator_semi_y",
     "aligned_y": "line_y_operator_semi_x",
     "diagonal_positive": "line_diag45_operator_full",
     "rotated": "line_alt_operator_full",
     "near_isotropic": "jacobi_bilinear_full",
-    "moderate": "chebyshev_operator_full"
+    "moderate": "chebyshev_operator_full",
+    "aligned_x_heterogeneous": "line_alt_bilinear_full",
+    "aligned_y_heterogeneous": "line_alt_bilinear_full",
+    "diagonal_positive_heterogeneous": "line_alt_bilinear_full",
+    "rotated_heterogeneous": "line_alt_bilinear_full"
   },
-  "provenance": "theory_guided_defaults; not tuned on audit; empirical strength unvalidated"
+  "provenance": "coverage-required v2 defaults; use multi-size train+tune calibration; unmeasured leaves use fixed_C",
+  "fallback_strategy_name": "line_alt_bilinear_full",
+  "require_coverage": true,
+  "coverage_by_rule": []
 }

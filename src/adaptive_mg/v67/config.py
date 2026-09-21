@@ -13,6 +13,7 @@ class AdaptiveConfig:
     application: str = 'replace'  # additive is ablation only
     replace_pre: int = 1
     replace_post: int = 0
+    auto_device_min_cells: int = 4096  # conservative starting value, tune per hardware
     inference_device: str = 'cpu'  # cpu, mps, cuda, auto
     inference_dtype: str = 'float32'
     lazy: bool = True
@@ -49,6 +50,8 @@ class AdaptiveConfig:
             raise ValueError('invalid gate_mode')
         if self.inference_dtype not in {'float32','float64'}:
             raise ValueError('NN dtype must be float32 or float64')
+        if isinstance(self.auto_device_min_cells,bool) or not isinstance(self.auto_device_min_cells,int) or self.auto_device_min_cells<1:
+            raise ValueError('auto_device_min_cells must be positive integer')
         if self.inference_device not in {'cpu','cuda','mps','auto'}:
             raise ValueError('invalid inference_device')
         if self.inference_device == 'mps' and self.inference_dtype != 'float32':

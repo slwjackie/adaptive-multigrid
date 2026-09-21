@@ -2,6 +2,7 @@
 from __future__ import annotations
 from dataclasses import dataclass, asdict
 from time import perf_counter
+from functools import lru_cache
 import numpy as np
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
@@ -18,7 +19,10 @@ from .native_stencil import NativeStencil, native_available
 class WorkStats:
     base_hierarchy_builds: int = 0
     coarse_factorizations: int = 0
-    line_factorizations: int = 0
+    line_factorizations: int = 0  # actual line/colour LU calls
+    line_blocks_factorized: int = 0
+    lazy_line_factorizations: int = 0
+    lazy_line_setup_seconds: float = 0.0
     coarse_l_nnz: int = 0
     coarse_u_nnz: int = 0
     hierarchy_setup_seconds: float = 0.0
@@ -77,21 +81,37 @@ class FixedLevel:
     features: np.ndarray | None = None
     neural_stencil: object | None = None
 
-@dataclass
 class StencilBank:
-    csr: sp.csr_matrix
-    native: NativeStencil | None = None
+    """Native application does not force a redundant CSR allocation.
+
+    ``csr`` stays source-compatible but materializes only when explicitly read.
+    Numeric data are owned by each bank; only symbolic index arrays are shared.
+    """
+    def __init__(self, csr, native=None, *, csr_factory=None, work_nnz=None):
+        if csr is None and (native is None or csr_factory is None):
+            raise ValueError('a native-only bank requires a CSR factory')
+        self._csr = csr
+        self.native = native
+        self._csr_factory = csr_factory
+        self.work_nnz = int(csr.nnz if work_nnz is None else work_nnz)
+
+    @property
+    def csr(self):
+        if self._csr is None:
+            self._csr = self._csr_factory()
+            self._csr_factory = None
+        return self._csr
 
     def apply(self, r, stats):
         start = perf_counter()
         if self.native is not None:
-            out = self.native.apply(r)[:,0]
+            out = self.native.apply(r)[:, 0]
             stats.native_stencil_calls += 1
         else:
             out = np.asarray(self.csr @ r).reshape(-1)
         stats.neural_apply_calls += 1
-        stats.work_flops += 2*self.csr.nnz
-        stats.neural_apply_seconds += perf_counter()-start
+        stats.work_flops += 2 * self.work_nnz
+        stats.neural_apply_seconds += perf_counter() - start
         return out
 
 def baseline_kwargs(config):
@@ -117,8 +137,9 @@ def build_fixed_hierarchy(a, shape, strategy, config, stats, *, index=0, auxilia
         level.cache=LineSmootherCache(a,shape)
         directions={"line_x":("x",),"line_y":("y",),"line_alt":("x","y"),"line_diag45":("diag45",)}.get(strategy.smoother,())
         for direction in directions:
-            level.cache.get(direction)
+            level.cache.prepare(direction)
         stats.line_factorizations+=level.cache.factorization_count
+        stats.line_blocks_factorized+=level.cache.line_blocks_factorized
         level.coarse=build_fixed_hierarchy(galerkin_coarse_operator(a,level.p),coarse_shape,strategy,config,stats,index=index+1,auxiliary=auxiliary)
     # Count entire banks only at the caller; per-level times would double count.
     if index==0:
@@ -156,18 +177,39 @@ def ensure_features(level):
     return level.features
 
 
+@lru_cache(maxsize=64)
+def _stencil_topology(shape):
+    nx, ny = shape
+    source = np.arange(nx * ny).reshape(shape)
+    rows, columns, channels = [], [], []
+    for k, (di, dj) in enumerate(OFFSETS_9):
+        i0, i1 = max(0, -di), min(nx, nx-di)
+        j0, j1 = max(0, -dj), min(ny, ny-dj)
+        rr = source[i0:i1, j0:j1].ravel()
+        rows.append(rr)
+        columns.append(source[i0+di:i1+di, j0+dj:j1+dj].ravel())
+        channels.append(np.full(rr.size, k, dtype=np.int64))
+    rr, cc, kk = map(np.concatenate, (rows, columns, channels))
+    order = np.lexsort((cc, rr))
+    rr, cc, kk = rr[order], cc[order], kk[order]
+    ptr = np.r_[0, np.cumsum(np.bincount(rr, minlength=nx*ny))]
+    for value in (rr, cc, kk, ptr):
+        value.flags.writeable = False
+    return rr, cc, kk, ptr
+
+
+def stencil_data(values, gains, diagonal, shape):
+    rr, cc, kk, _ = _stencil_topology(tuple(shape))
+    return np.asarray(values).reshape(9, -1)[kk, rr] * gains / diagonal[cc]
+
+
 def stencil_from_coefficients(values, gains, diagonal, shape):
-    nx,ny=shape; rows=[];cols=[];data=[]
-    source=np.arange(nx*ny).reshape(shape)
-    for k,(di,dj) in enumerate(OFFSETS_9):
-        i0,i1=max(0,-di),min(nx,nx-di);j0,j1=max(0,-dj),min(ny,ny-dj)
-        rr=source[i0:i1,j0:j1].ravel();cc=source[i0+di:i1+di,j0+dj:j1+dj].ravel()
-        rows.append(rr);cols.append(cc)
-        data.append(values[k,i0:i1,j0:j1].ravel()*gains/diagonal[cc])
-    p=sp.coo_matrix((np.concatenate(data),(np.concatenate(rows),np.concatenate(cols))),shape=(nx*ny,nx*ny)).tocsr()
+    _, cc, _, ptr = _stencil_topology(tuple(shape))
+    data = stencil_data(values, gains, diagonal, shape)
+    # Copies are essential: SciPy zero elimination can mutate index buffers.
+    p = sp.csr_matrix((data, cc.copy(), ptr.copy()), shape=(np.prod(shape),)*2)
     p.eliminate_zeros()
     return p
-
 
 def ensure_stencil(level, smoother, config, stats):
     if level.neural_stencil is not None:

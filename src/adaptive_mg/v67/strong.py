@@ -8,7 +8,7 @@ solve is constructed by the selector. Existing classical primitives are reused.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, replace, fields
 import hashlib
 import json
 import math
@@ -28,7 +28,11 @@ RULE_STRATEGIES = (
     ('unsupported_stencil', 'line_alt_operator_full'),
     ('unresolved_tensor', 'line_alt_operator_full'),
     ('heterogeneous_orientation', 'line_alt_operator_alternating'),
-    ('heterogeneous', 'line_alt_operator_full'),
+    ('heterogeneous', 'line_alt_bilinear_full'),
+    ('aligned_x_heterogeneous', 'line_alt_bilinear_full'),
+    ('aligned_y_heterogeneous', 'line_alt_bilinear_full'),
+    ('diagonal_positive_heterogeneous', 'line_alt_bilinear_full'),
+    ('rotated_heterogeneous', 'line_alt_bilinear_full'),
     ('aligned_x', 'line_x_operator_semi_y'),
     ('aligned_y', 'line_y_operator_semi_x'),
     ('diagonal_positive', 'line_diag45_operator_full'),
@@ -46,7 +50,7 @@ class StrongRules:
     not load or modify measurements. Persist ``to_dict()`` before held-out runs.
     ``provenance`` is descriptive metadata, never a classifier input.
     """
-    version: str = 'a_only_moment_rules_v1'
+    version: str = 'a_only_portfolio_rules_v2'
     anisotropy_min: float = 4.0
     isotropic_ratio_max: float = 1.5
     alignment_angle_deg: float = 12.0
@@ -58,14 +62,17 @@ class StrongRules:
     off_stencil_fraction_max: float = 0.01
     valid_tensor_fraction_min: float = 0.80
     strategy_by_rule: tuple = RULE_STRATEGIES
+    fallback_strategy_name: str = 'line_alt_bilinear_full'
+    require_coverage: bool = False
+    coverage_by_rule: tuple = ()  # immutable (leaf, minimum_n, maximum_n) entries
     provenance: str = 'theory_guided_defaults; not tuned on audit; empirical strength unvalidated'
 
     def __post_init__(self):
-        if self.version != 'a_only_moment_rules_v1':
-            raise ValueError('unsupported strong rule version')
+        if self.version != 'a_only_portfolio_rules_v2':
+            raise ValueError('unsupported/stale strong rules; recalibrate with a_only_portfolio_rules_v2')
         values = self.to_dict()
         for key, value in values.items():
-            if key not in {'version', 'strategy_by_rule', 'provenance'}:
+            if key not in {'version', 'strategy_by_rule', 'provenance', 'fallback_strategy_name', 'require_coverage', 'coverage_by_rule'}:
                 if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
                     raise ValueError(f'{key} must be finite numeric')
         if not 1 <= self.isotropic_ratio_max < self.anisotropy_min:
@@ -87,6 +94,18 @@ class StrongRules:
         for name in mapping.values():
             get_strategy(name)
         object.__setattr__(self, 'strategy_by_rule', tuple((key, mapping[key]) for key in self.rule_ids))
+        get_strategy(self.fallback_strategy_name)
+        if not isinstance(self.require_coverage, bool):
+            raise ValueError('require_coverage must be boolean')
+        coverage = tuple(tuple(row) for row in self.coverage_by_rule)
+        if len({row[0] for row in coverage}) != len(coverage):
+            raise ValueError('duplicate coverage leaf')
+        for row in coverage:
+            if (len(row) != 3 or row[0] not in self.rule_ids
+                    or any(isinstance(v, bool) or not isinstance(v, int) for v in row[1:])
+                    or not 3 <= row[1] <= row[2]):
+                raise ValueError('invalid size coverage')
+        object.__setattr__(self, 'coverage_by_rule', coverage)
         if not isinstance(self.provenance, str):
             raise ValueError('provenance must be text')
 
@@ -95,14 +114,19 @@ class StrongRules:
         return tuple(key for key, _ in RULE_STRATEGIES)
 
     def to_dict(self):
-        return {**self.__dict__, 'strategy_by_rule': dict(self.strategy_by_rule)}
+        return {**{f.name: getattr(self, f.name) for f in fields(self)},
+                'strategy_by_rule': dict(self.strategy_by_rule)}
 
     @classmethod
     def from_dict(cls, value):
         return cls(**dict(value))
 
     def digest(self):
-        return hashlib.sha256(json.dumps(self.to_dict(), sort_keys=True, allow_nan=False).encode()).hexdigest()
+        cached = getattr(self, '_digest_cache', None)
+        if cached is None:
+            cached = hashlib.sha256(json.dumps(self.to_dict(), sort_keys=True, allow_nan=False).encode()).hexdigest()
+            object.__setattr__(self, '_digest_cache', cached)
+        return cached
 
     def replace_strategies(self, mapping, *, provenance=None):
         updated = dict(self.strategy_by_rule)
@@ -244,10 +268,27 @@ def _classify(features, rules):
         near_isotropic=f['tensor_anisotropy_ratio'] <= rules.isotropic_ratio_max,
         moderate=True,
     )
-    rule_id = next(key for key in rules.rule_ids if checks[key])
+    # Stencil validity/orientation mixtures remain separate safety classes.
+    # Direction and coefficient variation are otherwise orthogonal axes.
+    special = next((k for k in ('unsupported_stencil', 'unresolved_tensor',
+                                'heterogeneous_orientation') if checks[k]), None)
+    direction = next(k for k in ('aligned_x', 'aligned_y', 'diagonal_positive',
+                                 'rotated', 'near_isotropic', 'moderate') if checks[k])
+    heterogeneous = checks['heterogeneous']
+    if special is not None:
+        rule_id = special
+    elif heterogeneous and direction in ('aligned_x', 'aligned_y', 'diagonal_positive', 'rotated'):
+        rule_id = direction + '_heterogeneous'
+    else:
+        rule_id = 'heterogeneous' if heterogeneous else direction
+    for key in rules.rule_ids:
+        checks.setdefault(key, key == rule_id)
     return rule_id, dict(ordered_checks=checks, first_matching_rule=rule_id,
-                         priority=list(rules.rule_ids), thresholds={k:v for k,v in rules.to_dict().items()
-                         if k not in {'strategy_by_rule','provenance','version'}})
+                         direction_class=direction, heterogeneous=heterogeneous,
+                         classification='direction_cross_heterogeneity_v2',
+                         thresholds={k: v for k, v in rules.to_dict().items()
+                         if isinstance(v, (int, float)) and not isinstance(v, bool)})
+
 
 
 @dataclass(frozen=True)
@@ -272,8 +313,15 @@ def select_strong_strategy(a, n, rules=None):
     features = operator_features(a, n)
     rule_id, evidence = _classify(features, rules)
     digest = rules.digest()
-    return StrongSelection(dict(rules.strategy_by_rule)[rule_id], rule_id, features,
-                           evidence, perf_counter()-start, digest)
+    strategy = dict(rules.strategy_by_rule)[rule_id]
+    coverage = {key: (lo, hi) for key, lo, hi in rules.coverage_by_rule}
+    size = max(features['nx'], features['ny'])
+    covered = rule_id in coverage and coverage[rule_id][0] <= size <= coverage[rule_id][1]
+    if rules.require_coverage and not covered:
+        strategy = rules.fallback_strategy_name
+    evidence.update(size_coverage_supported=covered,
+                    fallback_for_coverage=bool(rules.require_coverage and not covered))
+    return StrongSelection(strategy, rule_id, features, evidence, perf_counter()-start, digest)
 
 
 class PreparedStrongMG(PreparedAdaptiveMG):

@@ -46,7 +46,10 @@ def test_sparse_graph_preserves_galerkin_spd_injection_and_boundary_rows(coarsen
     a=operator(); pattern=build_transfer_pattern(7,coarsening=coarsening)
     net=nonzero_decoder(make_graph_transfer()).double()
     weights=weights_from_deltas_torch(pattern,net.forward_graph(a,pattern)).detach().numpy()
-    assert np.max(np.abs(weights.sum(1)-pattern.bilinear_weights.sum(1))) < 4e-16
+    # Summation order differs between NumPy/Torch/BLAS. Use a K-term FP64
+    # roundoff bound rather than a sub-two-epsilon absolute constant.
+    bound=pattern.n_candidates*np.finfo(weights.dtype).eps*max(1.,float(np.max(np.abs(weights).sum(1))))
+    np.testing.assert_allclose(weights.sum(1),pattern.bilinear_weights.sum(1),rtol=0,atol=bound)
     assert np.all(weights[pattern.columns<0]==0)
     coarse=coarse_fine_indices(pattern)
     assert np.array_equal(weights[coarse],pattern.bilinear_weights[coarse])

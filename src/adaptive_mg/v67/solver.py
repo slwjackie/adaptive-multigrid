@@ -90,7 +90,7 @@ class PreparedAdaptiveMG:
         module=getattr(self.components,name)
         return (self.components.expert_signature(name),tuple((str(v.device),str(v.dtype)) for v in tuple(module.parameters())+tuple(module.buffers())))
     def _generation_scope(self,cfg):
-        return (cfg.mg.nn_levels,str(resolve_device(cfg)),cfg.inference_dtype,'actual_A/reference_classical_A:fp64:v1')
+        return (cfg.mg.nn_levels,str(resolve_device(cfg,cells=self.a.shape[0])),cfg.inference_dtype,'actual_A/reference_classical_A:fp64:v1')
     def _refresh_key(self):
         payload=(self.a_digest,self.shape,self.model_digest,self.config.to_dict())
         self.cache_key=hashlib.sha256(json.dumps(payload,sort_keys=True).encode()).hexdigest()

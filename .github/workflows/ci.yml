@@ -1,0 +1,42 @@
+name: Three pillars validation
+on:
+  push:
+    branches: [main, fix/three-pillars-20260922]
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      OMP_NUM_THREADS: '1'
+      OPENBLAS_NUM_THREADS: '1'
+      MKL_NUM_THREADS: '1'
+      VECLIB_MAXIMUM_THREADS: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install CPU dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install 'torch==2.10.0' --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -e '.[dev]'
+      - name: Build optional native stencil
+        run: python scripts/build_native_stencil.py --no-openmp
+      - name: Full regression and from-scratch smoke tests
+        run: |
+          mkdir -p artifacts/ci
+          python -m pytest -ra --junitxml=artifacts/ci/pytest.xml
+      - name: Verify source snapshot
+        run: sha256sum -c THREE_PILLARS_SOURCE.sha256
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: three-pillars-validation
+          path: artifacts/ci/
+          retention-days: 14

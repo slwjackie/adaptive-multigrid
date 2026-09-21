@@ -43,7 +43,7 @@ def _features(a,shape):
 
 
 def make_graph(a,shape,components,cfg,*,learned=True):
-    device=resolve_device(cfg); dtype=torch.float32 if cfg.inference_dtype=='float32' else torch.float64
+    device=resolve_device(cfg,cells=shape[0]*shape[1]); dtype=torch.float32 if cfg.inference_dtype=='float32' else torch.float64
     for net in (components.smoother,components.transfer):net.to(device=device,dtype=dtype)
     strategy=get_strategy(cfg.mg.strategy_name)
     def build(at,sh,index):
@@ -66,12 +66,13 @@ def make_graph(a,shape,components,cfg,*,learned=True):
             bt=torch.tensor(base,device=device,dtype=dtype)
             if hasattr(components.transfer,'complexity_caps'):
                 from .research_transfer import project_transfer_weights
-                w=project_transfer_weights(components.transfer,pattern,d,bt)
+                w=project_transfer_weights(components.transfer,pattern,d,base)
             else:w=weights_from_deltas_torch(pattern,d,bt)
             values=torch.tensor(base,dtype=torch.float64)+(w-bt).to('cpu',dtype=torch.float64)
             valid=torch.tensor(pattern.columns>=0)
             if hasattr(components.transfer,'complexity_caps'):
-                valid=valid & (w.detach().to('cpu')!=0)
+                support=torch.tensor(base!=0) if getattr(components.transfer,'support','standard')=='support_preserving' else (w.detach().to('cpu')!=0)
+                valid=valid & support
                 masked=torch.where(valid,values,torch.zeros_like(values))
                 # Exact sparse numerical forward, preserving the projection's
                 # STE to candidate edges currently pruned/zero in the bank.

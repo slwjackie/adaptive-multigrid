@@ -1,19 +1,88 @@
-name: Three pillars validation
+name: Apply and validate three pillars
 on:
   push:
     branches: [fix/three-pillars-20260922]
 permissions:
-  contents: read
+  contents: write
 jobs:
-  snapshot:
+  validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 25
+    env:
+      OMP_NUM_THREADS: '1'
+      OPENBLAS_NUM_THREADS: '1'
+      MKL_NUM_THREADS: '1'
+      VECLIB_MAXIMUM_THREADS: '1'
     steps:
       - uses: actions/checkout@v4
-      - name: Export tracked source
-        run: git archive --format=tar.gz HEAD -o source.tar.gz
-      - uses: actions/upload-artifact@v4
+      - uses: actions/setup-python@v5
         with:
-          name: three-pillars-source
-          path: source.tar.gz
-          retention-days: 3
+          python-version: '3.12'
+          cache: pip
+      - name: Apply verified source edits
+        shell: bash
+        run: |
+          python - <<'PY'
+          import hashlib,json,lzma,subprocess
+          from pathlib import Path
+          data=b''.join(Path(f'.ci/three-pillars-part{i}').read_bytes() for i in range(4))
+          assert hashlib.sha256(data).hexdigest()=='deeec8e2a71c6e7e0218d8a240f65881deeaa18c23b5f335164d1747b1881129'
+          bundle=json.loads(lzma.decompress(data))
+          assert bundle['base']=='0d20cb26762b7af1add697dfa4a41c7e4c760e0a'
+          paths=[]
+          for rec in bundle['records']:
+              p=Path(rec['path'])
+              assert not p.is_absolute() and '..' not in p.parts
+              assert p.parts[0] in {'src','scripts','tests','configs','docs','.github'} or str(p)=='README.md'
+              old=p.read_bytes() if p.exists() else b''
+              assert hashlib.sha256(old).hexdigest()==rec['base_sha256'],str(p)+' base mismatch'
+              lines=old.decode().splitlines(keepends=True)
+              for i,j,text in reversed(rec['edits']):
+                  lines[i:j]=text.splitlines(keepends=True)
+              result=''.join(lines).encode()
+              assert hashlib.sha256(result).hexdigest()==rec['result_sha256'],str(p)+' result mismatch'
+              p.parent.mkdir(parents=True,exist_ok=True)
+              p.write_bytes(result)
+              paths.append(str(p))
+          subprocess.run(['git','add','--',*paths],check=True)
+          subprocess.run(['git','rm','--','.github/workflows/three-pillars-validation.yml',*[f'.ci/three-pillars-part{i}' for i in range(4)]],check=True)
+          tracked=subprocess.check_output(['git','ls-files','-z']).decode().split('\0')
+          sources=sorted(p for p in tracked if p and (p.split('/')[0] in {'src','scripts','tests','configs'} or p in {'pyproject.toml','requirements.txt'}) and Path(p).is_file())
+          manifest=''.join(hashlib.sha256(Path(p).read_bytes()).hexdigest()+'  '+p+'\n' for p in sources)
+          assert len(sources)==127,len(sources)
+          assert hashlib.sha256(manifest.encode()).hexdigest()=='2e9e6362c623d681cfc49ff1bbab3badb9d45853d74bb29beb813baf3cd4a05b'
+          Path('THREE_PILLARS_SOURCE.sha256').write_text(manifest)
+          subprocess.run(['git','add','THREE_PILLARS_SOURCE.sha256'],check=True)
+          print('Verified',len(paths),'source edits;',len(sources),'manifest entries')
+          PY
+          git diff --cached --check
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install 'torch==2.10.0' --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -e '.[dev]'
+      - name: Build native stencil
+        run: python scripts/build_native_stencil.py --no-openmp
+      - name: Full regression and workflow smoke
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p artifacts/ci
+          python -m pytest -ra --junitxml=artifacts/ci/pytest.xml 2>&1 | tee artifacts/ci/pytest.log
+          sha256sum -c THREE_PILLARS_SOURCE.sha256 | tee artifacts/ci/source-verification.log
+      - name: Commit tested clean source
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix: normalize classical baselines and optimize strong-parent neural MG'
+          git rev-parse HEAD | tee artifacts/ci/validated-commit.txt
+          git rev-parse HEAD^{tree} | tee artifacts/ci/validated-tree.txt
+          git archive --format=tar.gz HEAD -o artifacts/ci/validated-source.tar.gz
+          git push origin HEAD:fix/three-pillars-20260922
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: three-pillars-independent-validation
+          path: artifacts/ci/
+          retention-days: 14

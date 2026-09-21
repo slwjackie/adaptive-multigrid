@@ -1,0 +1,19 @@
+name: Three pillars validation
+on:
+  push:
+    branches: [fix/three-pillars-20260922]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Export tracked source
+        run: git archive --format=tar.gz HEAD -o source.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: three-pillars-source
+          path: source.tar.gz
+          retention-days: 3

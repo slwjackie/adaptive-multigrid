@@ -37,6 +37,8 @@ def require_components_allowed(components, cfg, branch):
 
 
 def research_spec(module):
+    if hasattr(module, 'multistage_spec'):
+        return dict(family='multistage_smoother', config=module.multistage_spec())
     if hasattr(module, 'research_transfer_spec'):
         return dict(family='research_cnn_transfer',config=module.research_transfer_spec())
     if hasattr(module, 'architecture_spec'):
@@ -47,6 +49,9 @@ def research_spec(module):
 
 
 def restore_expert(spec):
+    if spec['family'] == 'multistage_smoother':
+        from .multistage import make_multistage
+        return make_multistage(**spec['config'])
     if spec['family'] == 'research_cnn_transfer':
         from .research_controls import ControlledTransferCNN
         return ControlledTransferCNN(**spec['config'])

@@ -39,7 +39,7 @@ def _read(path):
 
 def _sources():
     return sorted([p for p in (PROJECT/'src').rglob('*') if p.suffix in ('.py','.cpp')]
-                  +[PROJECT/'scripts/run_v6_7_three_pillars.py'])
+                  +list((PROJECT/'scripts').glob('run_v6_7*study*.py'))+[PROJECT/'scripts/run_v6_7_three_pillars.py'])
 
 
 def _source_digest():
@@ -287,7 +287,7 @@ def main(argv=None):
         if name in ('benchmark','freeze'):
             p.add_argument('--repeats',type=int,default=5);p.add_argument('--warmups',type=int,default=1)
             p.add_argument('--rhs-counts',nargs='+',type=int,default=[1,4,16,64])
-            p.add_argument('--regimes',nargs='+',choices=('cold','warm','multiple'),default=['cold','warm','multiple'])
+            p.add_argument('--regimes',nargs='+',choices=('cold','warm','multiple','warm_multiple'),default=['cold','warm','multiple'])
         if name=='benchmark':p.add_argument('--tag',default='validation')
         if name=='demo':
             p.add_argument('--branch',choices=('C','H_S','H_P','H_SP'),default='H_S')

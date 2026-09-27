@@ -13,6 +13,14 @@ class AdaptiveConfig:
     application: str = 'replace'  # additive is ablation only
     replace_pre: int = 1
     replace_post: int = 0
+    # None retains the legacy first-nn_levels policy. Explicit levels are static,
+    # operator-only experiment settings, not residual-dependent interpolation.
+    smoother_levels: tuple[int, ...] | None = None
+    transfer_levels: tuple[int, ...] | None = None
+    # Number of consecutive classical slots replaced by ONE neural application.
+    # Example: replace_pre=2, replacement_group_pre=2 implements 2C -> 1H.
+    replacement_group_pre: int = 1
+    replacement_group_post: int = 1
     auto_device_min_cells: int = 4096  # conservative starting value, tune per hardware
     inference_device: str = 'cpu'  # cpu, mps, cuda, auto
     inference_dtype: str = 'float32'
@@ -38,6 +46,18 @@ class AdaptiveConfig:
     record_trace: bool = True
 
     def __post_init__(self):
+        for key in ('smoother_levels', 'transfer_levels'):
+            value = getattr(self, key)
+            if value is not None:
+                if (not isinstance(value, (tuple, list)) or len(set(value)) != len(value)
+                        or any(isinstance(v, bool) or not isinstance(v, int) or v < 0 for v in value)):
+                    raise ValueError('explicit levels must be distinct nonnegative integers')
+                object.__setattr__(self, key, tuple(value))
+        for phase in ('pre', 'post'):
+            group = getattr(self, 'replacement_group_' + phase)
+            count = getattr(self, 'replace_' + phase)
+            if isinstance(group, bool) or not isinstance(group, int) or group < 1 or count % group:
+                raise ValueError('replacement slots must be divisible by a positive group size')
         if self.branch not in {'auto','C','H_S','H_P','H_SP'}:
             raise ValueError('branch must be auto/C/H_S/H_P/H_SP')
         if self.mode not in {'production','research','hybrid','burst','classical'}:

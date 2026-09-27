@@ -17,6 +17,11 @@ from .native import apply_rows
 
 @dataclass
 class Stats(WorkStats):
+    smoother_stage_generations: int = 0
+    multistage_applications: int = 0
+    multistage_local_applications: int = 0
+    multistage_residual_matvecs: int = 0
+    replaced_classical_slots: int = 0
     inference_model_preparations: int = 0
     operator_feature_builds: int = 0
     operator_feature_seconds: float = 0.
@@ -97,8 +102,19 @@ class CachedGenerationFailure(RuntimeError):
         self.failure=failure;self.component=component
         super().__init__(f'cached {component} setup failure [{failure.error_type}]: {failure.message}')
 
-def selected_level(index,cfg):
-    return cfg.mg.nn_levels==-1 or index<cfg.mg.nn_levels
+def selected_level(index, cfg, component=None):
+    levels = getattr(cfg, component + '_levels', None) if component else None
+    return index in levels if levels is not None else (cfg.mg.nn_levels == -1 or index < cfg.mg.nn_levels)
+
+
+def smoothing_schedule(steps, replaced, group=1):
+    """Yield (neural, consumed_classical_slots), including untouched sweeps."""
+    i = 0
+    while i < steps:
+        neural = i < replaced
+        width = group if neural else 1
+        yield neural, width
+        i += width
 
 def resolve_device(cfg, *, cells=None):
     d=cfg.inference_device
@@ -163,21 +179,40 @@ def _features(level, stats):
     return result
 
 
-def generated_stencil(level,components,cfg,stats,device,dtype):
-    stats.smoother_nn_calls+=1;stats.neural_setup_calls+=1
-    d,g=_inference(components.smoother,_features(level,stats),device,dtype,
-                   lambda m,f:m.direction_and_gain(f),stats)
-    d=d[0,:1];g=g[0,:1]*cfg.mg.smoother_gain_multiplier
-    if not np.isfinite(d).all() or not np.isfinite(g).all(): raise ValueError('nonfinite generated smoother')
-    factory=lambda:stencil_from_coefficients(d[0],float(g[0]),level.diagonal,level.shape)
-    native=None
-    if cfg.mg.stencil_backend=='native' or (cfg.mg.stencil_backend=='auto' and level.a.shape[0]>=cfg.mg.native_min_cells and native_available()):
-        native=NativeStencil.from_directions(d,diagonal=level.diagonal,gains=g,
-            threads=cfg.mg.native_threads,parallel_min=cfg.mg.native_parallel_min)
-    if native is not None:
-        nnz=np.count_nonzero(stencil_data(d[0],float(g[0]),level.diagonal,level.shape))
-        return StencilBank(None,native,csr_factory=factory,work_nnz=nnz)
-    return StencilBank(factory())
+def generated_stencil(level, components, cfg, stats, device, dtype):
+    stats.smoother_nn_calls += 1
+    stats.neural_setup_calls += 1
+    cascade = hasattr(components.smoother, 'stage_directions_and_gains')
+    def generate(module, features):
+        return (module.stage_directions_and_gains(features, level.index) if cascade
+                else module.direction_and_gain(features))
+    directions, gains = _inference(components.smoother, _features(level, stats),
+                                  device, dtype, generate, stats)
+    directions = directions[0] if cascade else directions[0, :1]
+    gains = (gains[0] if cascade else gains[0, :1]) * cfg.mg.smoother_gain_multiplier
+    if not np.isfinite(directions).all() or not np.isfinite(gains).all():
+        raise ValueError('nonfinite generated smoother')
+    banks = []
+    use_native = (cfg.mg.stencil_backend == 'native' or
+                  (cfg.mg.stencil_backend == 'auto' and level.a.shape[0] >= cfg.mg.native_min_cells
+                   and native_available()))
+    for direction, gain in zip(directions, gains):
+        # Capture by value: a lazy factory must not read the last loop item.
+        factory = lambda d=direction.copy(), g=float(gain): stencil_from_coefficients(
+            d, g, level.diagonal, level.shape)
+        if use_native:
+            native = NativeStencil.from_directions(direction[None], diagonal=level.diagonal,
+                gains=np.asarray([gain]), threads=cfg.mg.native_threads,
+                parallel_min=cfg.mg.native_parallel_min)
+            nnz = np.count_nonzero(stencil_data(direction, float(gain), level.diagonal, level.shape))
+            banks.append(StencilBank(None, native, csr_factory=factory, work_nnz=nnz))
+        else:
+            banks.append(StencilBank(factory()))
+    stats.smoother_stage_generations += len(banks)
+    if len(banks) == 1:
+        return banks[0]
+    from .multistage import ResidualCascadeBank
+    return ResidualCascadeBank(tuple(banks), level.a)
 
 
 def generated_p(level,components,cfg,stats,device,dtype):
@@ -236,7 +271,7 @@ def prepare_transfer_bank(base,components,cfg,stats):
             for direction in {'line_x':('x',),'line_y':('y',),'line_alt':('x','y'),'line_diag45':('diag45',)}.get(base.strategy.smoother,()):
                 level.cache.prepare(direction)
             stats.learned_factorizations+=level.cache.factorization_count
-        if selected_level(index,cfg):
+        if selected_level(index,cfg,"transfer"):
             if hasattr(components.transfer,'complexity_caps'):
                 from .research_transfer import transfer_pattern_for_model
                 level.pattern,level.base_weights=transfer_pattern_for_model(level.pattern,components.transfer,level.base_weights)
@@ -313,10 +348,10 @@ def prepare_smoother_bank(base,components,cfg,stats,operator_cache=None):
         result=copy(level)
         if level.coarse is not None:
             result.coarse=build(level.coarse)
-            if selected_level(level.index,cfg) and cfg.mg.smoother_gain_multiplier>0 and (cfg.replace_pre or cfg.replace_post):
+            if selected_level(level.index,cfg,"smoother") and cfg.mg.smoother_gain_multiplier>0 and (cfg.replace_pre or cfg.replace_post):
                 if not hasattr(level,'_operator_digest'):
                     level._operator_digest=operator_digest(level.a)
-                key=(level._operator_digest,level.shape,generation_key)
+                key=(level._operator_digest,level.shape,level.index if hasattr(components.smoother,"multistage_spec") else None,generation_key)
                 if operator_cache is not None and key in operator_cache:
                     cached=operator_cache[key]
                     if isinstance(cached,GenerationFailure):cached.reject_cached(stats,'smoother')
@@ -348,6 +383,12 @@ def prepare_learned_bank(base,components,cfg,stats):
 
 def _bank_apply(bank,r,stats,mask=None,dense_cut=.5):
     if mask is None or bool(np.all(mask)): return bank.apply(r,stats)
+    if getattr(bank, 'is_residual_cascade', False):
+        # A cascade couples intermediate residuals; row masking is an output
+        # mask, NOT a claim that masked-out intermediate work was skipped.
+        out = bank.apply(r, stats); out[~mask] = 0.
+        stats.dense_masked_calls += 1
+        return out
     rows=np.flatnonzero(mask);out=np.zeros_like(r)
     if len(rows)==0: return out
     start=perf_counter()
@@ -408,7 +449,9 @@ def replacement_step(level,r,mask,cfg,stats,reverse=False):
             block=blocks[j];rows=block.indices
             if mask[rows].all():
                 t=perf_counter()
-                inc=apply_rows(bank.native,current,rows) if bank.native is not None else np.asarray(bank.csr[rows]@current).ravel()
+                inc=(bank.apply(current,stats)[rows] if getattr(bank,'is_residual_cascade',False)
+                     else apply_rows(bank.native,current,rows) if bank.native is not None
+                     else np.asarray(bank.csr[rows]@current).ravel())
                 stats.neural_apply_seconds+=perf_counter()-t
                 stats.neural_apply_calls+=1;stats.selected_row_calls+=1;stats.replaced_line_solves+=1
                 stats.active_rows+=len(rows)
@@ -433,9 +476,11 @@ def hybrid_cycle(level,x,b,cfg,stats,spatial,cycle,refresh=False,root_gate=None)
             stats.spatial_gate_calls+=1
             gate=spatial.gate(level,residual,cycle,stats,refresh)
     else: gate=np.zeros_like(b,dtype=bool)
-    for i in range(cfg.mg.pre_steps):
+    grouped = cfg.replacement_group_pre if gate.all() else 1
+    for neural, width in smoothing_schedule(cfg.mg.pre_steps, cfg.replace_pre if enabled else 0, grouped):
         r=b-matvec(level.a,x,stats)
-        d=replacement_step(level,r,gate,cfg,stats) if enabled and i<cfg.replace_pre else classical_step(level,r,cfg.mg,stats,reverse=False)
+        d=replacement_step(level,r,gate,cfg,stats) if neural else classical_step(level,r,cfg.mg,stats,reverse=False)
+        if neural and gate.all(): stats.replaced_classical_slots += width
         x=x+d
     r=b-matvec(level.a,x,stats)
     transfer_start=perf_counter()
@@ -450,8 +495,10 @@ def hybrid_cycle(level,x,b,cfg,stats,spatial,cycle,refresh=False,root_gate=None)
     x=x+apply_transfer(level.p,ec,stats)
     if getattr(level,'learned_transfer',False):stats.learned_transfer_apply_calls+=1
     stats.learned_transfer_seconds+=perf_counter()-transfer_start
-    for i in range(cfg.mg.post_steps):
+    grouped = cfg.replacement_group_post if gate.all() else 1
+    for neural, width in smoothing_schedule(cfg.mg.post_steps, cfg.replace_post if enabled else 0, grouped):
         r=b-matvec(level.a,x,stats)
-        d=replacement_step(level,r,gate,cfg,stats,True) if enabled and i<cfg.replace_post else classical_step(level,r,cfg.mg,stats,reverse=True)
+        d=replacement_step(level,r,gate,cfg,stats,True) if neural else classical_step(level,r,cfg.mg,stats,reverse=True)
+        if neural and gate.all(): stats.replaced_classical_slots += width
         x=x+d
     return x

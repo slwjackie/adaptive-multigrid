@@ -28,7 +28,7 @@ from .strong_evaluation import (_hierarchy, _source_signature, _speed_summary,
                                 build_strong_arms, run_strong_benchmark)
 
 VERSION = 'strong-aware-research-measurement-v1'
-REGIMES = ('cold', 'warm', 'multiple')
+REGIMES = ('cold', 'warm', 'multiple', 'warm_multiple')
 
 
 def manufactured_rhs(example, count):
@@ -109,6 +109,10 @@ def _arm_config(cfg, arm):
 
 def _construct(example, arm, cfg, rules, expected_rhs):
     if arm.get('policy') is not None:
+        if getattr(arm['policy'], 'continuous_size_policy', False):
+            from .cost_policy import PreparedCostMG
+            return PreparedCostMG(example.a, example.n, policy=arm['policy'], config=cfg,
+                                  rules=rules, expected_rhs=expected_rhs)
         from .research_policy import PreparedResearchMG
         cls = PreparedResearchMG
         if arm.get('expected_rhs_mode', 'actual') == 'blind':
@@ -172,8 +176,8 @@ def _root(prepared):
 
 def measured_research(example, arm, cfg, rules, *, regime='cold', rhs_count=1):
     """Measure one actual constructor/solve workload; verify after stopping timer."""
-    if regime not in REGIMES or (regime != 'multiple' and rhs_count != 1):
-        raise ValueError('Cold/warm use exactly one RHS; multiple uses an actual batch')
+    if regime not in REGIMES or (regime not in ('multiple', 'warm_multiple') and rhs_count != 1):
+        raise ValueError('Cold/warm use one RHS; multiple/warm_multiple use actual batches')
     rhs, exacts = manufactured_rhs(example, rhs_count)
     zeros = np.zeros_like(rhs)
     prepared, elapsed, construction = None, None, 0.
@@ -184,13 +188,22 @@ def measured_research(example, arm, cfg, rules, *, regime='cold', rhs_count=1):
     with context:
         # Warm cache priming has an explicit separate time. It is never silently
         # included in warm solve time or treated as a cold single-RHS result.
-        if regime == 'warm':
+        if regime in ('warm', 'warm_multiple'):
             prime_started = perf_counter()
             try:
-                prepared = _construct(example, arm, cfg, rules, 1)
-                prime = prepared.solve(rhs[0], zeros[0])
+                prepared = _construct(example, arm, cfg, rules, rhs_count)
+                if regime == 'warm_multiple':
+                    prime_rhs, prime_exact = manufactured_rhs(example, rhs_count+1)
+                    prime_b, prime_u = prime_rhs[-1], prime_exact[-1]
+                    if vector_digest(prime_b) in {vector_digest(b) for b in rhs}:
+                        raise ValueError('warm prime RHS must be independent of timed RHS')
+                else:
+                    prime_b, prime_u = rhs[0], exacts[0]
+                if hasattr(prepared, 'prepare_warm'):
+                    prepared.prepare_warm()
+                prime = prepared.solve(prime_b, np.zeros_like(prime_b))
                 prime_seconds = perf_counter() - prime_started
-                prime_records = [_result_record(prime, example, rhs[0], exacts[0], getattr(prepared, 'config', cfg))]
+                prime_records = [_result_record(prime, example, prime_b, prime_u, getattr(prepared, 'config', cfg))]
             except (ValueError, RuntimeError, FloatingPointError, np.linalg.LinAlgError) as exc:
                 prime_seconds = perf_counter() - prime_started
                 failure = f'{type(exc).__name__}: {exc}'
@@ -201,7 +214,7 @@ def measured_research(example, arm, cfg, rules, *, regime='cold', rhs_count=1):
             if prepared is None:
                 prepared = _construct(example, arm, cfg, rules, rhs_count)
                 construction = perf_counter() - started
-            if regime == 'multiple':
+            if regime in ('multiple', 'warm_multiple'):
                 results = prepared.solve_many(rhs, zeros)
             else:
                 results = [prepared.solve(rhs[0], zeros[0])]
@@ -223,7 +236,7 @@ def measured_research(example, arm, cfg, rules, *, regime='cold', rhs_count=1):
     total_setup = construction + neural_setup
     accepted_neural = sum(counters.get('branch_' + b + '_cycles', 0) for b in ('H_S', 'H_P', 'H_SP'))
     success = bool(failure is None and len(checked) == rhs_count and all(r['verified_success'] for r in checked)
-                   and (regime != 'warm' or all(r['verified_success'] for r in prime_records))
+                   and (regime not in ('warm', 'warm_multiple') or all(r['verified_success'] for r in prime_records))
                    and np.isfinite(elapsed) and elapsed > 0)
     factors = [r.get('convergence_factor') for r in checked]
     contraction = float(np.exp(np.log(np.maximum(factors, 1e-300)).mean())) if factors and all(isinstance(v, (int, float)) and np.isfinite(v) and v >= 0 for v in factors) else None
@@ -237,9 +250,12 @@ def measured_research(example, arm, cfg, rules, *, regime='cold', rhs_count=1):
         solve_seconds_scope='measured outer wall minus separately instrumented constructor/branch setup; diagnostic decomposition',
         warm_prime_seconds=prime_seconds, warm_prime_results=prime_records,
         warm_prime_counters=_counter_sum(prime_records), rhs_results=checked, counters=counters,
+        timed_rhs_reuse='operators_only; zero initial guess for each RHS',
+        independent_warm_prime=regime == 'warm_multiple',
+        setup_scope='excluded_prepared_operator' if regime in ('warm','warm_multiple') else 'included_once',
         operator_digest=example.digest, normalized_operator_digest=example.group_digest,
         rhs_digests=[vector_digest(b) for b in rhs], exact_digests=[vector_digest(x) for x in exacts],
-        requested_branch=arm['branch'], selector_in_wall_time=bool(arm.get('selector', True) and regime != 'warm'),
+        requested_branch=arm['branch'], selector_in_wall_time=bool(arm.get('selector', True) and regime not in ('warm', 'warm_multiple')),
         selection=selection.to_dict() if selection is not None else None,
         classical_hierarchy=classical, learned_hierarchy=learned, **complexity,
         executed_cycles=sum(r.get('executed_cycles', 0) for r in checked),
@@ -275,7 +291,7 @@ def aggregate_research(rows, arm_metadata, *, repeats, regimes, rhs_counts):
     summary, table = {}, []
     for regime in regimes:
         summary[regime] = {}
-        counts = rhs_counts if regime == 'multiple' else (1,)
+        counts = rhs_counts if regime in ('multiple', 'warm_multiple') else (1,)
         for count in counts:
             group = {}
             successes = {name: [] for name in arm_metadata}
@@ -402,6 +418,11 @@ def evaluate_research(examples, arm_specs, cfg, rules, out, *, repeats=5, warmup
         if arm['config'].mg != cfg.mg or arm['config'].inference_dtype != cfg.inference_dtype or arm['config'].inference_device != cfg.inference_device:
             raise ValueError('All arms must share numerical protocol, generation dtype and device')
         allowed_flags = {'mode', 'branch', 'use_smoother', 'use_transfer', 'spatial', 'gate_mode', 'record_trace', 'use_learned_controller'}
+        if spec.get('schedule_ablation', False):
+            if spec.get('branch') == 'C':
+                raise ValueError('Do not change classical parent through a schedule ablation')
+            allowed_flags |= {'replace_pre', 'replace_post', 'replacement_group_pre',
+                              'replacement_group_post', 'smoother_levels', 'transfer_levels'}
         if {k: v for k, v in arm['config'].to_dict().items() if k not in allowed_flags} != {k: v for k, v in cfg.to_dict().items() if k not in allowed_flags}:
             raise ValueError('All arms must share replacement budget, safety, and numerical protocol')
         arms[name] = arm
@@ -418,6 +439,7 @@ def evaluate_research(examples, arm_specs, cfg, rules, out, *, repeats=5, warmup
         cold_scope='imported process; selector+constructor+generation+solve, rollback included; checkpoint disk load/native library initialization excluded',
         warm_scope='one explicit successful cache-prime solve excluded and reported; actual subsequent same-A solve timed',
         multiple_scope='fresh constructor and actual solve_many for independent manufactured RHS; setup included once',
+        warm_multiple_scope='operator preparation and independent prime excluded; actual distinct timed RHS; decisions/probes/recovery included',
         teacher_scope='offline training-only upper-bound evaluation; never a student/deployment result'))
     manifest_path = output / 'run_manifest.json'
     previous_complete_report = None
@@ -436,11 +458,11 @@ def evaluate_research(examples, arm_specs, cfg, rules, out, *, repeats=5, warmup
         _write_json(manifest_path, manifest, exclusive=True)
     manifest_digest = _hash(manifest)
     rows = [dict(example=e.manifest(), research_split=getattr(e, 'research_split', None), family=getattr(e, 'research_family', getattr(e.case, 'family', e.case.pattern)),
-                 runs={name: {regime: {str(k): [] for k in (rhs_counts if regime == 'multiple' else (1,))} for regime in regimes} for name in arms}) for e in examples]
-    total = len(examples) * len(arms) * repeats * sum(len(rhs_counts) if regime == 'multiple' else 1 for regime in regimes)
+                 runs={name: {regime: {str(k): [] for k in (rhs_counts if regime in ('multiple', 'warm_multiple') else (1,))} for regime in regimes} for name in arms}) for e in examples]
+    total = len(examples) * len(arms) * repeats * sum(len(rhs_counts) if regime in ('multiple', 'warm_multiple') else 1 for regime in regimes)
     completed, warmup_wall = 0, 0.
     for case_index, (example, row) in enumerate(zip(examples, rows)):
-        jobs = [(name, regime, k) for name in arms for regime in regimes for k in (rhs_counts if regime == 'multiple' else (1,))]
+        jobs = [(name, regime, k) for name in arms for regime in regimes for k in (rhs_counts if regime in ('multiple', 'warm_multiple') else (1,))]
         # Warming CPU/framework paths uses independent prepared objects and is
         # separately observable. It does not replace the explicit warm regime.
         keys = [dict(manifest_digest=manifest_digest, case_index=case_index, arm=name, regime=regime, rhs_count=count, repeat=repeat)

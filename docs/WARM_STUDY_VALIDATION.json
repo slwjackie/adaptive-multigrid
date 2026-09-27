@@ -1,0 +1,107 @@
+{
+  "base_commit": "ba22fb7d569767a635e79c93ce928bde872e4f56",
+  "pytest": {
+    "exit_code": 0,
+    "elapsed": 57.216530084609985,
+    "source_start": "60d6c7a28a1a7e4a23cbb5f39a87629e7ada124f192ea36497ede3e03304afc6",
+    "source_end": "60d6c7a28a1a7e4a23cbb5f39a87629e7ada124f192ea36497ede3e03304afc6"
+  },
+  "tests": 575,
+  "new_tests": 29,
+  "training": {
+    "H2": {
+      "updates": 8,
+      "skipped": 0,
+      "parameters": {
+        "smoother": 1420,
+        "transfer": 473,
+        "detector": 121,
+        "controller": 400
+      },
+      "all_updates_completed": true
+    },
+    "H2_PREPOST": {
+      "updates": 8,
+      "skipped": 0,
+      "parameters": {
+        "smoother": 1420,
+        "transfer": 473,
+        "detector": 121,
+        "controller": 400
+      },
+      "all_updates_completed": true
+    },
+    "H0": {
+      "updates": 8,
+      "skipped": 0,
+      "parameters": {
+        "smoother": 710,
+        "transfer": 473,
+        "detector": 121,
+        "controller": 400
+      },
+      "all_updates_completed": true
+    },
+    "H2_NH": {
+      "updates": 8,
+      "skipped": 0,
+      "parameters": {
+        "smoother": 1420,
+        "transfer": 473,
+        "detector": 121,
+        "controller": 400
+      },
+      "all_updates_completed": true
+    },
+    "H2_L": {
+      "updates": 8,
+      "skipped": 0,
+      "parameters": {
+        "smoother": 2840,
+        "transfer": 473,
+        "detector": 121,
+        "controller": 400
+      },
+      "all_updates_completed": true
+    },
+    "H2_2C": {
+      "updates": 8,
+      "skipped": 0,
+      "parameters": {
+        "smoother": 1420,
+        "transfer": 473,
+        "detector": 121,
+        "controller": 400
+      },
+      "all_updates_completed": true
+    },
+    "H1": {
+      "updates": 8,
+      "skipped": 0,
+      "parameters": {
+        "smoother": 5,
+        "transfer": 473,
+        "detector": 121,
+        "controller": 400
+      },
+      "all_updates_completed": true
+    },
+    "H3": {
+      "updates": 8,
+      "skipped": 0,
+      "parameters": {
+        "smoother": 2130,
+        "transfer": 473,
+        "detector": 121,
+        "controller": 400
+      },
+      "all_updates_completed": true
+    }
+  },
+  "full_research_training_run": false,
+  "user_final_ood_opened": false,
+  "exact_user_channel_rescue_replayed": false,
+  "synthetic_test_final_exercised": true,
+  "performance_certified": false,
+  "note": "Linux CPU single-thread, smoke8 updates only. Controller abstained. No superiority or OOD claim."
+}

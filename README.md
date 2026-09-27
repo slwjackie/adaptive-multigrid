@@ -1,8 +1,21 @@
-# Adaptive Neural Multigrid v6.7 — three-pillar fixes
+# Adaptive Neural Multigrid v6.7 — warm-first expert and policy study
 
 Standalone multigrid with **cached operator-generating neural networks**, a lightweight temporal break-even controller, optional block spatial selection, and a classical lock/recovery path.
 
 The new production API is `adaptive_mg.v67.PreparedAdaptiveMG`. The v6.6 exact-K API is retained only for legacy comparison/regression tests. No external Krylov solver is used by the new production path.
+
+## New: warm-first study (expert first, policy second)
+
+See [WARM_STUDY_RUNBOOK_KR.md](docs/WARM_STUDY_RUNBOOK_KR.md) for the new isolated
+`run_v6_7_warm_study.py` workflow: warm multi-RHS timing, tiny/multistage cached
+smoothers, no-harm/coarse-aware training, grouped replacement, and a continuous-size
+cost policy fitted only after expert selection. The old workflow below is retained.
+Use a NEW run; changed-source timing evidence is not resumable. Research candidates
+and empirical policy margins are not convergence or speedup certificates.
+
+H_P/H_SP research evidence and proposed next experiments are separately documented
+in [HP_HSP_RESEARCH_PLAN_KR.md](docs/HP_HSP_RESEARCH_PLAN_KR.md); these proposals are
+not claimed as implemented improvements in the warm-first H_S study.
 
 ## Start here: optimized strong-aware workflow
 

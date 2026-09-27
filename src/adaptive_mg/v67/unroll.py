@@ -10,7 +10,7 @@ from ..models import NeuralSmootherNet
 from ..smoothers import LineSmootherCache,_zebra_order,classical_smoothing_correction
 from ..strategy import get_strategy
 from .autograd_sparse import SparseTensor
-from .banks import selected_level,resolve_device
+from .banks import selected_level,resolve_device,smoothing_schedule
 from .spatial import features_from_statistics,expand_mask
 from .native import block_statistics
 
@@ -54,13 +54,15 @@ def make_graph(a,shape,components,cfg,*,learned=True):
         # Classical support/drop selection is frozen inside this differentiable
         # surrogate; it is recomputed from the actual Ac on every forward pass.
         base=baseline_weights(raw,sh,strategy.transfer,coarse=cs,**baseline_kwargs(cfg.mg))
-        enabled=learned and selected_level(index,cfg)
-        if enabled and cfg.use_transfer and hasattr(components.transfer,'complexity_caps'):
+        enabled=learned
+        use_p=enabled and selected_level(index,cfg,"transfer")
+        use_s=enabled and selected_level(index,cfg,"smoother")
+        if use_p and cfg.use_transfer and hasattr(components.transfer,'complexity_caps'):
             from .research_transfer import transfer_pattern_for_model
             pattern,base=transfer_pattern_for_model(pattern,components.transfer,base)
         level.pattern=pattern;level.base_weights=base
         feat=_features(at,sh).to(device=device,dtype=dtype)
-        if enabled and cfg.use_transfer:
+        if use_p and cfg.use_transfer:
             d=(components.transfer.forward_graph(at,pattern,base)
                if hasattr(components.transfer,'forward_graph') else components.transfer(feat))
             bt=torch.tensor(base,device=device,dtype=dtype)
@@ -88,8 +90,11 @@ def make_graph(a,shape,components,cfg,*,learned=True):
             level.p=SparseTensor.from_scipy(scipy_prolongation_from_weights(pattern,base))
             level.interpolation_weights=torch.tensor(base,dtype=torch.float64)
         ac=level.p.transpose().product(at.product(level.p)).symmetrize()
-        if enabled and cfg.use_smoother:
-            dirs,gains=components.smoother.direction_and_gain(feat)
+        if use_s and cfg.use_smoother:
+            cascade=hasattr(components.smoother,'stage_directions_and_gains')
+            dirs,gains=(components.smoother.stage_directions_and_gains(feat,index) if cascade
+                        else components.smoother.direction_and_gain(feat))
+            level.is_residual_cascade=cascade
             level.dirs=dirs.to('cpu',dtype=torch.float64);level.gains=gains.to('cpu',dtype=torch.float64)*cfg.mg.smoother_gain_multiplier
         level.coarse=build(ac,cs,index+1)
         return level
@@ -109,8 +114,15 @@ def _lines(level,direction):
 
 
 def neural_delta(level,r):
-    inp=(r/level.a.diagonal().abs().clamp_min(1e-14)).reshape(1,1,*level.shape)
-    return level.gains[0,0]*NeuralSmootherNet.apply_coefficients(level.dirs,inp)[0,0].ravel()
+    diagonal=level.a.diagonal().abs().clamp_min(1e-14)
+    stages=level.dirs.shape[1] if getattr(level,'is_residual_cascade',False) else 1
+    d=torch.zeros_like(r);current=r
+    for j in range(stages):
+        inp=(current/diagonal).reshape(1,1,*level.shape)
+        inc=level.gains[0,j]*NeuralSmootherNet.apply_coefficients(level.dirs[:,j:j+1],inp)[0,0].ravel()
+        d=d+inc
+        if j+1<stages:current=current-level.a.apply(inc)
+    return d
 
 
 def smooth(level,r,cfg,reverse=False,gate=None):
@@ -183,13 +195,15 @@ def cycle(level,x,b,components,cfg,step=0):
         if level.mask is None or step%cfg.gate_refresh==0:
             level.mask=graph_gate(level,b-level.a.apply(x),components,cfg)
         gate=level.mask
-    for j in range(cfg.mg.pre_steps):
-        r=b-level.a.apply(x);x=x+smooth(level,r,cfg,False,gate if j<cfg.replace_pre else None)
+    group=cfg.replacement_group_pre if gate is not None and bool(level.mask_hard.all()) else 1
+    for neural, _ in smoothing_schedule(cfg.mg.pre_steps, cfg.replace_pre if gate is not None else 0, group):
+        r=b-level.a.apply(x);x=x+smooth(level,r,cfg,False,gate if neural else None)
     r=b-level.a.apply(x);rc=level.p.transpose().apply(r)
     ec=cycle(level.coarse,torch.zeros_like(rc),rc,components,cfg,step)
     x=x+level.p.apply(ec)
-    for j in range(cfg.mg.post_steps):
-        r=b-level.a.apply(x);x=x+smooth(level,r,cfg,True,gate if j<cfg.replace_post else None)
+    group=cfg.replacement_group_post if gate is not None and bool(level.mask_hard.all()) else 1
+    for neural, _ in smoothing_schedule(cfg.mg.post_steps, cfg.replace_post if gate is not None else 0, group):
+        r=b-level.a.apply(x);x=x+smooth(level,r,cfg,True,gate if neural else None)
     return x
 
 

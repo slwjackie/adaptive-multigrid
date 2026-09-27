@@ -3,7 +3,7 @@
 Only development examples accepted by research_data enter these routines.
 Architecture/weight selection belongs to a separate measured validation step.
 """
-from copy import deepcopy
+from copy import deepcopy, copy
 from dataclasses import replace
 from pathlib import Path
 from time import perf_counter
@@ -44,7 +44,7 @@ def transfer_feasibility(root, model, cfg, reference_root=None):
     nnz=0;level=root
     while level is not None:
         nnz+=level.raw_scipy.count_nonzero()
-        if level.coarse is not None and selected_level(level.index,cfg):
+        if level.coarse is not None and selected_level(level.index,cfg,"transfer"):
             w=level.interpolation_weights
             baseline=torch.as_tensor(level.base_weights,dtype=w.dtype,device=w.device)
             # Delta-to-classical repair is finite even at zero new-edge weights;
@@ -147,10 +147,49 @@ def distillation_loss(student, teacher, branch):
     return torch.stack(terms).mean()
 
 
+def noharm_penalty(history, reference, tolerance, epsilon=0.05):
+    """One-sided excess penalty, not constant baseline subtraction or a proof."""
+    if not np.isfinite(epsilon+tolerance) or epsilon < 0 or tolerance <= 0:
+        raise ValueError('invalid no-harm tolerance/margin')
+    excess = history.clamp_min(tolerance).log() - reference.detach().clamp_min(tolerance).log()
+    weights = torch.arange(1, history.numel()+1, dtype=history.dtype, device=history.device)
+    weights = weights / weights.sum()
+    return (weights * F.relu(excess - np.log1p(epsilon)).square()).sum()
+
+
+def coarse_complement_objective(learned, classical, cfg, *, probes=2, seed=1):
+    """TRAIN-only: smooth errors outside the CLASSICAL coarse space.
+
+    Exact coarse projection is a training diagnostic, not the deployed V-cycle.
+    Full recursive-cycle loss is still required. Test vectors are detached.
+    """
+    from .unroll import neural_delta
+    if isinstance(probes,bool) or not isinstance(probes,int) or probes<1:
+        raise ValueError('coarse probes must be a positive integer')
+    terms=[]
+    for level, parent in zip(_levels(learned), _levels(classical)):
+        if level.dirs is None or not level.dirs.requires_grad:
+            continue
+        rng=torch.Generator(device='cpu').manual_seed(int(seed)+7919*level.index)
+        for _ in range(probes):
+            with torch.no_grad():
+                e=torch.randn(parent.a.shape[0], generator=rng, dtype=torch.float64)
+                correction=parent.p.apply(parent.coarse.a.solve(parent.p.transpose().apply(parent.a.apply(e))))
+                e=e-correction
+                energy=(e*parent.a.apply(e)).sum().clamp_min(1e-100)
+            after=e-neural_delta(level,level.a.apply(e))
+            terms.append((after*level.a.apply(after)).sum().clamp_min(1e-100).log()-energy.log())
+    return torch.stack(terms).mean() if terms else learned.a.values.new_zeros(())
+
+
 def full_cycle_objective(example, model, cfg, *, prefix=2, tail=1, teacher=None,
                          lambda_kd=0., lambda_mg=1., lambda_stability=.1,
-                         lambda_complexity=.01, lambda_compute=.02, compute_ratio=1.,lambda_feasibility=1.):
+                         lambda_complexity=.01, lambda_compute=.02, compute_ratio=1.,lambda_feasibility=1.,
+                         lambda_noharm=0., noharm_epsilon=.05, lambda_coarse=0.,
+                         coarse_probes=2, loss_seed=1):
     if prefix<1 or tail<0:raise ValueError('At least one full learned V-cycle is required')
+    if not np.isfinite(lambda_noharm+lambda_coarse) or min(lambda_noharm,lambda_coarse)<0:
+        raise ValueError('new loss weights must be finite and nonnegative')
     learned=make_graph(example.a,(example.n,example.n),model,cfg,learned=True)
     classical=make_graph(example.a,(example.n,example.n),model,cfg,learned=False)
     feasibility,repair=transfer_feasibility(learned,model,cfg,classical)
@@ -174,6 +213,17 @@ def full_cycle_objective(example, model, cfg, *, prefix=2, tail=1, teacher=None,
                                                   baseline=level.base_weights,a=level.a)
                 complexity_terms.append(proxy['loss'])
     complexity=torch.stack(complexity_terms).mean() if complexity_terms else mg.new_zeros(())
+    noharm=mg.new_zeros(());reference_history=h.detach().new_empty(0)
+    if lambda_noharm>0:
+        with torch.no_grad():
+            xc=torch.zeros_like(b);reference=[]
+            for k in range(prefix+tail):
+                xc=cycle(classical,xc,b,model,cfg,k)
+                reference.append(torch.linalg.vector_norm(b-classical.a.apply(xc))/norm0)
+            reference_history=torch.stack(reference)
+        noharm=noharm_penalty(h,reference_history,cfg.mg.tolerance,noharm_epsilon)
+    coarse=(coarse_complement_objective(learned,classical,cfg,probes=coarse_probes,seed=loss_seed)
+            if lambda_coarse>0 else mg.new_zeros(()))
     kd=mg.new_zeros(());kd_status='not_requested'
     if teacher is not None and lambda_kd>0:
         with torch.no_grad():
@@ -185,9 +235,10 @@ def full_cycle_objective(example, model, cfg, *, prefix=2, tail=1, teacher=None,
     # Architecture FLOPs/work calibration is constant for a fixed branch.
     # Sparse P soft occupancy is the differentiable work term; no clock gradient.
     compute=mg.new_tensor((prefix*compute_ratio+tail)/(prefix+tail))
-    loss=lambda_mg*mg+lambda_kd*kd+lambda_stability*stability+lambda_complexity*complexity+lambda_compute*compute+lambda_feasibility*repair
+    loss=lambda_mg*mg+lambda_kd*kd+lambda_stability*stability+lambda_complexity*complexity+lambda_compute*compute+lambda_feasibility*repair+lambda_noharm*noharm+lambda_coarse*coarse
     return loss,dict(multicycle=mg,kd=kd,stability=stability,complexity_proxy=complexity,
         compute_proxy=compute,feasibility_repair=repair,proposal_feasibility=feasibility,kd_status=kd_status,
+        noharm=noharm,reference_history=reference_history,coarse_complement=coarse,
         task_branch='learned_prefix' if feasibility['feasible'] else 'classical_fallback',
         history=h,actions=(['H']*prefix+['C']*tail if feasibility['feasible'] else ['C']*(prefix+tail))),x
 
@@ -220,6 +271,22 @@ def train_expert(initial, examples, cfg, rules, settings, out, *, branch, teache
     teacher_signature=teacher.generation_signature() if teacher else None
     schedule=np.random.default_rng(int(settings['seed'])).permutation(len(examples)).tolist()
     schedule=(schedule*((steps+len(schedule)-1)//len(schedule)))[:steps]
+    level_order=settings.get('coarse_to_fine_levels',[])
+    if level_order:
+        from ..grid import terminal, next_shape
+        from ..strategy import get_strategy
+        eligible={}
+        for target in level_order:
+            eligible[target]=[]
+            for i,e in enumerate(examples):
+                shape=(e.n,e.n);level=0
+                strategy=get_strategy(e.strong_selection['strategy_name'])
+                while not terminal(shape,cfg.mg.coarsest_n) and level<target:
+                    shape=next_shape(shape,strategy.coarsening,cfg.mg.coarsest_n,level_index=level);level+=1
+                if level==target and not terminal(shape,cfg.mg.coarsest_n):eligible[target].append(i)
+            if not eligible[target]:raise ValueError('no training operator reaches requested smoother level')
+        rng=np.random.default_rng(int(settings['seed']))
+        schedule=[int(rng.choice(eligible[level_order[min(len(level_order)-1,j*len(level_order)//steps)]])) for j in range(steps)]
     spec=dict(version=1,initial_signature=initial.generation_signature(),teacher_signature=teacher_signature,
         rules_digest=rules.digest(),branch=branch,config=cfg.to_dict(),settings=settings,
         sample_ids=[e.name for e in examples],sample_digests=[e.group_digest for e in examples],
@@ -263,8 +330,26 @@ def train_expert(initial, examples, cfg, rules, settings, out, *, branch, teache
         calibration=calibrate_work(examples[0],model,sample_config(examples[0],cfg,rules,branch),rules)
         write_json(calibration_path,calibration)
     start_time=perf_counter()
+    rhs_pool={}
+    level_order=settings.get('coarse_to_fine_levels',[])
+    if level_order and (branch!='H_S' or not hasattr(model.smoother,'train_only_level')
+                        or list(level_order)!=sorted(set(level_order),reverse=True)
+                        or any(v<0 or v>=len(model.smoother.levels) for v in level_order)):
+        raise ValueError('coarse-to-fine needs valid distinct descending H_S expert levels')
     for step in range(start,steps):
         e=examples[schedule[step]];scfg=sample_config(e,cfg,rules,branch)
+        active_level=None
+        if level_order:
+            active_level=level_order[min(len(level_order)-1,step*len(level_order)//steps)]
+            model.smoother.train_only_level(active_level)
+            scfg=replace(scfg,smoother_levels=tuple(v for v in level_order if v>=active_level))
+        rhs_variants=int(settings.get('rhs_variants',1))
+        if rhs_variants<1:raise ValueError('rhs_variants must be positive')
+        rhs_index=(step//len(examples))%rhs_variants
+        if rhs_variants>1:
+            from .research_evaluation import manufactured_rhs
+            if e.group_digest not in rhs_pool:rhs_pool[e.group_digest]=manufactured_rhs(e,rhs_variants)
+            rhs,exacts=rhs_pool[e.group_digest];e=copy(e);e.b=rhs[rhs_index];e.exact=exacts[rhs_index]
         optimizer.zero_grad(set_to_none=True);kd_phase=teacher is not None and step<kd_steps
         t=perf_counter()
         try:
@@ -274,13 +359,16 @@ def train_expert(initial, examples, cfg, rules, settings, out, *, branch, teache
                 lambda_mg=float(settings.get('lambda_mg',1.)),lambda_stability=float(settings.get('lambda_stability',.1)),
                 lambda_complexity=float(settings.get('lambda_complexity',.01)),lambda_compute=float(settings.get('lambda_compute',.02)),
                 lambda_feasibility=float(settings.get('lambda_feasibility',1.)),
-                compute_ratio=calibration['cycle_ratio'])
+                compute_ratio=calibration['cycle_ratio'],lambda_noharm=float(settings.get('lambda_noharm',0.)),
+                noharm_epsilon=float(settings.get('noharm_epsilon',.05)),
+                lambda_coarse=float(settings.get('lambda_coarse',0.)),
+                coarse_probes=int(settings.get('coarse_probes',2)),loss_seed=int(settings['seed'])+step)
             if not loss.requires_grad or not torch.isfinite(loss):raise FloatingPointError('nonfinite or inactive objective')
             loss.backward();norm=torch.nn.utils.clip_grad_norm_(parameters,float(settings.get('gradient_clip',2.)))
             if not torch.isfinite(norm):raise FloatingPointError('nonfinite gradient')
             optimizer.step()
             record=dict(step=step,operator=e.name,operator_digest=e.group_digest,selected_strategy=scfg.mg.strategy_name,
-                branch=branch,phase='distill_plus_task' if kd_phase else 'full_cycle_task',skipped=False,
+                branch=branch,rhs_index=rhs_index,active_level=active_level,phase='distill_plus_task' if kd_phase else 'full_cycle_task',skipped=False,
                 loss=float(loss.detach()),gradient_norm=float(norm),
                 **{key:(value.detach().tolist() if isinstance(value,torch.Tensor) else value) for key,value in details.items()})
         except (ValueError,RuntimeError,FloatingPointError) as error:

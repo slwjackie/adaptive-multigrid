@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from time import perf_counter
 import math
+from inspect import signature
 import numpy as np
 import scipy.linalg as la
 import scipy.sparse as sp
@@ -148,7 +149,10 @@ def energy_minimize(a, constraints, *, maxiter=150, rtol=1e-8):
         def count(_):
             nonlocal iterations
             iterations+=1
-        q,info=sla.cg(operator,rhs,rtol=rtol,atol=0.,maxiter=maxiter,callback=count)
+        # Keep the repository's scipy>=1.10 contract: older CG calls the
+        # relative tolerance `tol`; recent SciPy renamed it `rtol`.
+        tolerance_key='rtol' if 'rtol' in signature(sla.cg).parameters else 'tol'
+        q,info=sla.cg(operator,rhs,atol=0.,maxiter=maxiter,callback=count,**{tolerance_key:rtol})
         if not np.isfinite(q).all() or info<0:raise ValueError('projected energy CG failed')
         result=constraints.matrix(q);stationarity=float(la.norm(action(q)-rhs)/max(la.norm(rhs),1e-300))
     else:

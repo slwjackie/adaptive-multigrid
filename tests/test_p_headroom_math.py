@@ -99,3 +99,17 @@ def test_headroom_source_manifest():
     for line in (root/'P_HEADROOM_SOURCE.sha256').read_text().splitlines():
         expected,path=line.split('  ',1)
         assert hashlib.sha256((root/path).read_bytes()).hexdigest()==expected,path
+
+
+def test_energy_solver_supports_legacy_scipy_cg_tolerance(monkeypatch):
+    import adaptive_mg.v67.p_headroom as headroom
+    real=headroom.sla.cg
+    def old_cg(a,b,*,tol,atol,maxiter,callback):
+        from inspect import signature
+        name='rtol' if 'rtol' in signature(real).parameters else 'tol'
+        return real(a,b,atol=atol,maxiter=maxiter,callback=callback,**{name:tol})
+    monkeypatch.setattr(headroom.sla,'cg',old_cg)
+    a,p=problem();p[2,0]=.9;p[2,1]=.1
+    result,report=energy_minimize(a,AffineSupport.build(p,[1,3]))
+    assert report['optimizer_converged']
+    np.testing.assert_allclose(result.toarray()[2],[.5,.5],atol=1e-8)

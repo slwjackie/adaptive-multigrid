@@ -177,6 +177,60 @@ def test_continuous_runtime_reuses_parent_counts_probe_and_keeps_threshold(probe
     assert p.learned_builds_total==total
 
 
+
+
+def classical_runtime_policy(m,cfg,rules):
+    policy=runtime_policy(m,cfg,rules,0)
+    policy.model['beta']=[-20.]+[0.]*(len(policy.model['beta'])-1)
+    policy.model['optimism_margin']=0.
+    policy.model['minimum_log_gain']=0.
+    return policy
+
+
+def test_cost_policy_classical_fast_path_is_numerically_identical_to_strong_c():
+    from adaptive_mg.v67.cost_policy import PreparedCostMG
+    e=example(15);m=model();cfg=config();rules=StrongRules();policy=classical_runtime_policy(m,cfg,rules)
+    adaptive=PreparedCostMG(e.a,e.n,policy=policy,config=cfg,rules=rules)
+    strong=PreparedStrongMG(e.a,e.n,None,replace(cfg,mode='classical',branch='C'),rules)
+    a=adaptive.solve(e.b);c=strong.solve(e.b)
+    np.testing.assert_array_equal(a.x,c.x)
+    np.testing.assert_array_equal(a.residual_history,c.residual_history)
+    assert a.cycle_path==c.cycle_path and a.executed_cycles==c.executed_cycles
+    assert a.stopping_threshold==c.stopping_threshold and a.converged==c.converged
+    assert a.stats['learned_operator_applications']==0 and a.abstention['chosen_branch']=='C'
+
+
+def test_cost_policy_decides_once_per_batch_and_charges_one_controller_call(monkeypatch):
+    import adaptive_mg.v67.cost_policy as policies
+    e=example();m=model();cfg=config();rules=StrongRules();policy=classical_runtime_policy(m,cfg,rules)
+    calls={'n':0};original=policies.predict_cost
+    def counted(*args,**kwargs):
+        calls['n']+=1;return original(*args,**kwargs)
+    monkeypatch.setattr(policies,'predict_cost',counted)
+    p=policies.PreparedCostMG(e.a,e.n,policy=policy,config=cfg,rules=rules)
+    rhs=np.stack([e.b,e.b*1.1,e.b*.9,e.b*1.2])
+    rows=p.solve_many(rhs)
+    assert calls['n']==1
+    assert sum(r.stats.get('controller_calls',0) for r in rows)==1
+    assert sum(r.stats.get('policy_batch_decisions',0) for r in rows)==1
+    assert all(r.abstention['chosen_branch']=='C' for r in rows)
+
+
+def test_frozen_expert_full_signature_is_only_rechecked_after_tensor_revision(monkeypatch):
+    from adaptive_mg.v67.cost_policy import PreparedCostMG
+    e=example();m=model().frozen_inference_copy();cfg=config();rules=StrongRules();policy=classical_runtime_policy(m,cfg,rules)
+    p=PreparedCostMG(e.a,e.n,policy=policy,config=cfg,rules=rules)
+    original=p.policy.expert.signature;calls={'n':0}
+    def counted():
+        calls['n']+=1;return original()
+    monkeypatch.setattr(p.policy.expert,'signature',counted)
+    p.solve(e.b);p.solve(e.b)
+    assert calls['n']==0
+    with torch.no_grad():next(p.policy.expert.smoother.parameters()).add_(1e-5)
+    r=p.solve(e.b)
+    assert calls['n']==1 and r.abstention['chosen_branch']=='C'
+    assert r.abstention['cost_policy']['reason']=='stale_policy'
+
 def test_continuous_policy_rejects_changed_expert(tmp_path):
     from adaptive_mg.v67.cost_policy import ContinuousCostPolicy
     e=example();m=model();cfg=config();policy=runtime_policy(m,cfg,StrongRules())
@@ -245,6 +299,8 @@ def test_full_warm_study_workflow_pins_expert_policy_and_synthetic_final(tmp_pat
     with pytest.raises(ValueError,match='selected'):flow.train_variants(out,['H2_L'],resume=True)
     policy=flow.fit_policy(out);flow.fit_policy(out,resume=True)
     assert policy.model['train_operator_ids']!=policy.model['tune_operator_ids']
+    overhead=flow.policy_overhead(out,sizes=(7,15),repeats=1,rhs_count=1)
+    assert overhead['rows'] and all(r['numerically_identical'] and r['policy_batch_decisions']==1 for r in overhead['rows'])
     with pytest.raises(FileNotFoundError):flow.freeze(out,**protocol)
     report=flow.validate_policy(out,probes=(0,1),**protocol)
     flow.validate_policy(out,probes=(0,1),resume=True,**protocol)

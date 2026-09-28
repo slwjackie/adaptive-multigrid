@@ -25,14 +25,14 @@ from .config import AdaptiveConfig
 from .models import Components
 from .multistage import make_multistage
 from .solver import PreparedAdaptiveMG
-from .strong import classical_bank, load_strong_rules
+from .strong import PreparedStrongMG, classical_bank, load_strong_rules
 from .limited import digest_file
 from .research_data import (_generate_split, _restore, _hash, _digests, _write_json,
     historical_operator_index, freeze_research, claim_final_evaluation,
     materialize_final_data, complete_final_evaluation)
 from .research_training import create_research_components, train_expert
 from .research_evaluation import evaluate_research, manufactured_rhs, REGIMES
-from .cost_policy import (ContinuousCostPolicy, fit_cost_model, config_scope,
+from .cost_policy import (ContinuousCostPolicy, PreparedCostMG, fit_cost_model, config_scope,
                           context_from_record)
 from .three_pillars import (calibrate, _load_run, _development, _read, _sources,
                             _report, _ensure_development_open)
@@ -285,6 +285,73 @@ def validate_policy(output,*,probes=(0,),tag='policy_validation',resume=False,**
     return report
 
 
+def policy_overhead(output,*,sizes=(7,15,31,63),repeats=20,rhs_count=4):
+    """Microbenchmark the adaptive->C wrapper only; never fit/select from these rows.
+
+    The expert bank is prepared outside the timer, the policy is forced to C by
+    an impossible gain threshold, and exact C*(A) numerical equivalence is
+    checked before timing. This is a development implementation diagnostic, not
+    policy evidence and never enters architecture/policy/final selection.
+    """
+    if not sizes or any(int(n)<3 for n in sizes) or repeats<1 or rhs_count<1:
+        raise ValueError('invalid policy-overhead protocol')
+    out,settings,cfg,rules=_load(output);_ensure_development_open(out)
+    _,expert,chosen=_selected(out,settings,cfg,rules)
+    policy=_policy(out,expert,0)
+    forced_model=deepcopy(policy.model);forced_model['minimum_log_gain']=1e9
+    forced=replace(policy,model=forced_model,probe_cycles=0)
+    data=prepare_data(out)
+    forbidden={e.group_digest for rows in data.values() for e in rows}
+    calibration=_read(out/'calibration_manifest.json')
+    forbidden|=_digests(calibration)
+    spec=dict(sizes=[int(n) for n in sizes],per_family=1,families=['near_isotropic'],
+              seed=int(settings['seed'])+918273645)
+    examples,records,_=_generate_split('policy_overhead',spec,forbidden,rules)
+    manifest=dict(version=VERSION,spec=spec,rules_digest=rules.digest(),records=records,
+                  diagnostic_only=True,never_policy_training=True,never_final=True)
+    manifest_path=out/'policy/policy_overhead_manifest.json'
+    if manifest_path.exists():
+        if _read(manifest_path)!=manifest:raise ValueError('policy overhead diagnostic plan changed; use a new run')
+    else:_write_json(manifest_path,manifest,exclusive=True)
+    rows=[]
+    classical_cfg=replace(chosen,mode='classical',branch='C')
+    for e in examples:
+        strong=PreparedStrongMG(e.a,e.n,None,classical_cfg,rules)
+        adaptive=PreparedCostMG(e.a,e.n,policy=forced,config=chosen,rules=rules)
+        all_rhs,_=manufactured_rhs(e,rhs_count+1);timed=all_rhs[:rhs_count];prime=all_rhs[-1]
+        adaptive.prepare_warm();strong.solve(prime);adaptive.solve(prime)
+        # First untimed batch is an exact numerical contract check.
+        ccheck=strong.solve_many(timed);acheck=adaptive.solve_many(timed)
+        for c,a in zip(ccheck,acheck):
+            if c.executed_cycles!=a.executed_cycles or c.cycle_path!=a.cycle_path or not np.array_equal(c.x,a.x):
+                raise RuntimeError('adaptive C fast path differs numerically from strong_C')
+        ct=[];at=[];controller=[];decisions=[]
+        for repeat in range(repeats):
+            if repeat%2==0:
+                t=perf_counter();cr=strong.solve_many(timed);ct.append(perf_counter()-t)
+                t=perf_counter();ar=adaptive.solve_many(timed);at.append(perf_counter()-t)
+            else:
+                t=perf_counter();ar=adaptive.solve_many(timed);at.append(perf_counter()-t)
+                t=perf_counter();cr=strong.solve_many(timed);ct.append(perf_counter()-t)
+            controller.append(sum(r.stats.get('controller_seconds',0.) for r in ar))
+            decisions.append(sum(r.stats.get('policy_batch_decisions',0) for r in ar))
+            if any(r.abstention.get('chosen_branch')!='C' for r in ar):
+                raise RuntimeError('forced policy-overhead diagnostic unexpectedly used H_S')
+        cm=float(np.median(ct));am=float(np.median(at))
+        rows.append(dict(n=e.n,N=e.a.shape[0],rhs_count=rhs_count,repeats=repeats,
+            strong_seconds=cm,adaptive_C_seconds=am,strong_over_adaptive=cm/am,
+            adaptive_overhead_fraction=am/cm-1.,controller_seconds=float(np.median(controller)),
+            policy_batch_decisions=int(round(float(np.median(decisions)))),numerically_identical=True,
+            selected_strategy=strong.selection.strategy_name,rule_id=strong.selection.rule_id))
+        print('[policy-overhead] n=',e.n,'ratio adaptive/strong=',am/cm,
+              'controller=',float(np.median(controller)),flush=True)
+    report=dict(version=VERSION,rows=rows,hardware=hardware_environment(),
+        scope='development-only forced-C warm microbenchmark; not policy/architecture/final evidence',
+        target='adaptive C overhead should approach strong_C; numerical equality required')
+    write_json(out/'policy/policy_overhead.json',report)
+    return report
+
+
 def freeze(output,*,probes=0,**protocol):
     out,settings,cfg,rules=_load(output)
     selected,expert,chosen=_selected(out,settings,cfg,rules)
@@ -371,7 +438,7 @@ def diagnose(source_run,case_name,output,*,rhs_count=64,rhs_index=None,repeats=3
 
 def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__);sub=parser.add_subparsers(dest='command',required=True)
-    for name in ('calibrate','prepare','train','benchmark','select','policy-fit','policy-validate','freeze','final'):
+    for name in ('calibrate','prepare','train','benchmark','select','policy-fit','policy-validate','policy-overhead','freeze','final'):
         p=sub.add_parser(name);p.add_argument('--run-dir',required=True)
         if name in ('calibrate','train','benchmark','policy-fit','policy-validate','final'):p.add_argument('--resume',action='store_true')
         if name=='calibrate':p.add_argument('--config',default='configs/v6_7_warm_study_smoke.json')
@@ -385,6 +452,9 @@ def main(argv=None):
         if name=='policy-validate':
             p.add_argument('--tag',default='policy_validation');p.add_argument('--probes',nargs='+',type=int,default=[0])
         if name=='freeze':p.add_argument('--probes',type=int,default=0)
+        if name=='policy-overhead':
+            p.add_argument('--sizes',nargs='+',type=int,default=[7,15,31,63]);p.add_argument('--repeats',type=int,default=20)
+            p.add_argument('--rhs-count',type=int,default=4)
     p=sub.add_parser('diagnose');p.add_argument('--source-run',required=True);p.add_argument('--case',required=True)
     p.add_argument('--output',required=True);p.add_argument('--rhs-count',type=int,default=64)
     p.add_argument('--rhs-index',type=int);p.add_argument('--repeats',type=int,default=3)
@@ -395,6 +465,7 @@ def main(argv=None):
     if a.command=='train':return train_variants(a.run_dir,a.variants,resume=a.resume)
     if a.command=='select':return select_expert(a.run_dir,tag=a.tag,name=a.variant)
     if a.command=='policy-fit':return fit_policy(a.run_dir,resume=a.resume)
+    if a.command=='policy-overhead':return policy_overhead(a.run_dir,sizes=a.sizes,repeats=a.repeats,rhs_count=a.rhs_count)
     if a.command=='final':return final(a.run_dir,resume=a.resume)
     kw=dict(repeats=a.repeats,warmups=a.warmups,rhs_counts=a.rhs_counts,regimes=a.regimes)
     if a.command=='benchmark':return benchmark_experts(a.run_dir,a.variants,tag=a.tag,resume=a.resume,**kw)

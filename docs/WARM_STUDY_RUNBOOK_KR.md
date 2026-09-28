@@ -182,6 +182,33 @@ Probe=0이 기본. Probe1/2는 model이 H를 선택한 경우에만 C1/2 cycle�
 Probe 이후 iterate를 재시작하지 않고 original residual threshold/cycle budget을 유지한다.
 Probe/decision 비용은 warm timer 안에 포함한다. Residual safety는 속도 우위 증명이 아니다.
 
+### D-1. adaptive → C fast path overhead 진단
+
+최종 expert와 policy를 고정한 뒤, policy가 C를 선택했을 때 wrapper 자체가 strong_C보다
+얼마나 느린지 별도의 개발용 microbenchmark로 확인한다. 이 진단은 policy 학습/architecture
+선택/final evidence에 절대 사용하지 않는다. C 선택을 강제하고 numerical equality를 먼저
+검사한 뒤 warm batch만 측정한다.
+
+```bash
+python scripts/run_v6_7_warm_study.py policy-overhead \
+  --run-dir "$RUN" \
+  --sizes 7 15 31 63 \
+  --repeats 20 \
+  --rhs-count 4
+```
+
+결과는 `$RUN/policy/policy_overhead.json`에 저장된다. 각 size에서
+`adaptive_overhead_fraction`, `strong_over_adaptive`, `controller_seconds`,
+`policy_batch_decisions`, `numerically_identical`을 확인한다. 목표는 C를 선택했을 때
+`adaptive_overhead_fraction`을 가능한 한 0에 가깝게 만드는 것이다. 작은 grid에서는
+절대 시간이 매우 짧아 상대 overhead 비율의 noise가 클 수 있으므로 여러 repeat의 median을 본다.
+
+새 runtime은 `solve_many`에서 policy prediction을 batch당 한 번만 수행한다. C가 선택되면
+Neural bank나 generic adaptive state를 만들지 않고 동일한 C*(A) hierarchy의 전용 fast path로
+직행한다. Frozen expert freshness는 매 solve마다 full weight hash를 계산하지 않고 tensor
+revision/device/dtype token을 우선 검사하며, revision이 실제로 바뀐 경우에만 full signature를
+재검증한다. Expert 변경이 감지되면 policy는 stale로 처리되어 C로 abstain한다.
+
 ## E. 결과 파일과 중단 재개
 
 ```
@@ -190,6 +217,7 @@ $RUN/expert_selection.json
 $RUN/study_split_manifest.json
 $RUN/benchmarks/architecture/{comparison.json,comparison.csv,raw_results.json}
 $RUN/policy/{policy.json,labels.json,policy_fit/,policy_tune/}
+$RUN/policy/{policy_overhead.json,policy_overhead_manifest.json}
 $RUN/benchmarks/policy_validation/{comparison.json,policy_coverage.json}
 $RUN/policy_validation_evidence.json
 ```

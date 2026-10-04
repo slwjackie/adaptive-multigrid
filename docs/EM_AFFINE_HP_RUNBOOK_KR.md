@@ -91,7 +91,7 @@ python scripts/run_v6_7_em_transfer_study.py policy-validate --run-dir "$RUN" \
   --repeats 3 --warmups 1 --rhs-counts 1 4 --regimes warm_multiple multiple
 ```
 
-Smoke: n=7,15, train14/validation14, 8 optimizer updates, width8, random2+slow2 probes,
+Smoke: n=7,15, train14/validation14, 8 optimizer updates, width4, random2+slow2 probes,
 3 raw cycles, numerical selection at 0/4/8 updates. Calibration uses actual distinct RHS
 and excludes preparation; 88 plans × train/tune operators are measured.
 Policy fit/tune/validation are separate normalized-A-disjoint splits, each4 operators.

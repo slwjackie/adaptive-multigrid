@@ -50,8 +50,15 @@ class _Product(torch.autograd.Function):
 
 class _Solve(torch.autograd.Function):
     @staticmethod
-    def forward(ctx,values,b,pattern):
-        a=_csr(values,pattern);lu=sla.splu(a.tocsc());x=lu.solve(b.detach().cpu().double().numpy())
+    def forward(ctx,values,b,pattern,cache):
+        # Cache lifetime is this immutable SparseTensor/forward graph, not the
+        # operator family or grid size. Normal torch mutations invalidate it.
+        key=(id(values),values._version,values.data_ptr(),str(values.dtype),str(values.device))
+        if cache.get('lu_key')!=key:
+            cache['lu']=sla.splu(_csr(values,pattern).tocsc())
+            cache['lu_key']=key
+            cache['factorizations']=cache.get('factorizations',0)+1
+        lu=cache['lu'];x=lu.solve(b.detach().cpu().double().numpy())
         ctx.lu=lu;ctx.x=x;ctx.pattern=pattern;ctx.save_for_backward(values,b)
         return torch.tensor(x,dtype=b.dtype,device=b.device)
     @staticmethod
@@ -60,7 +67,7 @@ class _Solve(torch.autograd.Function):
         gb=ctx.lu.solve(g.detach().cpu().double().numpy(),trans='T')
         rows=np.repeat(np.arange(p.shape[0]),np.diff(p.indptr));gv=-gb[rows]*ctx.x[p.indices]
         if gv.ndim>1:gv=gv.sum(1)
-        return torch.tensor(gv,dtype=values.dtype,device=values.device),torch.tensor(gb,dtype=b.dtype,device=b.device),None
+        return torch.tensor(gv,dtype=values.dtype,device=values.device),torch.tensor(gb,dtype=b.dtype,device=b.device),None,None
 
 @dataclass
 class SparseTensor:
@@ -88,7 +95,7 @@ class SparseTensor:
     def cols(self):return self.pattern.indices
     def numpy(self):return _csr(self.values,self.pattern)
     def apply(self,x):return _Apply.apply(self.values,x,self.pattern)
-    def solve(self,b):return _Solve.apply(self.values,b,self.pattern)
+    def solve(self,b):return _Solve.apply(self.values,b,self.pattern,self.cache)
     def transpose(self):return SparseTensor.from_coo(self.cols,self.rows,self.values,(self.shape[1],self.shape[0]))
     def product(self,other):
         pattern=(self.pattern@other.pattern).tocsr();pattern.sort_indices();pattern.data[:]=1

@@ -42,18 +42,21 @@ def _features(a,shape):
     return torch.stack(channels).reshape(1,10,nx,ny).float()
 
 
-def make_graph(a,shape,components,cfg,*,learned=True):
+def make_graph(a,shape,components,cfg,*,learned=True,reference_root=None):
     device=resolve_device(cfg,cells=shape[0]*shape[1]); dtype=torch.float32 if cfg.inference_dtype=='float32' else torch.float64
     for net in (components.smoother,components.transfer):net.to(device=device,dtype=dtype)
     strategy=get_strategy(cfg.mg.strategy_name)
-    def build(at,sh,index):
+    frozen=learned and cfg.use_transfer and getattr(components.transfer,'reference','actual')=='frozen_parent'
+    if frozen and reference_root is None:
+        reference_root=make_graph(a,shape,components,cfg,learned=False)
+    def build(at,sh,index,reference=None):
         raw=at.numpy();level=TLevel(at,sh,index,strategy,raw_scipy=raw)
         if terminal(sh,cfg.mg.coarsest_n):return level
         cs=next_shape(sh,strategy.coarsening,cfg.mg.coarsest_n,level_index=index)
-        pattern=build_transfer_pattern(sh,cs)
+        pattern=reference.pattern if frozen else build_transfer_pattern(sh,cs)
         # Classical support/drop selection is frozen inside this differentiable
         # surrogate; it is recomputed from the actual Ac on every forward pass.
-        base=baseline_weights(raw,sh,strategy.transfer,coarse=cs,**baseline_kwargs(cfg.mg))
+        base=reference.base_weights if frozen else baseline_weights(raw,sh,strategy.transfer,coarse=cs,**baseline_kwargs(cfg.mg))
         enabled=learned
         use_p=enabled and selected_level(index,cfg,"transfer")
         use_s=enabled and selected_level(index,cfg,"smoother")
@@ -85,6 +88,8 @@ def make_graph(a,shape,components,cfg,*,learned=True):
             values=torch.where(torch.tensor(inject)[:,None],torch.tensor(base),values)
             level.interpolation_weights=values
             cols=pattern.columns.ravel();rr=np.repeat(np.arange(base.shape[0]),base.shape[1]);ok=cols>=0
+            if getattr(components.transfer,'support','standard')=='support_preserving':
+                ok=ok & (base.ravel()!=0)
             level.p=SparseTensor.from_coo(rr[ok],cols[ok],values.ravel()[torch.tensor(ok)],(base.shape[0],pattern.n_coarse_unknowns))
         else:
             level.p=SparseTensor.from_scipy(scipy_prolongation_from_weights(pattern,base))
@@ -96,9 +101,9 @@ def make_graph(a,shape,components,cfg,*,learned=True):
                         else components.smoother.direction_and_gain(feat))
             level.is_residual_cascade=cascade
             level.dirs=dirs.to('cpu',dtype=torch.float64);level.gains=gains.to('cpu',dtype=torch.float64)*cfg.mg.smoother_gain_multiplier
-        level.coarse=build(ac,cs,index+1)
+        level.coarse=build(ac,cs,index+1,reference.coarse if frozen else None)
         return level
-    return build(SparseTensor.from_scipy(a),shape,0)
+    return build(SparseTensor.from_scipy(a),shape,0,reference_root)
 
 
 def _lines(level,direction):
@@ -113,19 +118,52 @@ def _lines(level,direction):
     return blocks
 
 
+def _line_batches(level,direction,reverse=False):
+    """Exact zebra batches only when SYMBOLIC same-colour blocks are uncoupled.
+
+    Checking symbolic support avoids discarding a zero entry with a nonzero
+    derivative. If coupling exists, preserve the original sequential sweep.
+    """
+    key=('zebra_autograd',direction)
+    if key not in level.a.cache:
+        cache=LineSmootherCache(level.raw_scipy,level.shape)
+        lines=cache._line_sets(direction)
+        ids=np.full(level.a.shape[0],-1,dtype=np.int64)
+        for j,ix in enumerate(lines):ids[ix]=j
+        rr,cc=level.a.rows,level.a.cols
+        coupled=np.any((ids[rr]!=ids[cc]) & (ids[rr]%2==ids[cc]%2))
+        if coupled:
+            level.a.cache[key]=None
+        else:
+            groups=[np.concatenate(lines[colour::2]) for colour in (0,1) if lines[colour::2]]
+            level.a.cache[key]=[(ix,level.a.slice(ix,ix),level.a.slice(np.arange(level.a.shape[0]),ix)) for ix in groups]
+    blocks=level.a.cache[key]
+    if blocks is None:
+        seq=_lines(level,direction)
+        return [seq[j] for j in _zebra_order(len(seq),reverse)]
+    return list(reversed(blocks)) if reverse else blocks
+
+
 def neural_delta(level,r):
     diagonal=level.a.diagonal().abs().clamp_min(1e-14)
+    matrix=r.ndim==2
+    if r.ndim not in (1,2):raise ValueError('residual must be (N,) or (N,probes)')
+    columns=r.shape[1] if matrix else 1
     stages=level.dirs.shape[1] if getattr(level,'is_residual_cascade',False) else 1
     d=torch.zeros_like(r);current=r
     for j in range(stages):
-        inp=(current/diagonal).reshape(1,1,*level.shape)
-        inc=level.gains[0,j]*NeuralSmootherNet.apply_coefficients(level.dirs[:,j:j+1],inp)[0,0].ravel()
+        scaled=current/(diagonal[:,None] if matrix else diagonal)
+        inp=(scaled.T if matrix else scaled).reshape(columns,1,*level.shape)
+        directions=level.dirs[:,j:j+1].expand(columns,-1,-1,-1,-1)
+        out=level.gains[0,j]*NeuralSmootherNet.apply_coefficients(directions,inp)[:,0]
+        inc=out.reshape(columns,-1).T if matrix else out.ravel()
         d=d+inc
         if j+1<stages:current=current-level.a.apply(inc)
     return d
 
 
 def smooth(level,r,cfg,reverse=False,gate=None):
+    if r.ndim==2 and gate is not None and not bool(gate.any()):gate=None
     kind=level.strategy.smoother;has=gate is not None and level.dirs is not None
     hard_mask=level.mask_hard if level.mask_hard is not None else (gate.detach()>=cfg.gate_on if has else None)
     if has and bool(hard_mask.all()):
@@ -135,29 +173,34 @@ def smooth(level,r,cfg,reverse=False,gate=None):
         sp=(1-gate.mean())*dc+gate.mean()*dn
         return sp+(dn-sp).detach()
     diag=level.a.diagonal().abs().clamp_min(1e-14)
+    den=diag[:,None] if r.ndim==2 else diag
     if kind=='jacobi':
-        dc=cfg.mg.jacobi_omega*r/diag
+        dc=cfg.mg.jacobi_omega*r/den
         if not has:return dc
         soft=gate;hard=hard_mask.double();dn=neural_delta(level,r)
         # Product STE: closed forward branches still train all participating heads.
         sp=(1-soft)*dc+soft*dn;hp=(1-hard)*dc+hard*dn
         return sp+(hp-sp).detach()
     if kind=='chebyshev':
-        row=level.a.rows;rs=torch.zeros(r.numel(),dtype=r.dtype).index_add(0,torch.tensor(row),level.a.values.abs())
+        row=level.a.rows;rs=torch.zeros(r.shape[0],dtype=r.dtype).index_add(0,torch.tensor(row),level.a.values.abs())
         lm=(1.05*torch.max(rs/diag)).clamp_min(1e-6).detach();lo=cfg.mg.chebyshev_lower_fraction*lm
         center=(lm+lo)/2;rad=(lm-lo)/2
         roots=sorted([center-rad*np.cos((2*k-1)*np.pi/(2*cfg.mg.chebyshev_degree)) for k in range(1,cfg.mg.chebyshev_degree+1)],key=float,reverse=True)
         d=torch.zeros_like(r);cur=r
         for root in roots:
-            inc=cur/(diag*root);d=d+inc;cur=cur-level.a.apply(inc)
+            inc=cur/(den*root);d=d+inc;cur=cur-level.a.apply(inc)
         return d
     dirs={'line_x':('x',),'line_y':('y',),'line_diag45':('diag45',),
           'line_alt':('y','x') if reverse else ('x','y')}[kind]
     d=torch.zeros_like(r);cur=r
     for direction in dirs:
-        blocks=_lines(level,direction)
-        for i in _zebra_order(len(blocks),reverse):
-            ix,block,columns=blocks[i];idx=torch.tensor(ix)
+        if has:
+            original=_lines(level,direction)
+            blocks=[original[i] for i in _zebra_order(len(original),reverse)]
+        else:
+            blocks=_line_batches(level,direction,reverse)
+        for ix,block,columns in blocks:
+            idx=torch.tensor(ix)
             ci=block.solve(cur[idx])
             if has:
                 # Actual deployment replaces only whole selected lines.
@@ -170,6 +213,11 @@ def smooth(level,r,cfg,reverse=False,gate=None):
 
 
 def graph_gate(level,r,components,cfg):
+    if r.ndim==2:
+        if cfg.spatial and cfg.gate_mode not in ('open','closed'):
+            raise ValueError('batched probes require fixed open/closed spatial gates')
+        level.mask_hard=torch.full((r.shape[0],),cfg.gate_mode!='closed',dtype=torch.bool)
+        return level.mask_hard.to(r.dtype)
     if not cfg.spatial or cfg.gate_mode=='open':
         level.mask_hard=torch.ones_like(r,dtype=torch.bool);return torch.ones_like(r)
     if cfg.gate_mode=='closed':

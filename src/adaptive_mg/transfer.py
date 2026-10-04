@@ -27,7 +27,7 @@ from .grid import (
     validate_root_shape,
 )
 
-TransferBaseline = Literal["bilinear", "operator"]
+TransferBaseline = Literal["bilinear", "operator", "energymin"]
 OFFSETS_9: tuple[tuple[int, int], ...] = (
     (0, 0), (-1, 0), (1, 0), (0, -1), (0, 1),
     (-1, -1), (-1, 1), (1, -1), (1, 1),
@@ -428,6 +428,8 @@ def baseline_weights(
     operator_blend: float = 0.75,
     operator_drop_tolerance: float = 1.0e-4,
     operator_candidate_topk: int | None = 8,
+    em_iterations: int = 10,
+    em_rtol: float = 1e-8,
 ) -> np.ndarray:
     pattern = build_transfer_pattern(
         fine,
@@ -438,6 +440,9 @@ def baseline_weights(
     )
     if baseline == "bilinear":
         return pattern.bilinear_weights.copy()
+    if baseline == "energymin":
+        from .energymin import energy_weights
+        return energy_weights(a, pattern, maxiter=em_iterations, rtol=em_rtol)[0]
     if baseline == "operator":
         return operator_dependent_weights(
             a,

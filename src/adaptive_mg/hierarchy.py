@@ -25,6 +25,9 @@ class WorkStats:
     lazy_line_setup_seconds: float = 0.0
     coarse_l_nnz: int = 0
     coarse_u_nnz: int = 0
+    em_levels: int = 0
+    em_iterations: int = 0
+    em_setup_seconds: float = 0.0
     hierarchy_setup_seconds: float = 0.0
     nn_setup_seconds: float = 0.0
     neural_setup_calls: int = 0
@@ -80,6 +83,7 @@ class FixedLevel:
     base_weights: np.ndarray | None = None
     features: np.ndarray | None = None
     neural_stencil: object | None = None
+    transfer_setup_report: dict | None = None
 
 class StencilBank:
     """Native application does not force a redundant CSR allocation.
@@ -115,7 +119,8 @@ class StencilBank:
         return out
 
 def baseline_kwargs(config):
-    return dict(operator_sweeps=config.operator_sweeps,operator_omega=config.operator_omega,
+    return dict(em_iterations=config.em_iterations,em_rtol=config.em_rtol,
+                operator_sweeps=config.operator_sweeps,operator_omega=config.operator_omega,
                 operator_blend=config.operator_blend,operator_drop_tolerance=config.operator_drop_tolerance,
                 operator_candidate_topk=config.operator_candidate_topk)
 
@@ -131,7 +136,13 @@ def build_fixed_hierarchy(a, shape, strategy, config, stats, *, index=0, auxilia
     else:
         coarse_shape=next_shape(shape,strategy.coarsening,config.coarsest_n,level_index=index)
         level.pattern=build_transfer_pattern(shape,coarse_shape)
-        level.base_weights=baseline_weights(a,shape,strategy.transfer,coarse=coarse_shape,**baseline_kwargs(config))
+        if strategy.transfer=='energymin':
+            from .energymin import energy_weights
+            level.base_weights,level.transfer_setup_report=energy_weights(a,level.pattern,maxiter=config.em_iterations,rtol=config.em_rtol)
+            stats.em_levels+=1;stats.em_iterations+=level.transfer_setup_report['iterations']
+            stats.em_setup_seconds+=level.transfer_setup_report['setup_seconds']
+        else:
+            level.base_weights=baseline_weights(a,shape,strategy.transfer,coarse=coarse_shape,**baseline_kwargs(config))
         level.p=scipy_prolongation_from_weights(level.pattern,level.base_weights)
         level.r=level.p.T.tocsr()
         level.cache=LineSmootherCache(a,shape)

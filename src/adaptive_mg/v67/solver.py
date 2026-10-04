@@ -85,7 +85,7 @@ class PreparedAdaptiveMG:
     def _base_scope(self):
         mg=self.config.mg
         return (self.shape,mg.strategy_name,mg.coarsest_n,mg.operator_sweeps,mg.operator_omega,
-                mg.operator_blend,mg.operator_drop_tolerance,mg.operator_candidate_topk)
+                mg.operator_blend,mg.operator_drop_tolerance,mg.operator_candidate_topk,mg.em_iterations,mg.em_rtol)
     def _component_key(self,name):
         module=getattr(self.components,name)
         return (self.components.expert_signature(name),tuple((str(v.device),str(v.dtype)) for v in tuple(module.parameters())+tuple(module.buffers())))

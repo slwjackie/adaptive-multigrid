@@ -143,6 +143,8 @@ def _hierarchy(level):
                          operator_nnz=int(level.a.nnz),
                          prolongation_shape=list(level.p.shape) if level.p is not None else None,
                          prolongation_nnz=int(level.p.nnz) if level.p is not None else 0))
+        if getattr(level,"transfer_setup_report",None) is not None:
+            rows[-1]["transfer_setup_report"]=dict(level.transfer_setup_report)
         level = level.coarse
     return rows
 

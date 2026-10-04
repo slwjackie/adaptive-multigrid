@@ -158,10 +158,15 @@ class GraphTransferNet(nn.Module):
     of the candidate channels only permute the output.  Zero-initialized decoder
     gives exactly the selected classical P before any optimizer update.
     """
-    def __init__(self, architecture="small_gnn", *, width=None, layers=None, max_delta=0.35, support="standard", complexity_caps=None):
+    def __init__(self, architecture="small_gnn", *, width=None, layers=None, max_delta=0.35, support="standard", complexity_caps=None, parameterization="softmax", reference="actual", support_only=False):
         super().__init__()
         if architecture not in {"small_gnn", "edge_mlp", "gnn_teacher"}:
             raise ValueError(f"Unknown graph transfer architecture: {architecture}")
+        if parameterization not in ('softmax','affine') or reference not in ('actual','frozen_parent'):
+            raise ValueError('invalid transfer parameterization/reference')
+        if (parameterization=='affine' or support_only or reference=='frozen_parent') and support!='support_preserving':
+            raise ValueError('new affine/frozen/support-only modes require parent support')
+        self.parameterization=parameterization;self.reference=reference;self.support_only=bool(support_only)
         teacher = architecture == "gnn_teacher"
         width = (48 if teacher else 24) if width is None else width
         layers = (4 if teacher else 0 if architecture == "edge_mlp" else 2) if layers is None else layers
@@ -187,8 +192,12 @@ class GraphTransferNet(nn.Module):
         nn.init.zeros_(self.delta_head.bias)
 
     def architecture_config(self):
-        return dict(architecture=self.architecture, width=self.width, layers=self.layers,
-                    max_delta=self.max_delta, support=self.support, complexity_caps=dict(self.complexity_caps), schema=2 if self.support=="support_preserving" else 1, training_only=self.training_only)
+        result=dict(architecture=self.architecture, width=self.width, layers=self.layers,
+                    max_delta=self.max_delta, support=self.support, complexity_caps=dict(self.complexity_caps),
+                    schema=2 if self.support=='support_preserving' else 1,training_only=self.training_only)
+        if self.parameterization!='softmax' or self.reference!='actual' or self.support_only:
+            result.update(schema=3,parameterization=self.parameterization,reference=self.reference,support_only=self.support_only)
+        return result
 
     def forward(self, *args, **kwargs):
         raise TypeError("GraphTransferNet requires forward_graph(A, pattern, baseline); image-only input loses sparse connectivity")
@@ -199,10 +208,23 @@ class GraphTransferNet(nn.Module):
         h = self.node_encoder(graph.nodes)
         for layer in self.message_layers:
             h = layer(h, graph)
-        sources = h[:, None, :].expand(-1, pattern.n_candidates, -1)
-        edge_hidden = self.edge_encoder(torch.cat((sources, h[graph.candidate_nodes], graph.candidate_features), dim=-1))
-        raw = self.max_delta * torch.tanh(self.delta_head(edge_hidden)[..., 0])
-        raw = raw * graph.candidate_valid
+        if self.support_only:
+            valid=graph.baseline!=0
+            valid=valid & (valid.sum(1)>1)[:,None]
+            valid[torch.as_tensor(coarse_fine_indices(pattern),device=h.device)]=False
+            rr,cc=torch.where(valid)
+            selected=self.edge_encoder(torch.cat((h[rr],h[graph.candidate_nodes[rr,cc]],graph.candidate_features[rr,cc]),-1))
+            values=self.delta_head(selected)[:,0]
+            if self.parameterization=='softmax':values=self.max_delta*torch.tanh(values)
+            raw=h.new_zeros(graph.baseline.shape).index_put((rr,cc),values)
+            # Only requested KD diagnostics allocate the dense hidden slots.
+            edge_hidden=h.new_zeros((*graph.baseline.shape,self.width)).index_put((rr,cc),selected) if return_details else None
+        else:
+            sources=h[:,None,:].expand(-1,pattern.n_candidates,-1)
+            edge_hidden=self.edge_encoder(torch.cat((sources,h[graph.candidate_nodes],graph.candidate_features),dim=-1))
+            raw=self.delta_head(edge_hidden)[...,0]
+            if self.parameterization=='softmax':raw=self.max_delta*torch.tanh(raw)
+            raw=raw*graph.candidate_valid
         nx, ny = pattern.fine_shape
         delta = raw.reshape(nx, ny, pattern.n_candidates).permute(2, 0, 1).unsqueeze(0)
         if not return_details:
@@ -216,9 +238,10 @@ class GraphTransferNet(nn.Module):
 
 
 def make_graph_transfer(architecture="small_gnn", **kwargs):
-    schema = kwargs.pop("schema", 2 if kwargs.get("support")=="support_preserving" else 1)
+    schema = kwargs.pop('schema',3 if kwargs.get('parameterization','softmax')!='softmax' or kwargs.get('reference','actual')!='actual' or kwargs.get('support_only',False) else (2 if kwargs.get('support')=='support_preserving' else 1))
     training_only = kwargs.pop("training_only", architecture == "gnn_teacher")
-    if schema != (2 if kwargs.get("support")=="support_preserving" else 1) or bool(training_only) != (architecture == "gnn_teacher"):
+    expected=3 if kwargs.get('parameterization','softmax')!='softmax' or kwargs.get('reference','actual')!='actual' or kwargs.get('support_only',False) else (2 if kwargs.get('support')=='support_preserving' else 1)
+    if schema != expected or bool(training_only) != (architecture == 'gnn_teacher'):
         raise ValueError("Incompatible graph transfer architecture metadata")
     return GraphTransferNet(architecture, **kwargs)
 
@@ -269,6 +292,19 @@ def project_transfer_weights(module, pattern, delta, baseline):
     """
     if isinstance(baseline, np.ndarray):
         baseline = np.array(baseline, copy=True)
+    if getattr(module,'parameterization','softmax')=='affine':
+        base=torch.as_tensor(baseline,dtype=delta.dtype,device=delta.device)
+        raw=delta[0].permute(1,2,0).reshape_as(base)
+        mask=base!=0
+        change=torch.where(mask,raw,torch.zeros_like(raw))
+        change=change-change.sum(1,keepdim=True)*mask/mask.sum(1,keepdim=True).clamp_min(1)
+        fixed=torch.as_tensor(coarse_fine_indices(pattern),device=base.device)
+        free=torch.ones(base.shape[0],dtype=base.dtype,device=base.device).index_fill(0,fixed,0.)
+        change=change*free[:,None]
+        # Sufficient convex L1 trust region. Bound the resulting P, not raw logits.
+        room=(8.-base.abs().sum(1,keepdim=True)).clamp_min(0)
+        alpha=(room/change.abs().sum(1,keepdim=True).clamp_min(1e-30)).clamp(max=1.)
+        return base+alpha*change
     if getattr(module,'support','standard')=='support_preserving':
         # Mask the softmax domain itself. Invalid candidate logits have zero
         # gradient and can never activate edges outside the parent support.

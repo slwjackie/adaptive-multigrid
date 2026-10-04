@@ -208,7 +208,7 @@ def calibrate_from_run(input_run, research, rules, output, *, minimum_leaf_cases
     return frozen, evidence
 
 
-def measure_classical_portfolio(examples, cfg, rules, *, repeats=3, rhs_count=2, bank='controlled', seed=2209):
+def measure_classical_portfolio(examples, cfg, rules, *, repeats=3, rhs_count=2, bank='controlled', seed=2209, regime='multiple'):
     """Cold per-A portfolio costs; all distinct RHS must converge.
 
     Selection features/labels are recorded once outside candidate timing, since
@@ -220,6 +220,8 @@ def measure_classical_portfolio(examples, cfg, rules, *, repeats=3, rhs_count=2,
     from .solver import PreparedAdaptiveMG
     from .research_evaluation import manufactured_rhs
     from ..provenance import stable_norm
+    if regime not in ('multiple','warm_multiple'):
+        raise ValueError('calibration regime must be multiple or warm_multiple')
     if repeats < 1 or rhs_count < 1:
         raise ValueError('positive repeats and RHS count required')
     rng=np.random.default_rng(seed)
@@ -238,13 +240,19 @@ def measure_classical_portfolio(examples, cfg, rules, *, repeats=3, rhs_count=2,
                 started=perf_counter()
                 try:
                     prepared=PreparedAdaptiveMG(e.a,e.n,config=chosen)
+                    preparation=0.
+                    if regime=='warm_multiple':
+                        prime,_=manufactured_rhs(e,rhs_count+1)
+                        prepared.solve(prime[-1])
+                        preparation=perf_counter()-started
+                        started=perf_counter()
                     result=prepared.solve_many(bs)
                     seconds=perf_counter()-started
                     true=[stable_norm(b-e.a@r.x) for b,r in zip(bs,result)]
                     ok=len(result)==rhs_count and all(r.converged and np.isfinite(v)
                         and v<=r.stopping_threshold and r.executed_cycles<=cfg.mg.max_cycles
                         for r,v in zip(result,true))
-                    record=dict(seconds=seconds,success=bool(ok),
+                    record=dict(seconds=seconds,preparation_seconds=preparation,regime=regime,measurement_config=prepared.config.to_dict(),success=bool(ok),
                                 cycles=[r.executed_cycles for r in result],true_residual=true,
                                 thresholds=[r.stopping_threshold for r in result])
                 except (ValueError,RuntimeError,FloatingPointError,np.linalg.LinAlgError) as exc:
@@ -252,7 +260,7 @@ def measure_classical_portfolio(examples, cfg, rules, *, repeats=3, rhs_count=2,
                 runs[str(strategy)].append(record)
         rows.append(dict(name=e.name,normalized_operator_digest=e.group_digest,
                          operator_digest=e.digest,n=e.n,rule_id=selection.rule_id,
-                         rules_digest=rules.digest(),rhs_count=rhs_count,runs=runs))
+                         rules_digest=rules.digest(),rhs_count=rhs_count,regime=regime,repeats=repeats,runs=runs))
     return rows
 
 
@@ -274,8 +282,11 @@ def calibrate_multisize(train_rows, tune_rows, rules, *, required_sizes,
     if (any(not isinstance(n,int) or isinstance(n,bool) or n<3 or n&(n+1) for n in sizes)
             or any(b!=2*a+1 for a,b in zip(sizes,sizes[1:]))):
         raise ValueError('coverage needs consecutive 2**L-1 grid sizes')
-    if fixed_strategy not in {s.name for s in classical_bank('all')}:
-        raise ValueError('unknown fixed strategy')
+    from ..strategy import get_strategy
+    get_strategy(fixed_strategy)
+    scopes={(r.get('regime','multiple'),r['rhs_count'],r.get('repeats')) for r in train_rows+tune_rows}
+    if len(scopes)!=1:
+        raise ValueError('mixed calibration workload scopes')
     seen=set()
     for rows in (train_rows,tune_rows):
         for row in rows:
@@ -328,7 +339,7 @@ def calibrate_multisize(train_rows, tune_rows, rules, *, required_sizes,
         report.update(selected_strategy=best,status='train_selected_tune_admitted',
                       train_geometric_seconds=float(np.exp(cost(train,best))),
                       tune_geometric_seconds=float(np.exp(cost(tune,best))))
-    evidence=dict(version=2,leaves=reports,required_sizes=list(sizes),
+    evidence=dict(version=2,measurement_regime=train_rows[0].get('regime','multiple'),leaves=reports,required_sizes=list(sizes),
                   independent_train_operators=len(train_rows),independent_tune_operators=len(tune_rows),
                   minimum_leaf_cases=minimum_leaf_cases,cycle_margin=cycle_margin,max_cycles=max_cycles,
                   fixed_reference=fixed_strategy,all_rhs_required=True,final_used=False,

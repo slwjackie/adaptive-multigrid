@@ -1,5 +1,16 @@
 # Adaptive Neural Multigrid v6.7 — warm-first expert and policy study
 
+## New primary H_P workflow: EM + schedules + asymptotic affine transfer
+
+[EM_AFFINE_HP_RUNBOOK_KR.md](docs/EM_AFFINE_HP_RUNBOOK_KR.md) documents the new
+`run_v6_7_em_transfer_study.py` pipeline: warm-calibrated classical plans,
+vectorized constrained EM, batched differentiable V-cycles, all-level
+fixed-parent affine P, persistent slow probes and measured checkpoint selection,
+followed by an independently fitted **C/H_P** policy. Existing H_S architectures
+and old CLIs remain available. Start a NEW run after source changes.
+This is an implemented experiment, not a claim that the NN beats the new baseline.
+
+
 Standalone multigrid with **cached operator-generating neural networks**, a lightweight temporal break-even controller, optional block spatial selection, and a classical lock/recovery path.
 
 The new production API is `adaptive_mg.v67.PreparedAdaptiveMG`. The v6.6 exact-K API is retained only for legacy comparison/regression tests. No external Krylov solver is used by the new production path.

@@ -69,6 +69,12 @@ class AffineSupport:
             raise ValueError('mode/target shape mismatch')
         if not np.isfinite(bc).all() or not np.isfinite(bf).all():
             raise ValueError('nonfinite modes')
+        if coarse_modes is None and fine_targets is None:
+            from ..energymin import row_sum_basis
+            rows=np.repeat(np.arange(n),np.diff(base.indptr))
+            obj=cls(base,rows,base.indices.copy(),base.data.copy(),row_sum_basis(base,fixed),bc.copy(),bf.copy(),fixed.copy())
+            obj.validate(obj.matrix())
+            return obj
         fixed_set=set(fixed.tolist()); particular=base.data.copy()
         rows=np.repeat(np.arange(n),np.diff(base.indptr)); cols=base.indices.copy()
         zr,zc,zv=[],[],[]; offset=0

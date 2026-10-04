@@ -22,6 +22,8 @@ class MGConfig:
     jacobi_omega: float = 0.72
     chebyshev_degree: int = 2
     chebyshev_lower_fraction: float = 0.15
+    em_iterations: int = 10
+    em_rtol: float = 1e-8
     operator_sweeps: int = 3
     operator_omega: float = 0.70
     operator_blend: float = 0.75
@@ -48,6 +50,16 @@ class MGConfig:
     verbose: bool = False
 
     def __post_init__(self):
+        from .strategy import get_strategy
+        plan = get_strategy(self.strategy_name)
+        for key in ('pre_steps', 'post_steps', 'em_iterations'):
+            value = getattr(plan, key)
+            if value is not None:
+                object.__setattr__(self, key, value)
+        if isinstance(self.em_iterations, bool) or not isinstance(self.em_iterations, int) or self.em_iterations < 1:
+            raise ValueError('EM iteration budget must be a positive integer')
+        if not math.isfinite(self.em_rtol) or not 0 < self.em_rtol < 1:
+            raise ValueError('EM relative tolerance must be in (0,1)')
         if self.mode not in {"classical", "fixed", "temporal", "predicted"}:
             raise ValueError("mode must be classical/fixed/temporal/predicted")
         ints = ("fixed_k", "max_nn_cycles", "max_cycles", "pre_steps", "post_steps",

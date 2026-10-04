@@ -16,7 +16,7 @@ class AdaptiveConfig:
     # None retains the legacy first-nn_levels policy. Explicit levels are static,
     # operator-only experiment settings, not residual-dependent interpolation.
     smoother_levels: tuple[int, ...] | None = None
-    transfer_levels: tuple[int, ...] | None = None
+    transfer_levels: tuple[int, ...] | str | None = None
     # Number of consecutive classical slots replaced by ONE neural application.
     # Example: replace_pre=2, replacement_group_pre=2 implements 2C -> 1H.
     replacement_group_pre: int = 1
@@ -48,6 +48,7 @@ class AdaptiveConfig:
     def __post_init__(self):
         for key in ('smoother_levels', 'transfer_levels'):
             value = getattr(self, key)
+            if key=='transfer_levels' and value=='all':continue
             if value is not None:
                 if (not isinstance(value, (tuple, list)) or len(set(value)) != len(value)
                         or any(isinstance(v, bool) or not isinstance(v, int) or v < 0 for v in value)):

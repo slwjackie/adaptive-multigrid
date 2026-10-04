@@ -20,6 +20,9 @@ class MGStrategy:
     smoother: SmootherKind
     transfer: TransferBaseline
     coarsening: CoarseningKind
+    pre_steps: int | None = None
+    post_steps: int | None = None
+    em_iterations: int | None = None
 
 
 SMOOTHER_PRIMITIVES: Final[tuple[SmootherKind, ...]] = (
@@ -97,7 +100,28 @@ def strategy_index(name: str) -> int:
     raise ValueError(f"unknown controlled MG strategy: {name}")
 
 
+def em_schedule_bank():
+    """Versioned optional plans; legacy STRATEGIES/classifier outputs unchanged."""
+    result = []
+    bases = list(STRATEGIES) + [MGStrategy(f'{s}_energymin_full', s, 'energymin', 'full')
+                               for s in ('jacobi', 'line_alt', 'line_diag45')]
+    for base in bases:
+        iterations = (5, 10) if base.transfer == 'energymin' else (None,)
+        for it in iterations:
+            for pre, post in ((2, 2), (1, 2), (2, 1), (1, 1)):
+                suffix = f'__em{it}' if it is not None else ''
+                name = f'{base.name}{suffix}__v{pre}{post}'
+                result.append(MGStrategy(name, base.smoother, base.transfer, base.coarsening, pre, post, it))
+    return tuple(result)
+
+
+EM_SCHEDULE_STRATEGIES = em_schedule_bank()
+EM_SCHEDULE_BY_NAME = {s.name: s for s in EM_SCHEDULE_STRATEGIES}
+
+
 def get_strategy(name: str) -> MGStrategy:
+    if name in EM_SCHEDULE_BY_NAME:
+        return EM_SCHEDULE_BY_NAME[name]
     if name in STRATEGY_BY_NAME:
         return STRATEGY_BY_NAME[name]
     if name in ALL_STRATEGY_BY_NAME:

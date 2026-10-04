@@ -104,6 +104,7 @@ class CachedGenerationFailure(RuntimeError):
 
 def selected_level(index, cfg, component=None):
     levels = getattr(cfg, component + '_levels', None) if component else None
+    if component=='transfer' and levels=='all':return True
     return index in levels if levels is not None else (cfg.mg.nn_levels == -1 or index < cfg.mg.nn_levels)
 
 
@@ -262,9 +263,13 @@ def prepare_transfer_bank(base,components,cfg,stats):
             else: level.lu=sla.splu(a.tocsc());stats.learned_factorizations+=1
             return level
         shape_c=next_shape(shape,base.strategy.coarsening,cfg.mg.coarsest_n,level_index=index)
-        level.pattern=base_level.pattern if same else build_transfer_pattern(shape,shape_c)
-        level.base_weights=base_level.base_weights if same else baseline_weights(a,shape,base.strategy.transfer,coarse=shape_c,**baseline_kwargs(cfg.mg))
-        classical_p=(base_level.p if same else scipy_prolongation_from_weights(level.pattern,level.base_weights)) if hasattr(components.transfer,'complexity_caps') else None
+        frozen=getattr(components.transfer,'reference','actual')=='frozen_parent'
+        if frozen and (base_level is None or base_level.shape!=shape):
+            raise ValueError('fixed parent hierarchy shape mismatch')
+        reuse=same or frozen
+        level.pattern=base_level.pattern if reuse else build_transfer_pattern(shape,shape_c)
+        level.base_weights=base_level.base_weights if reuse else baseline_weights(a,shape,base.strategy.transfer,coarse=shape_c,**baseline_kwargs(cfg.mg))
+        classical_p=(base_level.p if reuse else scipy_prolongation_from_weights(level.pattern,level.base_weights)) if hasattr(components.transfer,'complexity_caps') else None
         level._classical_p=classical_p
         level.cache=base_level.cache if same else LineSmootherCache(a,shape)
         if not same:

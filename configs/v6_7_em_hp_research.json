@@ -1,0 +1,216 @@
+{
+  "version": "three-pillars-v1",
+  "smoke": false,
+  "seed": 2026100501,
+  "torch_threads": 1,
+  "calibration_sizes": [
+    15,
+    31,
+    63
+  ],
+  "calibration_per_family": 3,
+  "calibration_repeats": 3,
+  "calibration_rhs": 2,
+  "minimum_leaf_cases": 6,
+  "cycle_margin": 0.8,
+  "bank": "em_schedule",
+  "training_sizes": [
+    15,
+    31,
+    63
+  ],
+  "validation_sizes": [
+    15,
+    31,
+    63
+  ],
+  "training_per_family": 8,
+  "validation_per_family": 2,
+  "hidden": 16,
+  "support": "support_preserving",
+  "complexity_caps": {
+    "max_row_nnz": 16,
+    "max_p_ratio": 1.0,
+    "max_ac_ratio": 1.15,
+    "max_operator_complexity": 3.0,
+    "complexity_reference": "parent",
+    "max_operator_complexity_ratio": 1.15,
+    "hard_max_operator_complexity": null
+  },
+  "training": {
+    "seed": 2026100501,
+    "updates": 1120,
+    "learning_rate": 0.001,
+    "random_probes": 8,
+    "slow_probes": 8,
+    "probe_cycles": 4,
+    "power_cycles": 3,
+    "lambda_tail": 0.3,
+    "tail_temperature": 0.15,
+    "lambda_stability": 0.1,
+    "gradient_clip": 2.0,
+    "validate_every": 80,
+    "validation_rhs": 4,
+    "validation_repeats": 3,
+    "validation_tail_cycles": 24,
+    "reference_cache_size": 8
+  },
+  "solver": {
+    "mg": {
+      "mode": "classical",
+      "fixed_k": 0,
+      "max_nn_cycles": 6,
+      "max_cycles": 150,
+      "tolerance": 1e-08,
+      "absolute_tolerance": 1e-12,
+      "residual_reference": "initial",
+      "pre_steps": 2,
+      "post_steps": 2,
+      "coarsest_n": 3,
+      "strategy_name": "line_alt_bilinear_full__v22",
+      "jacobi_omega": 0.72,
+      "chebyshev_degree": 2,
+      "chebyshev_lower_fraction": 0.15,
+      "operator_sweeps": 3,
+      "operator_omega": 0.7,
+      "operator_blend": 0.75,
+      "operator_drop_tolerance": 0.0001,
+      "operator_candidate_topk": 8,
+      "nn_levels": 1,
+      "smoother_gain_multiplier": 1.0,
+      "stencil_backend": "auto",
+      "native_threads": 1,
+      "native_min_cells": 2048,
+      "native_parallel_min": 32768,
+      "safety_growth": 1.0,
+      "safety_rtol_slack": 1e-12,
+      "stagnation_rho": 0.98,
+      "stagnation_patience": 2,
+      "near_tolerance_factor": 10.0,
+      "reserve_classical_cycles": 1,
+      "divergence_factor": 1000000000000.0,
+      "device": "cpu",
+      "verbose": false
+    },
+    "mode": "research",
+    "branch": "auto",
+    "use_smoother": false,
+    "use_transfer": true,
+    "application": "replace",
+    "replace_pre": 1,
+    "replace_post": 0,
+    "auto_device_min_cells": 4096,
+    "inference_device": "cpu",
+    "inference_dtype": "float32",
+    "lazy": true,
+    "spatial": false,
+    "gate_mode": "open",
+    "gate_on": 0.65,
+    "gate_off": 0.45,
+    "gate_refresh": 4,
+    "detector_max_side": 16,
+    "detector_features": "current",
+    "active_skip": 0.05,
+    "active_dense": 0.5,
+    "min_dwell": 2,
+    "hybrid_horizon": 4,
+    "max_hybrid_entries": 4,
+    "break_even": true,
+    "win_margin": 0.05,
+    "exit_efficiency_ratio": 1.0,
+    "underperformance_patience": 2,
+    "cycle_budget_ratio": 1.15,
+    "use_learned_controller": false,
+    "record_trace": false,
+    "transfer_levels": "all",
+    "smoother_levels": [
+      0
+    ]
+  },
+  "study": {
+    "version": "warm-study-v1",
+    "variants": {},
+    "policy_splits": {
+      "policy_fit": {
+        "sizes": [
+          15,
+          31,
+          63
+        ],
+        "per_family": 2,
+        "families": [
+          "near_isotropic",
+          "aligned_anisotropy",
+          "rotated_anisotropy",
+          "local_patch",
+          "checkerboard",
+          "channel",
+          "variable_coefficient"
+        ],
+        "seed": 2037100504
+      },
+      "policy_tune": {
+        "sizes": [
+          15,
+          31,
+          63
+        ],
+        "per_family": 1,
+        "families": [
+          "near_isotropic",
+          "aligned_anisotropy",
+          "rotated_anisotropy",
+          "local_patch",
+          "checkerboard",
+          "channel",
+          "variable_coefficient"
+        ],
+        "seed": 2048100507
+      },
+      "policy_validation": {
+        "sizes": [
+          15,
+          31,
+          63
+        ],
+        "per_family": 2,
+        "families": [
+          "near_isotropic",
+          "aligned_anisotropy",
+          "rotated_anisotropy",
+          "local_patch",
+          "checkerboard",
+          "channel",
+          "variable_coefficient"
+        ],
+        "seed": 2059100510
+      }
+    },
+    "policy": {
+      "minimum_operators": 6,
+      "minimum_strategy_operators": 2,
+      "ridge": 1.0,
+      "uncertainty_floor": 0.02,
+      "optimism_quantile": 0.95,
+      "minimum_speedup_margin": 0.03,
+      "max_size_extrapolation": 20.0,
+      "extrapolation_penalty": 0.08,
+      "measurement": {
+        "repeats": 3,
+        "warmups": 1,
+        "rhs_counts": [
+          1,
+          4,
+          16,
+          64
+        ],
+        "regimes": [
+          "multiple",
+          "warm_multiple"
+        ]
+      }
+    }
+  },
+  "em_hp_version": "em-affine-hp-study-v1",
+  "calibration_regime": "warm_multiple"
+}

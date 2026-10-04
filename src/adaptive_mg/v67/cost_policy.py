@@ -29,12 +29,16 @@ NUMERIC_FEATURES = ('log_N', 'log_nnz_per_row', 'log_depth', 'log_complexity',
                     'local_anisotropic_fraction')
 
 
-def config_scope(config):
+def config_scope(config, *, plan_selection=False):
     value = config.to_dict()
     for key in ('mode', 'branch', 'use_smoother', 'use_transfer', 'record_trace'):
         value.pop(key, None)
     value['mg'].pop('strategy_name', None)
     value['mg'].pop('verbose', None)
+    if plan_selection:
+        # Resolved schedules/EM budgets are already bound by frozen rules names.
+        for key in ('pre_steps','post_steps','em_iterations'):value['mg'].pop(key,None)
+        value['selected_plan_scope']='frozen_rules_v1'
     return json_safe(value)
 
 
@@ -176,14 +180,18 @@ class ContinuousCostPolicy:
     provenance: dict
     probe_cycles: int = 0
     continuous_size_policy: bool = True
+    branch: str = "H_S"
+
+    def __post_init__(self):
+        if self.branch not in ("H_S","H_P"):raise ValueError("cost policy expert must be H_S or H_P")
 
     @property
-    def models(self): return {'H_S':self.expert}
+    def models(self): return {self.branch:self.expert}
 
     def to_dict(self):
         return dict(version=VERSION,model=self.model,rules_digest=self.rules_digest,solver_scope=self.solver_scope,
                     hardware=self.hardware,expert_signature=self.expert_signature,provenance=self.provenance,
-                    probe_cycles=self.probe_cycles,performance_certified=False)
+                    probe_cycles=self.probe_cycles,performance_certified=False,**({"branch":self.branch} if self.branch!="H_S" else {}))
 
     def digest(self): return _hash(self.to_dict())
 
@@ -209,7 +217,13 @@ class PreparedCostMG(PreparedStrongMG):
     """
     def __init__(self,a,n,*,policy,config,rules,expected_rhs=1):
         self.policy=policy;self.expected_rhs=expected_rhs
-        if config_scope(config)!=policy.solver_scope or rules.digest()!=policy.rules_digest:
+        if policy.branch=='H_P':
+            from ..strategy import get_strategy
+            names=list(dict(rules.strategy_by_rule).values())
+            if rules.require_coverage:names.append(rules.fallback_strategy_name)
+            if any(get_strategy(name).pre_steps is None for name in names):
+                raise ValueError('H_P cost policy requires explicit schedule plans, including coverage fallback')
+        if config_scope(config,plan_selection=policy.branch=="H_P")!=policy.solver_scope or rules.digest()!=policy.rules_digest:
             raise ValueError('policy solver/rules contract mismatch')
         if hardware_environment()!=policy.hardware:
             raise ValueError('policy hardware/thread/library contract mismatch')
@@ -217,7 +231,7 @@ class PreparedCostMG(PreparedStrongMG):
             raise ValueError('expert changed; refit policy')
         self._policy_valid=True
         self.policy_id=policy.digest()
-        super().__init__(a,n,policy.expert,replace(config,mode='research',branch='auto',use_transfer=False),rules)
+        super().__init__(a,n,policy.expert,replace(config,mode='research',branch='auto',use_transfer=policy.branch=='H_P',use_smoother=policy.branch=='H_S'),rules)
 
     def _expert_revision_token(self):
         """Cheap frozen-expert mutation/device guard; full hashes are exceptional."""
@@ -233,7 +247,7 @@ class PreparedCostMG(PreparedStrongMG):
         self._cost_context=context_from_prepared(self,1,False)
         self._prediction_cache={}
         self._scope_config=self.config
-        self._scope_ok=(config_scope(self.config)==self.policy.solver_scope)
+        self._scope_ok=(config_scope(self.config,plan_selection=self.policy.branch=="H_P")==self.policy.solver_scope)
         self._expert_revision=self._expert_revision_token()
         self._policy_valid=(self.model_digest==self.policy.expert_signature and
                             self._rules_snapshot==self.policy.rules_digest and self._scope_ok)
@@ -242,6 +256,7 @@ class PreparedCostMG(PreparedStrongMG):
         self.learned=None;self._learned_branch=None
         self.smoother_banks={};self.branch_banks={};self.generated_stencil_cache={}
         self.failed_smoother_banks={}
+        self.transfer_banks={};self.failed_transfer_banks={}
 
     def _ensure_fresh(self):
         """Match strong-C A/rule freshness without hashing frozen NN weights each call."""
@@ -251,7 +266,7 @@ class PreparedCostMG(PreparedStrongMG):
             self._build();return
         if self.config != self._scope_config:
             self._scope_config=self.config
-            self._scope_ok=(config_scope(self.config)==self.policy.solver_scope)
+            self._scope_ok=(config_scope(self.config,plan_selection=self.policy.branch=="H_P")==self.policy.solver_scope)
         revision=self._expert_revision_token()
         if revision!=self._expert_revision:
             self._expert_revision=revision
@@ -263,7 +278,7 @@ class PreparedCostMG(PreparedStrongMG):
                             self._rules_snapshot==self.policy.rules_digest and self._scope_ok)
 
     def prepare_warm(self):
-        st=Stats();self.ensure_branch('H_S',st)
+        st=Stats();self.ensure_branch(self.policy.branch,st)
         self.warm_preparation_stats=st.to_dict()
 
     def _decision(self,rhs_count,cached):
@@ -274,7 +289,7 @@ class PreparedCostMG(PreparedStrongMG):
             self._prediction_cache[key]=(predict_cost(self.policy.model,context) if self._policy_valid else
                                          ('C',dict(reason='stale_policy',certificate=False)))
         branch,saved=self._prediction_cache[key]
-        return branch,dict(saved),context,perf_counter()-begin
+        return self.policy.branch if branch!="C" else "C",dict(saved),context,perf_counter()-begin
 
     def _classical_fast(self,b,x0=None):
         """Numerically identical C*(A) solve without generic adaptive state allocation."""
@@ -323,7 +338,7 @@ class PreparedCostMG(PreparedStrongMG):
     def _solve_decided(self,b,x0,branch,detail,context,decision_seconds=0.,controller_call=False):
         cfg=self.config;norms=[];times=[];st=Stats();x=None;threshold=None;ref=None
         # A probe is RHS-local, but only after ONE batch-level H decision.
-        if branch=='H_S' and self.policy.probe_cycles:
+        if branch!='C' and self.policy.probe_cycles:
             x=np.zeros_like(b,dtype=np.float64) if x0 is None else np.array(x0,np.float64,copy=True)
             b=np.asarray(b,np.float64)
             if b.shape!=(self.a.shape[0],) or x.shape!=b.shape or not np.isfinite(b).all() or not np.isfinite(x).all():
@@ -372,7 +387,7 @@ class PreparedCostMG(PreparedStrongMG):
     def solve(self,b,x0=None):
         self.expected_rhs=1
         t=perf_counter();before=self.cache_rebuilds;self._ensure_fresh();fresh=perf_counter()-t
-        branch,detail,context,decision=self._decision(1,bool(self.smoother_banks))
+        branch,detail,context,decision=self._decision(1,bool(self.transfer_banks if self.policy.branch=='H_P' else self.smoother_banks))
         result=self._solve_decided(b,x0,branch,detail,context,decision,True)
         extra=max(0.,fresh-(self.initial_setup_seconds if self.cache_rebuilds>before else 0))
         result.solve_seconds+=extra;result.stats['freshness_checks']=1;result.stats['freshness_seconds']=fresh
@@ -385,7 +400,7 @@ class PreparedCostMG(PreparedStrongMG):
         if x0 is not None and xs.shape!=bs.shape:raise ValueError('x0 batch mismatch')
         self.expected_rhs=len(bs)
         t=perf_counter();before=self.cache_rebuilds;self._ensure_fresh();fresh=perf_counter()-t
-        branch,detail,context,decision=self._decision(len(bs),bool(self.smoother_banks))
+        branch,detail,context,decision=self._decision(len(bs),bool(self.transfer_banks if self.policy.branch=='H_P' else self.smoother_banks))
         out=[]
         for index,(b,x) in enumerate(zip(bs,xs)):
             out.append(self._solve_decided(b,x,branch,dict(detail),context,
@@ -399,6 +414,6 @@ class PreparedCostMG(PreparedStrongMG):
 
     def _solve(self,b,x0=None):
         """Compatibility for callers that bypass solve(); normal APIs decide above."""
-        branch,detail,context,decision=self._decision(self.expected_rhs,bool(self.smoother_banks))
+        branch,detail,context,decision=self._decision(self.expected_rhs,bool(self.transfer_banks if self.policy.branch=='H_P' else self.smoother_banks))
         return self._solve_decided(b,x0,branch,detail,context,decision,True)
 

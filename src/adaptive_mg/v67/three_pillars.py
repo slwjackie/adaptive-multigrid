@@ -137,7 +137,8 @@ def calibrate(config_path, output, *, resume=False):
             else:
                 row=measure_classical_portfolio([e],cfg,initial,
                     repeats=int(settings['calibration_repeats']),rhs_count=int(settings['calibration_rhs']),
-                    bank=settings.get('bank','controlled'),seed=int(settings['seed'])+index)[0]
+                    bank=settings.get('bank','controlled'),seed=int(settings['seed'])+index,
+                    regime=settings.get('calibration_regime','multiple'))[0]
                 write_json(target,dict(request_digest=request,row=row))
             rows.append(row)
             print(f'[calibration {name}] {index+1}/{len(examples)} {e.name}',flush=True)

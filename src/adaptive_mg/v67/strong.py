@@ -147,6 +147,9 @@ def classical_bank(name='controlled'):
     y-first, alternating. Semi modes eventually reduce both dimensions. The
     bank has no -45-degree line, AMG aggregation, ILU or external solver.
     """
+    if name == 'em_schedule':
+        from ..strategy import EM_SCHEDULE_STRATEGIES
+        return EM_SCHEDULE_STRATEGIES
     if name == 'controlled':
         return STRATEGIES
     if name == 'all':

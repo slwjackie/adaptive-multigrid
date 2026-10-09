@@ -108,6 +108,7 @@ def _arm_config(cfg, arm):
 
 
 def _construct(example, arm, cfg, rules, expected_rhs):
+    rules = arm.get('rules') or rules
     if arm.get('policy') is not None:
         if getattr(arm['policy'], 'continuous_size_policy', False):
             from .cost_policy import PreparedCostMG
@@ -286,7 +287,7 @@ def _max_error(runs, metric):
     return max(values) if values and all(isinstance(v, (int, float)) and np.isfinite(v) for v in values) else None
 
 
-def aggregate_research(rows, arm_metadata, *, repeats, regimes, rhs_counts):
+def aggregate_research(rows, arm_metadata, *, repeats, regimes, rhs_counts, reference_arm='strong_C'):
     """Paired operator bootstrap; all repeats/all RHS must meet FP64 tolerance."""
     summary, table = {}, []
     for regime in regimes:
@@ -302,14 +303,14 @@ def aggregate_research(rows, arm_metadata, *, repeats, regimes, rhs_counts):
                     measurements[index, name] = runs
                     successes[name].append(len(runs) == repeats and all(r.get('successful') for r in runs))
             production = [name for name, metadata in arm_metadata.items()
-                          if not metadata['training_only'] and not metadata.get('reference_only', False)]
+                          if not metadata['training_only'] and not metadata.get('reference_only', False) and not metadata.get('robustness_only', False)]
             common = [i for i in range(len(rows)) if all(successes[name][i] for name in production)]
             for name, metadata in arm_metadata.items():
                 ratios, common_ratios, new_failures, rescued, successful, neural, worse_errors = [], [], [], [], [], [], []
                 for index, row in enumerate(rows):
                     case = row['example']['name']
-                    runs, baseline = measurements[index, name], measurements[index, 'strong_C']
-                    good, baseline_good = successes[name][index], successes['strong_C'][index]
+                    runs, baseline = measurements[index, name], measurements[index, reference_arm]
+                    good, baseline_good = successes[name][index], successes[reference_arm][index]
                     wall, baseline_wall = _median(runs, 'wall_seconds'), _median(baseline, 'wall_seconds')
                     speedup = baseline_wall / wall if good and baseline_good else None
                     if speedup is not None:
@@ -374,7 +375,8 @@ def aggregate_research(rows, arm_metadata, *, repeats, regimes, rhs_counts):
 
 
 def evaluate_research(examples, arm_specs, cfg, rules, out, *, repeats=5, warmups=1,
-                      rhs_counts=(1, 4, 16, 64), regimes=REGIMES, resume=False, order_seed=2107):
+                      rhs_counts=(1, 4, 16, 64), regimes=REGIMES, resume=False, order_seed=2107,
+                      reference_arm='strong_C'):
     """Run paired research workloads and return rows/summary/table/manifest.
 
     ``arm_specs[name]``: model=Components|None, branch=C/H_S/H_P/H_SP,
@@ -383,8 +385,8 @@ def evaluate_research(examples, arm_specs, cfg, rules, out, *, repeats=5, warmup
     Resume requires exact sources, models, rules, hardware, vectors and settings.
     """
     examples, regimes, rhs_counts = list(examples), tuple(regimes), tuple(rhs_counts)
-    if not examples or not arm_specs or 'strong_C' not in arm_specs:
-        raise ValueError('Nonempty examples/arms and explicit strong_C reference required')
+    if not examples or not arm_specs or reference_arm not in arm_specs:
+        raise ValueError('Nonempty examples/arms and explicit reference arm required')
     if isinstance(repeats, bool) or not isinstance(repeats, int) or repeats < 1 or isinstance(warmups, bool) or not isinstance(warmups, int) or warmups < 0:
         raise ValueError('Invalid repeat/warmup count')
     if not regimes or set(regimes) - set(REGIMES) or len(set(regimes)) != len(regimes):
@@ -401,11 +403,16 @@ def evaluate_research(examples, arm_specs, cfg, rules, out, *, repeats=5, warmup
             _check_claim(getattr(example, 'research_run_root', None), getattr(example, 'research_final_claim', None))
             if any(spec.get('training_only') for spec in arm_specs.values()):
                 raise ValueError('Teacher upper bounds cannot consume the untouched final/OOD test')
-    baseline = arm_specs['strong_C']
+    baseline = arm_specs[reference_arm]
     if baseline.get('branch') != 'C' or baseline.get('model') is not None or not baseline.get('selector', True) or baseline.get('policy') is not None:
-        raise ValueError('strong_C must be the unchanged selected pure classical solver')
+        raise ValueError('reference must be the unchanged selected pure classical solver')
+    if baseline.get('rules') is not None and baseline['rules'].digest() != rules.digest():
+        raise ValueError('reference rules differ from primary parent')
     arms, metadata = {}, {}
     for name, spec in arm_specs.items():
+        if spec.get('rules') is not None and spec['rules'].digest() != rules.digest():
+            if spec.get('branch') != 'C' or spec.get('model') is not None or spec.get('policy') is not None or not spec.get('robustness_only'):
+                raise ValueError('different-parent rules are only allowed for a labelled classical robustness arm')
         if spec.get('branch') not in {'C', 'H_S', 'H_P', 'H_SP', 'auto'}:
             raise ValueError('Invalid branch')
         if spec['branch'] == 'auto' and spec.get('policy') is None:
@@ -426,13 +433,15 @@ def evaluate_research(examples, arm_specs, cfg, rules, out, *, repeats=5, warmup
         if {k: v for k, v in arm['config'].to_dict().items() if k not in allowed_flags} != {k: v for k, v in cfg.to_dict().items() if k not in allowed_flags}:
             raise ValueError('All arms must share replacement budget, safety, and numerical protocol')
         arms[name] = arm
-        metadata[name] = {**_model_metadata(arm), 'branch': arm['branch'], 'selector': arm.get('selector', True), 'config': arm['config'].to_dict()}
+        metadata[name] = {**_model_metadata(arm), 'branch': arm['branch'], 'selector': arm.get('selector', True), 'config': arm['config'].to_dict(),
+                          'rules_digest': (arm.get('rules') or rules).digest(),
+                          'robustness_only': bool(arm.get('robustness_only', False))}
     initialize_timing_runtime()
     output = Path(out).resolve()
     output.mkdir(parents=True, exist_ok=True)
     inputs = [dict(e.manifest(), research_split=getattr(e, 'research_split', None), family=getattr(e, 'research_family', getattr(e.case, 'family', e.case.pattern)),
                    rhs_digest=vector_digest(e.b), exact_digest=vector_digest(e.exact), strong_selection=getattr(e, 'strong_selection', None)) for e in examples]
-    manifest = json_safe(dict(version=VERSION, case_inputs=inputs, arms=metadata, source_signature=_source_signature(),
+    manifest = json_safe(dict(version=VERSION, reference_arm=reference_arm, case_inputs=inputs, arms=metadata, source_signature=_source_signature(),
         rules=rules.to_dict(), rules_digest=rules.digest(), config=cfg.to_dict(), repeats=repeats,
         warmups=warmups, rhs_counts=rhs_counts, regimes=regimes, order_seed=order_seed,
         hardware=hardware_environment(), final_test_eligibility='caller must enforce untouched final gate; evaluator never certifies',
@@ -490,7 +499,15 @@ def evaluate_research(examples, arm_specs, cfg, rules, out, *, repeats=5, warmup
                 row['runs'][name][regime][str(count)].append(run)
                 completed += 1
                 _write_json(output / 'progress.json', dict(status='running', completed_measurements=completed, total_measurements=total))
-    report = aggregate_research(rows, metadata, repeats=repeats, regimes=regimes, rhs_counts=rhs_counts)
+    report = aggregate_research(rows, metadata, repeats=repeats, regimes=regimes, rhs_counts=rhs_counts, reference_arm=reference_arm)
+    if reference_arm != 'strong_C':
+        def rename(value):
+            if isinstance(value, dict):
+                return {k.replace('_vs_strong', '_vs_reference'): rename(v) for k,v in value.items()}
+            if isinstance(value, list):return [rename(v) for v in value]
+            return value
+        report = rename(report)
+        report['reference_arm'] = reference_arm
     report.update(rows=rows, manifest=manifest, output_dir=str(output), warmup_wall_seconds_this_invocation=warmup_wall)
     if previous_complete_report is not None:
         ignored = {'rows', 'manifest', 'warmup_wall_seconds_this_invocation'}

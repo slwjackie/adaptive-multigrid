@@ -75,6 +75,8 @@ class StepResult:
 
 class SequenceBackend:
     """Each independent stream owns its bank; candidate trials do not mutate it."""
+    actions = ACTIONS
+
     def __init__(self,cfg=None,rules=None,expert=None,*,expert_branch='H_P',max_complexity=8.):
         self.cfg=cfg or AdaptiveConfig(mode='classical',branch='C')
         self.rules=rules or StrongRules()
@@ -185,7 +187,7 @@ class SequenceBackend:
         if selection is None:selection,cfg=self.select(s)
         if cfg is None:raise ValueError('selection requires resolved config')
         requested=action;reason='';fallback=False;setup=0.;stats=Stats();build_stats=[]
-        if not self.available(s,old,selection)[ACTIONS.index(action)]:
+        if not self.available(s,old,selection)[self.actions.index(action)]:
             action='REBUILD_C';reason='incompatible_or_missing_bank';fallback=requested!='REBUILD_C'
         before=perf_counter()
         try:bank,st=self.build(s,old,action,selection,cfg)
@@ -197,12 +199,12 @@ class SequenceBackend:
         x=s.x0.copy();r=s.b-s.a@x;initial=stable_norm(r)
         reference=initial if cfg.mg.residual_reference=='initial' else stable_norm(s.b)
         threshold=max(cfg.mg.absolute_tolerance,cfg.mg.tolerance*reference)
-        history=[initial];attempts=0;stagnant=0;solve_start=perf_counter()
+        history=[initial];attempts=0;stagnant=0;solve_start=perf_counter();neural_trials=0;accepted_neural=0
         reserve=1;trial_budget=cfg.mg.max_cycles-reserve
         def run(root,x):
             learned=any(l.neural_stencil is not None or getattr(l,'learned_transfer',False) for l in levels(root))
             if not learned:return classical_cycle(root,x,s.b,cfg.mg,stats)
-            hcfg=replace(cfg,mode='research',branch=self.expert_branch,use_transfer=True,
+            hcfg=replace(cfg,mode='research',branch=self.expert_branch,use_transfer=any(getattr(l,'learned_transfer',False) for l in levels(root)),
                          use_smoother=any(l.neural_stencil is not None for l in levels(root)),spatial=False,gate_mode='open')
             return hybrid_cycle(root,x,s.b,hcfg,stats,SpatialState(self.expert,hcfg),attempts+1)
         while attempts<cfg.mg.max_cycles and history[-1]>threshold:
@@ -210,6 +212,8 @@ class SequenceBackend:
                 t=perf_counter();bank,st=self.build(s,None,'REBUILD_C',selection,cfg)
                 setup+=perf_counter()-t;build_stats.append(st);action='REBUILD_C';fallback=True;reason='stagnation_or_budget_recovery'
             previous=history[-1]
+            neural_trial=any(l.neural_stencil is not None or getattr(l,'learned_transfer',False) for l in levels(bank.root))
+            neural_trials+=int(neural_trial)
             try:
                 with np.errstate(over='ignore',invalid='ignore'):proposal=run(bank.root,x);norm=stable_norm(s.b-s.a@proposal)
             except (ValueError,RuntimeError,FloatingPointError):proposal=x;norm=np.inf
@@ -222,7 +226,7 @@ class SequenceBackend:
                 setup+=perf_counter()-t;build_stats.append(st);action='REBUILD_C';fallback=True;reason='residual_rejection'
                 continue
             if not np.isfinite(norm):reason='nonfinite_classical';break
-            x=proposal;history.append(norm)
+            x=proposal;history.append(norm);accepted_neural+=int(neural_trial)
             rho=norm/max(previous,1e-300)
             stagnant=stagnant+1 if rho>=cfg.mg.stagnation_rho else 0
             if norm>cfg.mg.divergence_factor*max(initial,threshold):reason='classical_divergence';break
@@ -233,4 +237,5 @@ class SequenceBackend:
         solve_time=max(0.,total-setup)
         return StepResult(x,success,requested,action,attempts,history,threshold,setup,solve_time,total,
                           bank if success else None,fallback,reason or ('converged' if success else 'cycle_limit'),
-                          dict(stats.to_dict(),builds=build_stats,attempt_budget=cfg.mg.max_cycles))
+                          dict(stats.to_dict(),builds=build_stats,attempt_budget=cfg.mg.max_cycles,
+                               neural_trial_cycles=neural_trials,accepted_neural_cycles=accepted_neural))

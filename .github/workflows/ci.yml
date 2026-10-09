@@ -1,4 +1,4 @@
-name: Three pillars validation
+name: Neural MG thesis validation
 on:
   push:
     branches: [main, fix/three-pillars-20260922]
@@ -33,7 +33,11 @@ jobs:
           mkdir -p artifacts/ci
           python -m pytest -ra --junitxml=artifacts/ci/pytest.xml
       - name: Verify source snapshot
-        run: sha256sum -c THREE_PILLARS_SOURCE.sha256
+        run: |
+          sha256sum -c THREE_PILLARS_SOURCE.sha256
+          sha256sum -c P_HEADROOM_SOURCE.sha256
+          sha256sum -c WORLD_MODEL_SOURCE.sha256
+          sha256sum -c HS_WORLD_SOURCE.sha256
       - uses: actions/upload-artifact@v4
         if: always()
         with:

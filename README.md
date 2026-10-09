@@ -1,4 +1,25 @@
-# Adaptive Neural Multigrid v6.7 — warm-first expert and policy study
+# World-Model-Guided Adaptive Neural Smoothing
+
+## Primary thesis workflow: C_tuned + H_S + solver world model
+
+Use [`run_v6_7_hs_world_study.py`](scripts/run_v6_7_hs_world_study.py), with the
+[complete Korean runbook](docs/HS_WORLD_THESIS_RUNBOOK_KR.md). One global classical
+plan is tuned offline, then kept fixed for the primary C/H_S comparison. H0, H1,
+H2 and H2_NH remain unchanged. The 88-plan PDE-adaptive strong_C is an optional,
+separately labelled robustness audit, not the primary reference or training parent.
+
+Temporal actions factor **classical P reuse/rebuild x classical/neural smoothing**.
+World_C, H_S with matched/tuned non-neural reuse, and World_HS are all evaluated.
+A changed A always gets current Galerkin coarse matrices and numeric factors;
+learned smoothing is regenerated, not silently reused with stale coefficients.
+The world model abstains to a tune-selected classical reuse policy.
+
+H_P/H_SP are retained below for historical ablations, but are not trained or
+called by the new primary workflow. Synthetic tests are not hydrogen CFD. An
+external finalized-LDU bridge and optional supplied-GAMG evidence comparison are
+provided; no automatic OpenFOAM runtime plugin or combustion solver is claimed.
+
+
 
 ## New primary H_P workflow: EM + schedules + asymptotic affine transfer
 

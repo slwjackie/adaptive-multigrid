@@ -1,0 +1,179 @@
+{
+  "base_commit": "7ec2a645b2add2a523a755bd5dffad63a6745c81",
+  "tests": {
+    "total": 665,
+    "added": 21,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "elapsed_seconds": 158.324
+  },
+  "cli_smoke_commands": 13,
+  "static_candidates": [
+    "H0",
+    "H1",
+    "H2",
+    "H2_NH"
+  ],
+  "optimizer_updates_per_candidate": 8,
+  "C_tuned": "line_alt_energymin_full__em5__v11",
+  "selected_smoother": "H0",
+  "selected_warm_gm": 0.8663990885247975,
+  "static_success": "4/4 all arms for all tested workloads",
+  "world_validation_success": "2/2 all eight methods",
+  "sequence_summary": {
+    "C_rebuild": {
+      "successes": 2,
+      "total": 2,
+      "geometric_speedup": 0.6551690620534507,
+      "ci95": [
+        0.6480319643888487,
+        0.6623847641170227
+      ],
+      "new_failure_case_groups": [],
+      "all_case_seconds": 0.11340477999942777,
+      "first_repeat_actions": {
+        "REBUILD_C": 8,
+        "REUSE_C": 0,
+        "REBUILD_HS": 0,
+        "REUSE_HS": 0
+      },
+      "neural_systems": 0
+    },
+    "C_tuned_reuse": {
+      "successes": 2,
+      "total": 2,
+      "geometric_speedup": 1.0,
+      "ci95": [
+        1.0,
+        1.0
+      ],
+      "new_failure_case_groups": [],
+      "all_case_seconds": 0.07459985500031507,
+      "first_repeat_actions": {
+        "REBUILD_C": 2,
+        "REUSE_C": 6,
+        "REBUILD_HS": 0,
+        "REUSE_HS": 0
+      },
+      "neural_systems": 0
+    },
+    "HS_rebuild": {
+      "successes": 2,
+      "total": 2,
+      "geometric_speedup": 0.47247280338160164,
+      "ci95": [
+        0.39106766038668694,
+        0.5708233447750184
+      ],
+      "new_failure_case_groups": [],
+      "all_case_seconds": 0.14951179600029718,
+      "first_repeat_actions": {
+        "REBUILD_C": 0,
+        "REUSE_C": 0,
+        "REBUILD_HS": 8,
+        "REUSE_HS": 0
+      },
+      "neural_systems": 8
+    },
+    "HS_matched_reuse": {
+      "successes": 2,
+      "total": 2,
+      "geometric_speedup": 0.7460399415177132,
+      "ci95": [
+        0.6663878199741325,
+        0.8352127359731122
+      ],
+      "new_failure_case_groups": [],
+      "all_case_seconds": 0.09640905000037492,
+      "first_repeat_actions": {
+        "REBUILD_C": 0,
+        "REUSE_C": 0,
+        "REBUILD_HS": 2,
+        "REUSE_HS": 6
+      },
+      "neural_systems": 8
+    },
+    "HS_tuned_reuse": {
+      "successes": 2,
+      "total": 2,
+      "geometric_speedup": 0.6962406869885872,
+      "ci95": [
+        0.6026931013736687,
+        0.8043083504912975
+      ],
+      "new_failure_case_groups": [],
+      "all_case_seconds": 0.10247284099955323,
+      "first_repeat_actions": {
+        "REBUILD_C": 0,
+        "REUSE_C": 0,
+        "REBUILD_HS": 3,
+        "REUSE_HS": 5
+      },
+      "neural_systems": 8
+    },
+    "World_C": {
+      "successes": 2,
+      "total": 2,
+      "geometric_speedup": 0.6516909994036636,
+      "ci95": [
+        0.5831983960045778,
+        0.7282275836376138
+      ],
+      "new_failure_case_groups": [],
+      "all_case_seconds": 0.11042294099979699,
+      "first_repeat_actions": {
+        "REBUILD_C": 2,
+        "REUSE_C": 6,
+        "REBUILD_HS": 0,
+        "REUSE_HS": 0
+      },
+      "neural_systems": 0
+    },
+    "World_HS": {
+      "successes": 2,
+      "total": 2,
+      "geometric_speedup": 0.6682758397553122,
+      "ci95": [
+        0.5653745458693316,
+        0.7899057381757039
+      ],
+      "new_failure_case_groups": [],
+      "all_case_seconds": 0.10619421699993836,
+      "first_repeat_actions": {
+        "REBUILD_C": 2,
+        "REUSE_C": 6,
+        "REBUILD_HS": 0,
+        "REUSE_HS": 0
+      },
+      "neural_systems": 0
+    },
+    "World_HS_horizon1": {
+      "successes": 2,
+      "total": 2,
+      "geometric_speedup": 0.8001967324262409,
+      "ci95": [
+        0.7263669383923943,
+        0.8815307756198084
+      ],
+      "new_failure_case_groups": [],
+      "all_case_seconds": 0.0902899829998205,
+      "first_repeat_actions": {
+        "REBUILD_C": 2,
+        "REUSE_C": 6,
+        "REBUILD_HS": 0,
+        "REUSE_HS": 0
+      },
+      "neural_systems": 0
+    }
+  },
+  "performance_improvement_demonstrated": false,
+  "legacy_H_P_H_SP_preserved": true,
+  "new_primary_learned_P": false,
+  "actual_OpenFOAM_run": false,
+  "combustion_validated": false,
+  "full_CFD_time_measured": false,
+  "full_research_training": false,
+  "real_research_final_ood_executed": false,
+  "validation_scope": "Linux single-thread; synthetic smoke; tiny synthetic holdout only in pytest; external GAMG parser has mock unit tests only"
+}

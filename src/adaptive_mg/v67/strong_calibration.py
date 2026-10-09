@@ -208,7 +208,7 @@ def calibrate_from_run(input_run, research, rules, output, *, minimum_leaf_cases
     return frozen, evidence
 
 
-def measure_classical_portfolio(examples, cfg, rules, *, repeats=3, rhs_count=2, bank='controlled', seed=2209, regime='multiple'):
+def measure_classical_portfolio(examples, cfg, rules, *, repeats=3, rhs_count=2, bank='controlled', seed=2209, regime='multiple', candidate_names=None):
     """Cold per-A portfolio costs; all distinct RHS must converge.
 
     Selection features/labels are recorded once outside candidate timing, since
@@ -225,7 +225,13 @@ def measure_classical_portfolio(examples, cfg, rules, *, repeats=3, rhs_count=2,
     if repeats < 1 or rhs_count < 1:
         raise ValueError('positive repeats and RHS count required')
     rng=np.random.default_rng(seed)
-    strategies=tuple(s.name for s in classical_bank(bank))
+    if candidate_names is not None:
+        from ..strategy import get_strategy
+        strategies=tuple(get_strategy(n).name for n in candidate_names)
+        if not strategies or len(strategies)!=len(set(strategies)):
+            raise ValueError('candidate plans must be nonempty and unique')
+    else:
+        strategies=tuple(s.name for s in classical_bank(bank))
     if cfg.mg.strategy_name not in strategies:
         raise ValueError('portfolio must include the exact fixed_C reference')
     rows=[]

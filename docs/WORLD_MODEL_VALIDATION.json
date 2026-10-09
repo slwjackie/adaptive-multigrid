@@ -1,0 +1,98 @@
+{
+  "base_commit": "f115ca49f7678ed53ae1b6586c388be565217edd",
+  "tests": 644,
+  "new_tests": 27,
+  "regression": {
+    "exit_code": 0,
+    "seconds": 128.8120367527008,
+    "source_start": "8a411b2409b816d02d2c76c16c8d22ceead776af0d2716fcbe02c9c1ff2510ac",
+    "source_end": "8a411b2409b816d02d2c76c16c8d22ceead776af0d2716fcbe02c9c1ff2510ac"
+  },
+  "smoke_summary": {
+    "classical_rebuild": {
+      "successes": 2,
+      "total": 2,
+      "speedup_vs_tune_selected_baseline": 0.6435074888484246,
+      "ci95": [
+        0.5681565004160687,
+        0.7288518003415483
+      ],
+      "new_failure_trajectories": [],
+      "first_repeat_action_counts": {
+        "REBUILD_C": 10,
+        "REUSE_P": 0,
+        "REFRESH_FINE": 0,
+        "REBUILD_H": 0
+      },
+      "all_case_wall_seconds": 0.14299250099998062
+    },
+    "drift_0.2": {
+      "successes": 2,
+      "total": 2,
+      "speedup_vs_tune_selected_baseline": 1.0,
+      "ci95": [
+        1.0,
+        1.0
+      ],
+      "new_failure_trajectories": [],
+      "first_repeat_action_counts": {
+        "REBUILD_C": 3,
+        "REUSE_P": 7,
+        "REFRESH_FINE": 0,
+        "REBUILD_H": 0
+      },
+      "all_case_wall_seconds": 0.08788988199989944
+    },
+    "reuse": {
+      "successes": 2,
+      "total": 2,
+      "speedup_vs_tune_selected_baseline": 0.999704003078402,
+      "ci95": [
+        0.9665852560185697,
+        1.0339575195752637
+      ],
+      "new_failure_trajectories": [],
+      "first_repeat_action_counts": {
+        "REBUILD_C": 2,
+        "REUSE_P": 8,
+        "REFRESH_FINE": 0,
+        "REBUILD_H": 0
+      },
+      "all_case_wall_seconds": 0.08889563499997166
+    },
+    "world": {
+      "successes": 2,
+      "total": 2,
+      "speedup_vs_tune_selected_baseline": 0.4985810521445496,
+      "ci95": [
+        0.48279229858806905,
+        0.514886145210994
+      ],
+      "new_failure_trajectories": [],
+      "first_repeat_action_counts": {
+        "REBUILD_C": 10,
+        "REUSE_P": 0,
+        "REFRESH_FINE": 0,
+        "REBUILD_H": 0
+      },
+      "all_case_wall_seconds": 0.1745904999997947
+    }
+  },
+  "smoke_reference": "drift_0.2",
+  "smoke_trajectories": 2,
+  "smoke_steps_per_trajectory": 5,
+  "trained_neural_mg_expert_in_smoke": false,
+  "existing_HS_HP_HSP_paths_exercised_by_tests": true,
+  "actual_OpenFOAM_available": false,
+  "hydrogen_CFD_data_available": false,
+  "full_CFD_coupling": false,
+  "real_static_final_OOD_opened": false,
+  "sequence_smoke_test_opened": false,
+  "performance_certified": false,
+  "notes": [
+    "Synthetic variable-coefficient elliptic trajectories, not reacting flow.",
+    "GRU ensemble fitted; all validation decisions abstained to current classical rebuild.",
+    "Time-sequence model did not beat tuned non-neural reuse in the tiny smoke.",
+    "Native OpenFOAM export/call wiring and physical/whole-CFD validation are not implemented."
+  ]
+}

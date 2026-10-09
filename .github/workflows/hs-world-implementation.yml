@@ -1,0 +1,79 @@
+name: HS-only thesis integration validation
+on:
+  push:
+    branches: [implementation/hs-world-thesis-20261010]
+    paths: [.github/workflows/hs-world-implementation.yml]
+permissions:
+  contents: write
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      OMP_NUM_THREADS: '1'
+      OPENBLAS_NUM_THREADS: '1'
+      MKL_NUM_THREADS: '1'
+      VECLIB_MAXIMUM_THREADS: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Reconstruct exact tested clean source tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import base64, lzma, hashlib
+          parts = [Path('.hs-world-implementation') / ('part%d.b64' % i) for i in range(6)]
+          payload = ''.join(p.read_text().strip() for p in parts)
+          assert len(payload) == 55176, len(payload)
+          patch = lzma.decompress(base64.b64decode(payload, validate=True))
+          assert hashlib.sha256(patch).hexdigest() == 'b2aa06ab49d272453d5cf03e184b35cc192e29a0efc328831f7b36bbb0ef3e7a'
+          Path('/tmp/hs-world.patch').write_bytes(patch)
+          PY
+          git worktree add --detach /tmp/hs-source 7ec2a645b2add2a523a755bd5dffad63a6745c81
+          git -C /tmp/hs-source apply --index /tmp/hs-world.patch
+          test "$(git -C /tmp/hs-source write-tree)" = 6f2b21cd384d51aa2bb223856ad278accd677965
+          mkdir -p /tmp/hs-ci
+      - name: Install CPU numerical dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install 'torch==2.10.0' --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -e '/tmp/hs-source[dev]'
+      - name: Native kernel and complete regression
+        working-directory: /tmp/hs-source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/build_native_stencil.py --no-openmp
+          python - <<'PY' 2>&1 | tee /tmp/hs-ci/pytest.log
+          import torch, pytest
+          torch.set_num_threads(1)
+          torch.set_num_interop_threads(1)
+          raise SystemExit(pytest.main(['-ra', '--junitxml=/tmp/hs-ci/pytest.xml']))
+          PY
+          sha256sum -c THREE_PILLARS_SOURCE.sha256 > /tmp/hs-ci/legacy-manifest.log
+          sha256sum -c P_HEADROOM_SOURCE.sha256 > /tmp/hs-ci/headroom-manifest.log
+          sha256sum -c WORLD_MODEL_SOURCE.sha256 > /tmp/hs-ci/world-manifest.log
+          sha256sum -c HS_WORLD_SOURCE.sha256 > /tmp/hs-ci/hs-manifest.log
+      - name: Publish verified clean source to verification branch
+        working-directory: /tmp/hs-source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git write-tree)" = 6f2b21cd384d51aa2bb223856ad278accd677965
+          git diff --exit-code
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'feat: verified C_tuned H_S and world-model thesis workflow'
+          git push origin HEAD:refs/heads/implementation/hs-world-thesis-verified-20261010
+          git rev-parse HEAD > /tmp/hs-ci/verified-commit.txt
+          git rev-parse HEAD^{tree} > /tmp/hs-ci/verified-tree.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hs-world-thesis-ci
+          path: /tmp/hs-ci/
+          retention-days: 14

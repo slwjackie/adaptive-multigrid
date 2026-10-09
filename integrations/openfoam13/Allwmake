@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+cd "$(dirname "$0")"
+if [ "${WM_PROJECT_VERSION:-}" != "13" ]; then
+    echo 'Source OpenFOAM Foundation 13 etc/bashrc before building.' >&2
+    exit 2
+fi
+command -v wmake >/dev/null
+if [ "${WM_PRECISION_OPTION:-}" != "DP" ]; then
+    echo 'This bridge requires WM_PRECISION_OPTION=DP.' >&2
+    exit 2
+fi
+wmake libso AdaptiveFixedP

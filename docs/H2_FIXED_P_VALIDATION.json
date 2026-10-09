@@ -1,0 +1,60 @@
+{
+  "schema": "h2-fixed-p-implementation-validation-v1",
+  "date_utc": "2026-10-09T20:41:38.974942+00:00",
+  "base_commit": "84785a00f9fa3fec4c0534b942775bf0105abf59",
+  "branch": "research/h2-fixed-p-hs",
+  "status": "python_and_wire_verified_native_cfd_pending",
+  "source_digest": "aab78a5f1b90f14504ac137784cc075d06a030d09a9c925af82e3e6bf58bc75e",
+  "existing_tracked_files_modified": false,
+  "existing_source_manifests_verified": [
+    "THREE_PILLARS_SOURCE.sha256",
+    "P_HEADROOM_SOURCE.sha256",
+    "WORLD_MODEL_SOURCE.sha256",
+    "HS_WORLD_SOURCE.sha256"
+  ],
+  "runtime": {
+    "python": "3.12.14",
+    "numpy": "2.3.5",
+    "scipy": "1.17.0",
+    "torch": "2.14.1+cpu",
+    "cantera": "3.2.0"
+  },
+  "regression": {
+    "command": "OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 python -m pytest -ra",
+    "tests": 761,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "seconds": 71.774,
+    "warning": "One existing PyTorch sparse invariant warning from unchanged torch_ops.py"
+  },
+  "case_generation": {
+    "command": "python -m pytest integrations/openfoam13/case/test_generation.py -q",
+    "passed": 4,
+    "scope": "CHEMKIN roundtrip rates/thermochemistry, true 2D initialized fields, provenance, complete output timestep schedule"
+  },
+  "cpp_wire": {
+    "command": "python integrations/openfoam13/tests/check_wire.py",
+    "passed": true,
+    "scope": "C++11 -Wall -Wextra -Werror compilation and JSON decoder; not the OpenFOAM-facing class"
+  },
+  "legacy_native_stencil": {
+    "command": "python scripts/build_native_stencil.py --no-openmp",
+    "passed": true
+  },
+  "native_openfoam": {
+    "compiled": false,
+    "executed": false,
+    "reason": "OpenFOAM Foundation 13 is not installed in the development environment"
+  },
+  "native_unix_socket_ipc": {
+    "executed_successfully": false,
+    "reason": "AF_UNIX socket creation is blocked with EPERM in the development environment; run check_wire.py --ipc on target Linux"
+  },
+  "real_h2_training_performed": false,
+  "real_h2_pressure_speedup_measured": false,
+  "real_h2_full_cfd_speedup_measured": false,
+  "physical_flame_validated": false,
+  "world_model_enabled": false,
+  "test_fixture_scope": "Unit and pipeline tests use explicitly identified nonphysical fixtures; they are not combustion or CFD performance evidence."
+}

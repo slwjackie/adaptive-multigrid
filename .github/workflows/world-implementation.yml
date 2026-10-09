@@ -1,0 +1,78 @@
+name: World sequence integration validation
+on:
+  push:
+    branches: [implementation/world-sequence-20261010]
+    paths: [.github/workflows/world-implementation.yml]
+permissions:
+  contents: write
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      OMP_NUM_THREADS: '1'
+      OPENBLAS_NUM_THREADS: '1'
+      MKL_NUM_THREADS: '1'
+      VECLIB_MAXIMUM_THREADS: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Reconstruct exact tested source without staging payloads
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import base64, lzma, hashlib
+          parts = [Path('.world-implementation') / ('part%d.b64' % i) for i in range(5)]
+          payload = ''.join(p.read_text().strip() for p in parts)
+          assert len(payload) == 41800
+          patch = lzma.decompress(base64.b64decode(payload, validate=True))
+          assert hashlib.sha256(patch).hexdigest() == '2911af7b26a0fecf35d53107d33777e79168ecce99381063dbb752593d746594'
+          Path('/tmp/world.patch').write_bytes(patch)
+          PY
+          git worktree add --detach /tmp/world-source f115ca49f7678ed53ae1b6586c388be565217edd
+          git -C /tmp/world-source apply --index /tmp/world.patch
+          test "$(git -C /tmp/world-source write-tree)" = 2177b50cc897d6266a738637a10e723808ee00ad
+          mkdir -p /tmp/world-ci
+      - name: Install CPU numerical dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install 'torch==2.10.0' --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -e '/tmp/world-source[dev]'
+      - name: Native kernel and complete regression
+        working-directory: /tmp/world-source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/build_native_stencil.py --no-openmp
+          python - <<'PY' 2>&1 | tee /tmp/world-ci/pytest.log
+          import torch, pytest
+          torch.set_num_threads(1)
+          torch.set_num_interop_threads(1)
+          raise SystemExit(pytest.main(['-ra', '--junitxml=/tmp/world-ci/pytest.xml']))
+          PY
+          sha256sum -c THREE_PILLARS_SOURCE.sha256 > /tmp/world-ci/legacy-manifest.log
+          sha256sum -c P_HEADROOM_SOURCE.sha256 > /tmp/world-ci/headroom-manifest.log
+          sha256sum -c WORLD_MODEL_SOURCE.sha256 > /tmp/world-ci/world-manifest.log
+      - name: Publish only the verified clean source tree to a verification branch
+        working-directory: /tmp/world-source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git write-tree)" = 2177b50cc897d6266a738637a10e723808ee00ad
+          git diff --exit-code
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'feat: verified solver world model and time-varying hierarchy workflow'
+          git push origin HEAD:refs/heads/implementation/world-sequence-verified-20261010
+          git rev-parse HEAD > /tmp/world-ci/verified-commit.txt
+          git rev-parse HEAD^{tree} > /tmp/world-ci/verified-tree.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: world-sequence-ci
+          path: /tmp/world-ci/
+          retention-days: 14

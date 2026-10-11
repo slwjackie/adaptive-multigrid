@@ -1,5 +1,9 @@
 # 변조형 He–N₂ 혼합층과 시간 이력 기반 Neural Multigrid
 
+기존 `shear_probe_v1`의 150회 상한에서 초기 압력 풀이가 실패했다면,
+[동일 체크포인트 600회 재평가](SHEAR_BUDGET_REPLAY_KR.md)를 먼저 수행한다.
+원본 결과를 보존하면서 Classical/NN 비용을 비교하고 성공 시 probe를 재평가한다.
+
 주제: **변조형 He–N₂ 전단 혼합층을 주 실험으로 하고, 수소 반응유동까지
 검증하는 시간 이력 기반 Neural Multigrid**.
 

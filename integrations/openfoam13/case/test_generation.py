@@ -34,12 +34,41 @@ def test_chemkin_roundtrip_preserves_hydrogen_rates(tmp_path):
     original, restored = ct.Solution("h2o2.yaml"), ct.Solution(str(tmp_path / "roundtrip.yaml"))
     assert original.species_names == restored.species_names
     assert original.n_reactions == restored.n_reactions == 29
+    assert original.element_names == restored.element_names
+    assert [s.composition for s in original.species()] == [s.composition for s in restored.species()]
+    np.testing.assert_allclose(restored.molecular_weights, original.molecular_weights)
     for temperature in (300, 1000, 1800, 2500):
         for pressure in (101325, 506625):
             for gas in (original, restored):
                 gas.TPX = temperature, pressure, "H2:2,O2:1,N2:3.76,H2O:0.2"
             np.testing.assert_allclose(restored.forward_rate_constants, original.forward_rate_constants, rtol=1e-6)
             np.testing.assert_allclose(restored.standard_enthalpies_RT, original.standard_enthalpies_RT, rtol=1e-6)
+
+
+def test_mechanism_elements_and_units_match_foundation13_lexer(tmp_path):
+    ct = pytest.importorskip("cantera", minversion="3.0")
+    root = generator.generate(args(tmp_path / "case"))
+    text = (root / "chemkin/h2.inp").read_text()
+    elements = text.split("\nELEM\n", 1)[1].split("\nEND", 1)[0].split()
+    # chemkinLexer.L: elementName is [A-Z] or [A-Z][A-Z]; amount unit is
+    # MOLES, not the MOLE token emitted by yaml2ck 3.2.
+    assert all(re.fullmatch(r"[A-Z]{1,2}", element) for element in elements)
+    assert elements == [element.upper() for element in ct.Solution("h2o2.yaml").element_names]
+    header = next(line for line in text.splitlines() if line.startswith("REACTIONS"))
+    assert header == "REACTIONS CAL/MOLE MOLES"
+
+
+def test_chemkin_normalization_preserves_species_reactions_and_comments(tmp_path):
+    path = tmp_path / "input.inp"
+    source = ("! Ar comment\nELEM\nH Ar ! Ar remains in comments\nEND\n"
+              "SPECIES\nH H2 Ar\nEND\nREACTIONS CAL/MOLE MOLE ! mole units\n"
+              "2 H + Ar <=> H2 + Ar 1.0e+17 -1.0 0.0\nEND\n")
+    path.write_text(source)
+    generator.normalize_chemkin_syntax(path)
+    expected = source.replace("H Ar !", "H AR !").replace("CAL/MOLE MOLE !", "CAL/MOLE MOLES !")
+    assert path.read_text() == expected
+    generator.normalize_chemkin_syntax(path)
+    assert path.read_text() == expected
 
 
 def test_thermo_header_matches_foundation13_lexer_without_changing_species(tmp_path):

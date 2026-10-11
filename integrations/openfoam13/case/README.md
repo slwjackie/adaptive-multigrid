@@ -91,6 +91,13 @@ Only these two header lines change; species compositions and NASA coefficients
 are preserved. Regenerate old cases in a new output directory after updating
 the generator so their chemistry hashes match the corrected input.
 
+In the mechanism file, Foundation 13 also requires uppercase element tokens
+(`AR` instead of Cantera's `Ar`) and the amount-unit keyword `MOLES` instead of
+`MOLE`. The generator normalizes only the element section and reaction-header
+amount token before hashing. Species names, reaction coefficients, comments,
+and the activation-energy unit `CAL/MOLE` are unchanged. Roundtrip tests check
+elemental composition, molecular weights, reaction rates, and thermochemistry.
+
 **OpenFOAM-13's `chemkinToFoam` third argument is an OpenFOAM species transport
 dictionary**, despite its command-line label saying "CHEMKIN transport file".
 This generator passes `chemkin/transport.foam`, not `transport.dat`. The latter

@@ -76,5 +76,20 @@
       "wire_checks_passed": true,
       "evidence": "User-provided Foundation 13 DP Int32 link log and two wire checks passed outputs; not independently rerun here."
     }
+  },
+  "chemkin_token_fix": {
+    "date_utc": "2026-10-11",
+    "parent_commit": "a0f7fa2dc757bcb1ad3fb6c63a05e368eae9ff29",
+    "source_digest": "227fbe1bad0948eddbfb8e3ba78b7013673df591e7978fc2d9896cd852463fce",
+    "cantera_version": "3.2.0",
+    "cause": "Foundation 13 rejects mixed-case Ar in the ELEM section; its reaction-header grammar also accepts MOLES but not the standalone MOLE emitted by yaml2ck.",
+    "change": "Uppercase only element-section code and normalize the standalone reaction-header amount unit to MOLES. Preserve comments, species names, reaction data and CAL/MOLE.",
+    "command": "python -m pytest integrations/openfoam13/case/test_generation.py -q",
+    "passed": 7,
+    "scope": "Foundation 13 element/unit/header syntax, normalization scope and idempotence, CHEMKIN roundtrip composition/molecular weights/rates/thermochemistry, initialized fields and provenance",
+    "full_regression_rerun": false,
+    "native_chemkinToFoam_executed": false,
+    "native_cfd_executed": false,
+    "limitation": "OpenFOAM is unavailable in this development environment; conversion and native CFD must be rerun on the target laptop."
   }
 }

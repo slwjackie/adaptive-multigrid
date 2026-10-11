@@ -61,6 +61,31 @@ def write(root: Path, relative: str, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def normalize_chemkin_syntax(path: Path) -> None:
+    """Normalize element and amount-unit tokens for Foundation 13.
+
+    Its lexer accepts uppercase element names and MOLES, whereas yaml2ck
+    writes mixed-case element symbols and MOLE. Preserve species names,
+    reaction data, activation-energy units (CAL/MOLE), and comments.
+    """
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    in_elements = False
+    for i, line in enumerate(lines):
+        code, marker, comment = line.partition("!")
+        tokens = code.split()
+        keyword = tokens[0].upper() if tokens else ""
+        if keyword in ("ELEMENTS", "ELEM"):
+            in_elements = True
+        if in_elements:
+            code = code.upper()
+        elif keyword in ("REACTIONS", "REAC"):
+            code = re.sub(r"(?<!\S)MOLE(?!\S)", "MOLES", code)
+        if keyword == "END":
+            in_elements = False
+        lines[i] = code + marker + comment
+    path.write_text("".join(lines), encoding="utf-8")
+
+
 def normalize_thermo_header(path: Path) -> None:
     """Adapt yaml2ck's separate NASA7 file to Foundation 13's lexer.
 
@@ -162,6 +187,7 @@ def generate(args: argparse.Namespace) -> Path:
     yaml2ck.convert(gas, mechanism_path=root / "chemkin/h2.inp",
                     thermo_path=root / "chemkin/thermo.dat",
                     transport_path=root / "chemkin/transport.dat")
+    normalize_chemkin_syntax(root / "chemkin/h2.inp")
     normalize_thermo_header(root / "chemkin/thermo.dat")
     # Remove only volatile writer timestamps so identical case definitions have
     # identical provenance hashes when generated at different wall-clock times.

@@ -91,5 +91,18 @@
     "native_chemkinToFoam_executed": false,
     "native_cfd_executed": false,
     "limitation": "OpenFOAM is unavailable in this development environment; conversion and native CFD must be rerun on the target laptop."
+  },
+  "ode_solver_name_fix": {
+    "date_utc": "2026-10-11",
+    "parent_commit": "e4c86e9d0843750b431423620cdc3a6bee6df6ca",
+    "source_digest": "0f45bd161044a36798dbabe69a491cbb72e5b706ce988192790930f9b4c102d4",
+    "change": "Use Rosenbrock34, listed by the target Foundation 13 runtime, instead of the unregistered Rosenbrock43 name.",
+    "command": "python -m pytest integrations/openfoam13/case/test_generation.py -q",
+    "passed": 7,
+    "generated_case_check": "Generated 15x15 preflight chemistryProperties contains solver Rosenbrock34; with the original absTol and relTol.",
+    "target_user_report": "chemkinToFoam and blockMesh ended normally, checkMesh reported Mesh OK; foamRun loaded 10 species/29 reactions and failed selecting Rosenbrock43.",
+    "full_regression_rerun": false,
+    "native_cfd_executed_in_development_environment": false,
+    "limitation": "The corrected native ODE setup and full CFD trajectory still require execution on the target laptop."
   }
 }

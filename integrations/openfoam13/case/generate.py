@@ -259,7 +259,7 @@ defaultSpecie N2;
     write(root, "constant/chemistryProperties", foam_header("chemistryProperties") + """chemistryType { solver ode; }
 chemistry on;
 initialChemicalTimeStep 1e-8;
-odeCoeffs { solver Rosenbrock43; absTol 1e-10; relTol 1e-6; }
+odeCoeffs { solver Rosenbrock34; absTol 1e-10; relTol 1e-6; }
 #include "reactions"
 """)
     write(root, "constant/combustionProperties", foam_header("combustionProperties") + "combustionModel laminar;\n")

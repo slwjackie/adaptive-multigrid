@@ -1,6 +1,21 @@
 # World-Model-Guided Adaptive Neural Smoothing
 
-## Primary thesis workflow: C_tuned + H_S + solver world model
+## Current CFD experiments: nonreacting variable density first, hydrogen second
+
+The primary CFD benchmark is now inert He/N2 variable-density mixing. H2/air
+combustion remains a supplementary application. Both use the same fixed-P
+classical/H_S solver, stopping criteria, and paired CFD comparison. Start with
+[`VARIABLE_DENSITY_RUNBOOK_KR.md`](docs/VARIABLE_DENSITY_RUNBOOK_KR.md) and
+`scripts/run_v6_7_variable_density_pipeline.py`. The new benchmark needs no
+Cantera or chemistry conversion. It records density/species checks, matrix
+drift and the measured pressure-call fraction instead of assuming dominance.
+
+This first CFD stage keeps the World Model disabled. The separate temporal
+controller workflow below remains available for subsequent action-cost studies.
+Native OpenFOAM execution of the new case must be validated on the target host;
+Python tests do not establish CFD correctness or a speedup.
+
+## Separate temporal workflow: C_tuned + H_S + solver world model
 
 Use [`run_v6_7_hs_world_study.py`](scripts/run_v6_7_hs_world_study.py), with the
 [complete Korean runbook](docs/HS_WORLD_THESIS_RUNBOOK_KR.md). One global classical
@@ -21,7 +36,7 @@ provided; no automatic OpenFOAM runtime plugin or combustion solver is claimed.
 
 
 
-## New primary H_P workflow: EM + schedules + asymptotic affine transfer
+## Earlier H_P workflow: EM + schedules + asymptotic affine transfer
 
 [EM_AFFINE_HP_RUNBOOK_KR.md](docs/EM_AFFINE_HP_RUNBOOK_KR.md) documents the new
 `run_v6_7_em_transfer_study.py` pipeline: warm-calibrated classical plans,

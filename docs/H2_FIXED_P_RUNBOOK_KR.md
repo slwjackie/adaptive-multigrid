@@ -1,5 +1,10 @@
 # 고정 P + 수소 연소 H_S 실험
 
+현재 연구에서 이 경로는 **추가 적용 사례**다. 주 실험은
+[변밀도 비반응 유동](VARIABLE_DENSITY_RUNBOOK_KR.md)이며 기존 H₂ 실행 명령은 계속 지원한다.
+새 commit에서는 새로운 출력 폴더로 시작한다. 기존 checkpoint·frozen run은
+그 결과를 만든 원래 commit과 설정에서 재현한다.
+
 이 경로는 **고정 격자의 실제 2D H2–air CFD에서 Classical MG와 학습한 H_S를 비교**한다.
 World Model은 사용하지 않는다. 기존 실행 경로·설정·체크포인트는 변경하지 않았다.
 새 진입점은 `scripts/run_v6_7_h2_fixed_p.py`, 설정은

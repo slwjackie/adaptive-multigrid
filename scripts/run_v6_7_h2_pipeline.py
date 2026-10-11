@@ -134,7 +134,13 @@ def verify_preflight(args, root):
     print("PREFLIGHT PASS " + json.dumps(result), flush=True)
 
 
-def collect(args, root, name, split, temperature):
+def collect(args, root, name, split, temperature, *, generator=None,
+            case_group=None, generator_options=()):
+    """Collect a generated real CFD trajectory through the shared native bridge.
+
+    The defaults preserve the supplementary H2 workflow. Other case generators
+    may share this process lifecycle while declaring their own physical inputs.
+    """
     prepared = root / "cases" / name
     executed = root / "record_cases" / name
     recording = root / "recordings" / name
@@ -143,11 +149,12 @@ def collect(args, root, name, split, temperature):
     bridge = process = None
     with tempfile.TemporaryDirectory(prefix="h2c-", dir="/tmp") as short:
         socket_path = Path(short) / "bridge.sock"
-        run_logged([sys.executable, REPO / "integrations/openfoam13/case/generate.py",
-                    "--output", prepared, "--case-id", name, "--case-group", f"inlet_{temperature}",
+        run_logged([sys.executable, generator or REPO / "integrations/openfoam13/case/generate.py",
+                    "--output", prepared, "--case-id", name, "--case-group", case_group or f"inlet_{temperature}",
                     "--split", split, "--inlet-temperature", str(temperature),
                     "--nx", str(args.n), "--ny", str(args.n), "--end-time", str(args.end_time),
-                    "--delta-t", str(args.delta_t), "--mode", "native", "--socket-path", socket_path],
+                    "--delta-t", str(args.delta_t), "--mode", "native", "--socket-path", socket_path,
+                    *generator_options],
                    root / "logs" / (name + "_generate.log"), args.timeout)
         run_logged([sys.executable, REPO / "integrations/openfoam13/case/run_case.py",
                     "--case", prepared, "--prepare-only"],

@@ -1,4 +1,4 @@
-"""Opt-in fixed-P H2 study: import -> train H_S -> replay -> coupled CFD.
+"""Fixed-P CFD study: import -> train H_S -> replay -> coupled CFD.
 
 World Model training is intentionally absent. Validation first determines
 whether H_S offers state-dependent speed benefits worth controlling.
@@ -49,6 +49,8 @@ def source_digest():
     # configuration_digest separately. These paths are absent in wheel installs.
     native_sources = (
         'scripts/run_v6_7_h2_fixed_p.py',
+        'scripts/run_v6_7_h2_pipeline.py',
+        'scripts/run_v6_7_variable_density_pipeline.py',
         'integrations/openfoam13/Allwmake',
         'integrations/openfoam13/AdaptiveFixedP/AdaptiveFixedP.C',
         'integrations/openfoam13/AdaptiveFixedP/AdaptiveFixedP.H',
@@ -56,6 +58,7 @@ def source_digest():
         'integrations/openfoam13/AdaptiveFixedP/Make/files',
         'integrations/openfoam13/AdaptiveFixedP/Make/options',
         'integrations/openfoam13/case/generate.py',
+        'integrations/openfoam13/case/generate_variable_density.py',
         'integrations/openfoam13/case/run_case.py',
         'integrations/openfoam13/case/Allrun',
         'integrations/openfoam13/case/Allclean',
@@ -72,6 +75,12 @@ def configuration(path):
     settings = read(path)
     if settings.get('schema') != VERSION:
         raise ValueError('use an h2-fixed-p-study-v1 configuration')
+    benchmark = settings.get('benchmark', {})
+    if not isinstance(benchmark, dict):
+        raise ValueError('benchmark must be an object')
+    if benchmark and (benchmark.get('experiment_kind') not in ('h2_combustion', 'variable_density_nonreacting')
+                      or benchmark.get('role') not in ('primary', 'supplementary')):
+        raise ValueError('explicit supported benchmark experiment_kind and role required')
     cfg = AdaptiveConfig.from_dict(settings['solver'])
     if (cfg.use_transfer or cfg.application != 'replace' or not cfg.use_smoother
             or cfg.branch != 'H_S' or cfg.spatial or cfg.use_learned_controller):
@@ -100,6 +109,10 @@ def prepare(config, inputs, run_dir):
         raise FileExistsError('new study run directory required')
     out.mkdir(parents=True, exist_ok=True)
     imported = import_recordings(inputs, out / 'data')
+    kind = imported.get('experiment_kind', 'h2_combustion')
+    declared = settings.get('benchmark', {}).get('experiment_kind')
+    if declared is not None and declared != kind:
+        raise ValueError('configuration benchmark and recorded CFD experiment kind disagree')
     splits = {t['split'] for t in imported['trajectories']}
     if not {'train', 'validation'}.issubset(splits):
         raise ValueError('independent train and validation CFD cases are required')
@@ -108,6 +121,7 @@ def prepare(config, inputs, run_dir):
                     configuration_digest=digest(settings),
                     dataset_sha256=file_hash(out / 'data/sequence_manifest.json'),
                     source_kind='external_cfd', combustion_verified=False,
+                    experiment_kind=kind, benchmark=settings.get('benchmark', {}),
                     world_model_enabled=False, test_seen=False,
                     split_counts={s:sum(t['split'] == s for t in imported['trajectories']) for s in splits})
     write_json(out / 'run_manifest.json', manifest)
@@ -327,14 +341,19 @@ def main(argv=None):
         result = run_paired(a.run_dir, a.case, a.output, repeats=a.repeats, timeout=a.timeout)
     else:
         from .service import Session, serve
-        from .data import validate_case_contract
+        from .data import validate_case_contract, experiment_kind
         contract = validate_case_contract(read(a.case_contract))
         if a.run_dir:
-            out, settings, cfg, _ = load_run(a.run_dir)
+            out, settings, cfg, manifest = load_run(a.run_dir)
+            if manifest.get('experiment_kind', 'h2_combustion') != experiment_kind(contract):
+                raise ValueError('service case and trained dataset experiment kinds disagree')
             if contract['split'] == 'test': check_freeze(out)
         else:
             settings, cfg = configuration(a.config)
             if a.mode == 'hs': raise ValueError('H_S service requires --run-dir with trained expert')
+        declared = settings.get('benchmark', {}).get('experiment_kind')
+        if declared is not None and declared != experiment_kind(contract):
+            raise ValueError('service case and configuration experiment kinds disagree')
         expert = load_expert(out, cfg) if a.mode == 'hs' else None
         return serve(a.socket, Session(cfg, contract, mode=a.mode, expert=expert,
                      recording=a.record_dir, evidence=a.evidence), timeout=a.timeout)

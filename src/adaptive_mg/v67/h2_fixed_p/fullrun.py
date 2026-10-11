@@ -22,8 +22,8 @@ import numpy as np
 
 from ...provenance import hardware_environment
 from ..world_model.data import digest, file_hash, write_json
-from .data import read, validate_case_contract
-from .evaluation import compare_coupled_runs
+from .data import read, validate_case_contract, experiment_kind, input_fingerprint, FIELD_PROFILES, VARIABLE_DENSITY_KIND
+from .evaluation import compare_coupled_runs, nonreacting_field_evidence
 
 
 NUMBER = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?"
@@ -147,8 +147,9 @@ def collect_fields(root, contract):
     if not samples or not np.isclose(samples[-1][0], contract["end_time"], rtol=1.e-8, atol=1.e-13):
         raise ValueError("saved CFD fields do not reach declared end time")
     n = int(np.prod(contract["shape"]))
-    values, hashes = {name: [] for name in ("T", "H2", "U", "p")}, {}
-    heat_release = []
+    kind = experiment_kind(contract)
+    values, hashes = {name: [] for name in FIELD_PROFILES[kind]}, {}
+    heat_release, absolute_heat_release = [], []
     for t, folder in samples:
         for name in values:
             path = folder / name
@@ -157,12 +158,22 @@ def collect_fields(root, contract):
         qpath = folder / "Qdot"
         qdot = read_internal_field(qpath, n)
         heat_release.append(float(np.max(qdot)))
+        absolute_heat_release.append(float(np.max(np.abs(qdot))))
         hashes[str(qpath.relative_to(root))] = file_hash(qpath)
-    return dict(sample_times=[t for t, _ in samples],
-                fields={key: np.stack(value) for key, value in values.items()}, hashes=hashes,
-                reaction_evidence=dict(finite_saved_Qdot=True, maximum_Qdot_by_time=heat_release,
-                                       positive_heat_release_observed=any(v > 0 for v in heat_release),
-                                       experimentally_validated=False))
+    result = dict(sample_times=[t for t, _ in samples],
+                  fields={key: np.stack(value) for key, value in values.items()}, hashes=hashes,
+                  reaction_evidence=dict(finite_saved_Qdot=True, maximum_Qdot_by_time=heat_release,
+                                         maximum_absolute_Qdot_by_time=absolute_heat_release,
+                                         positive_heat_release_observed=any(v > 0 for v in heat_release),
+                                         zero_heat_release_observed=all(v == 0 for v in absolute_heat_release),
+                                         experimentally_validated=False))
+    if kind == VARIABLE_DENSITY_KIND:
+        physical = nonreacting_field_evidence(result["fields"])
+        physical["zero_heat_release_observed"] = result["reaction_evidence"]["zero_heat_release_observed"]
+        physical["maximum_absolute_Qdot_by_time"] = absolute_heat_release
+        physical["passed"] = physical["passed"] and physical["zero_heat_release_observed"]
+        result["physics_evidence"] = physical
+    return result
 
 
 def _digest_files(root, paths):
@@ -182,9 +193,19 @@ def _verify_prepared(root):
         raise ValueError("prepared case must contain local regular files, not symlinks")
     initial = [f"0/{name}" for name in [*contract["species"], "T", "p", "U"]]
     mesh = [str(p.relative_to(root)) for p in (root / "constant/polyMesh").iterdir() if p.is_file()]
-    checks = {"chemistry_sha256": contract["chemistry_files"], "initial_conditions_sha256": initial,
-              "converted_chemistry_sha256": ["constant/reactions", "constant/thermo.compressibleGas"],
-              "mesh_sha256": mesh}
+    checks = {"initial_conditions_sha256": initial, "mesh_sha256": mesh}
+    if experiment_kind(contract) == VARIABLE_DENSITY_KIND:
+        if contract.get("preparation_kind") != "native_thermophysical":
+            raise ValueError("nonreacting case needs native thermophysical preparation")
+        checks["thermophysical_sha256"] = contract["thermophysical_files"]
+        chemistry = _clean((root / "constant/chemistryProperties").read_text())
+        combustion = _clean((root / "constant/combustionProperties").read_text())
+        if (not re.search(r"\bchemistry\s+off\s*;", chemistry)
+                or not re.search(r"\bcombustionModel\s+none\s*;", combustion)):
+            raise ValueError("nonreacting case must disable chemistry and combustion")
+    else:
+        checks.update(chemistry_sha256=contract["chemistry_files"],
+                      converted_chemistry_sha256=["constant/reactions", "constant/thermo.compressibleGas"])
     for key, files in checks.items():
         if not files or _digest_files(root, files) != contract.get(key):
             raise ValueError("prepared case provenance changed: " + key)
@@ -235,6 +256,27 @@ def _stop(process):
             process.wait(timeout=5.)
 
 
+def summarize_service_timing(stream):
+    """Sum measured phases; admission and MG totals are nested in service time."""
+    result = {}
+    selectors = {
+        "service_seconds": lambda row: row["service_seconds"],
+        "admission_seconds": lambda row: row["admission_seconds"],
+        **{"mg_" + key: (lambda row, key=key: row["step"][key])
+           for key in ("setup_seconds", "solve_seconds", "total_seconds")},
+        **{"mg_" + key: (lambda row, key=key: row["step"]["stats"][key])
+           for key in ("feature_seconds", "verification_seconds", "recovery_seconds", "orchestration_seconds")},
+    }
+    for name, select in selectors.items():
+        values = [select(row) for row in stream]
+        if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not np.isfinite(v) or v < 0 for v in values):
+            raise ValueError("invalid measured service phase: " + name)
+        result[name] = float(sum(values))
+    result["phase_scope"] = ("service includes admission and MG total; MG total includes setup, solve, "
+                             "feature, verification, recovery and orchestration. Nested totals must not be added.")
+    return result
+
+
 def _one_run(out, prepared, contract, run_dir, cfg, settings, arm, timeout, hardware):
     case = out / "case"
     shutil.copytree(prepared, case)
@@ -242,7 +284,8 @@ def _one_run(out, prepared, contract, run_dir, cfg, settings, arm, timeout, hard
     log_path, service_log, evidence = out / "foamRun.log", out / "service.log", out / "service.jsonl"
     status = dict(schema="h2-fixed-p-coupled-run-v1", arm=arm, source_kind="external_cfd",
                   execution_mode="online_coupled", success=False, case_id=contract["case_id"],
-                  mesh_sha256=contract["mesh_sha256"], chemistry_sha256=contract["chemistry_sha256"],
+                  mesh_sha256=contract["mesh_sha256"], experiment_kind=experiment_kind(contract),
+                  comparison_fields=list(FIELD_PROFILES[experiment_kind(contract)]),
                   initial_conditions_sha256=contract["initial_conditions_sha256"],
                   boundary_conditions_sha256=contract["boundary_conditions_sha256"],
                   fixed_p_sha256=None, dt_schedule=[], end_time=0., hardware=hardware,
@@ -250,6 +293,8 @@ def _one_run(out, prepared, contract, run_dir, cfg, settings, arm, timeout, hard
                   stopping_criteria=dict(rtol=cfg.mg.tolerance, atol=cfg.mg.absolute_tolerance,
                                          max_cycles=cfg.mg.max_cycles, residual_reference="initial_raw_l2"),
                   continuity={"passed": False}, fields={}, evidence={}, timing={})
+    input_key, input_hash = input_fingerprint(contract)
+    status[input_key] = input_hash
     process = bridge = None
     foam_wall = startup = 0.
     execution_wall = None
@@ -292,7 +337,12 @@ def _one_run(out, prepared, contract, run_dir, cfg, settings, arm, timeout, hard
                 execution_wall = time.perf_counter() - started
             parsed = parse_solver_log(log_path.read_text(), contract, settings["continuity_max_cumulative"])
             fields = collect_fields(case, contract)
-            if not fields["reaction_evidence"]["positive_heat_release_observed"]:
+            status["reaction_evidence"] = fields["reaction_evidence"]
+            if experiment_kind(contract) == VARIABLE_DENSITY_KIND:
+                status["physics_evidence"] = fields["physics_evidence"]
+                if not fields["physics_evidence"]["passed"]:
+                    raise ValueError("nonreacting variable-density physics checks failed: " + json.dumps(fields["physics_evidence"]))
+            elif not fields["reaction_evidence"]["positive_heat_release_observed"]:
                 raise ValueError("no positive saved heat release; cannot validate this as a reacting-flame benchmark")
             if any(not any(np.isclose(t, x, rtol=1.e-8, atol=1.e-13) for x in parsed["times"]) for t in fields["sample_times"]):
                 raise ValueError("output field times not present in actual CFD log")
@@ -314,13 +364,17 @@ def _one_run(out, prepared, contract, run_dir, cfg, settings, arm, timeout, hard
             status.update(success=True, fixed_p_sha256=next(iter(p_hashes)), dt_schedule=parsed["dt_schedule"],
                           end_time=parsed["end_time"], sample_times=fields["sample_times"], fields=fields["fields"],
                           continuity=parsed["continuity"], reaction_evidence=fields["reaction_evidence"])
+            if "physics_evidence" in fields:
+                status["physics_evidence"] = fields["physics_evidence"]
             status["evidence"] = dict(coupled_run_attested=True, solver_log_sha256=file_hash(log_path),
                                       field_files_sha256=fields["hashes"], service_log_sha256=file_hash(evidence),
                                       expert_checkpoint_sha256=file_hash(run_dir / "expert/candidate.pt") if arm == "H_S" else None,
                                       neural_apply_calls=int(uses), pressure_calls=len(stream),
                                       producer="this runner launched real foamRun and persistent pressure service")
+            status["timing"].update(summarize_service_timing(stream))
             status["timing"]["pressure_seconds"] = parsed["pressure_seconds"]
         except Exception as exc:
+            status["success"] = False
             status["error"] = f"{type(exc).__name__}: {exc}"
         finally:
             _stop(process)
@@ -368,13 +422,16 @@ def run_paired(run_dir, case, output, *, repeats=3, timeout=3600.):
     elif (run_dir / "freeze.json").exists():
         raise ValueError("validation development is closed after freeze")
     dataset = read(run_dir / "data/sequence_manifest.json")
+    if experiment_kind(dataset) != experiment_kind(contract):
+        raise ValueError("coupled case and trained dataset experiment kinds disagree")
+    input_key, _ = input_fingerprint(contract)
     for producer in dataset["producers"]:
         other = read(run_dir / "data" / producer["contract_path"])
         if (other["case_group"] == contract["case_group"] or other["case_id"] == contract["case_id"]):
             if other["split"] != contract["split"]:
                 raise ValueError("coupled physical case leaks across data splits")
         same = all(other.get(k) == contract.get(k) for k in
-                   ("initial_conditions_sha256", "chemistry_sha256", "mesh_sha256", "end_time", "delta_t"))
+                   ("initial_conditions_sha256", input_key, "mesh_sha256", "end_time", "delta_t"))
         if same and other["split"] != contract["split"]:
             raise ValueError("renamed identical physical case leaks across data splits")
     tolerances = settings.get("physical_tolerances", {})
@@ -403,7 +460,8 @@ def run_paired(run_dir, case, output, *, repeats=3, timeout=3600.):
                 # This row explicitly does not attest that CFD was launched.
                 runs[arm] = dict(schema="h2-fixed-p-coupled-run-v1", arm=arm, success=False,
                                  source_kind="external_cfd", execution_mode="not_started",
-                                 case_id=contract["case_id"], error=f"{type(exc).__name__}: {exc}",
+                                 case_id=contract["case_id"], experiment_kind=experiment_kind(contract),
+                                 comparison_fields=list(FIELD_PROFILES[experiment_kind(contract)]), error=f"{type(exc).__name__}: {exc}",
                                  timing={}, evidence={}, fields={}, continuity={"passed": False})
                 write_json(destination / "run.json", {k: v for k, v in runs[arm].items() if k != "fields"})
         comparison = compare_coupled_runs(runs["classical"], runs["H_S"], tolerances)
@@ -414,11 +472,12 @@ def run_paired(run_dir, case, output, *, repeats=3, timeout=3600.):
     wall = {arm: [pair["timing"][arm]["wall_seconds"] for pair in pairs] for arm in ("classical", "H_S")}
     pressure = {arm: [pair["timing"][arm]["pressure_seconds"] for pair in pairs] for arm in ("classical", "H_S")}
     report = dict(schema="h2-fixed-p-paired-cfd-v1", split=contract["split"], case_id=contract["case_id"],
+                  experiment_kind=experiment_kind(contract), comparison_fields=list(FIELD_PROFILES[experiment_kind(contract)]),
                   repeats=repeats, success=success, speed_claim_eligible=success, pairs=pairs,
                   full_cfd_speedup=float(np.median(wall["classical"]) / np.median(wall["H_S"])) if success else None,
                   pressure_speedup=float(np.median(pressure["classical"]) / np.median(pressure["H_S"])) if success else None,
                   world_model_enabled=False, original_case_modified=False,
-                  physical_claim="paired field agreement at saved times, not independent experimental flame validation",
+                  physical_claim="paired field agreement at saved times, not independent experimental physics validation",
                   provenance="locally launched online CFD runs; native compilation/runtime success must be established on target machine")
     write_json(out / "report.json", report)
     return report

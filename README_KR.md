@@ -1,5 +1,12 @@
 # Adaptive Neural Multigrid v6.7
 
+현재 CFD 실험은 **변밀도 비반응 He/N₂ 혼합 유동을 주 실험**, **H₂/air 연소를
+추가 적용 사례**로 사용한다. 실행은 [변밀도 실험 안내](docs/VARIABLE_DENSITY_RUNBOOK_KR.md)의
+`scripts/run_v6_7_variable_density_pipeline.py`에서 시작한다. 동일한 fixed-P
+Classical/H_S를 비교하며, 현재 CFD 단계에서는 World Model을 켜지 않는다.
+압력 처리 비중과 행렬 변화는 실행 결과로 판단한다. 아래 다른 연구 경로와 과거
+검증 결과는 해당 범위의 기록이며 새 CFD 사례의 실행·성능 검증을 뜻하지 않는다.
+
 **기준 코드:** `adaptive_neural_multigrid_v6_6_final.zip`  
 **새 production API:** `adaptive_mg.v67.PreparedAdaptiveMG`  
 **비교:** standalone Classical MG vs standalone Adaptive Neural MG. 외부 Krylov solver를 사용하지 않습니다.

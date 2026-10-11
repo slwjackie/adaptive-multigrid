@@ -1,11 +1,15 @@
 # Adaptive Neural Multigrid v6.7
 
-현재 CFD 실험은 **변밀도 비반응 He/N₂ 혼합 유동을 주 실험**, **H₂/air 연소를
-추가 적용 사례**로 사용한다. 실행은 [변밀도 실험 안내](docs/VARIABLE_DENSITY_RUNBOOK_KR.md)의
-`scripts/run_v6_7_variable_density_pipeline.py`에서 시작한다. 동일한 fixed-P
-Classical/H_S를 비교하며, 현재 CFD 단계에서는 World Model을 켜지 않는다.
-압력 처리 비중과 행렬 변화는 실행 결과로 판단한다. 아래 다른 연구 경로와 과거
-검증 결과는 해당 범위의 기록이며 새 CFD 사례의 실행·성능 검증을 뜻하지 않는다.
+현재 주제는 **변조형 He–N₂ 전단 혼합층을 주 실험으로 하고, 수소 반응유동까지
+검증하는 시간 이력 기반 Neural Multigrid**다. 실행은
+[혼합층·시간 이력 실험 안내](docs/SHEAR_TEMPORAL_RUNBOOK_KR.md)의
+`scripts/run_v6_7_shear_pipeline.py`에서 시작한다. `--with-h2`로 수소 검증을
+별도 데이터·모델로 이어서 수행한다. 고정 P와 현재 A의 coarse 행렬·인수분해를
+유지하면서 **NN smoother만 재사용/갱신**한다. 먼저 비용의 상충관계를 측정하고
+근거가 있을 때만 World Model을 학습한다. 비변조 혼합층과 기존 기본 He/N₂
+counterflow도 보존한다. 압력 비중·속도 우위는 실제 측정으로 판단한다.
+새 OpenFOAM 코드는 대상 WSL에서 빌드·실행 검증이 필요하다. 아래 과거 결과는
+새 혼합층의 실행·성능 검증을 뜻하지 않는다.
 
 **기준 코드:** `adaptive_neural_multigrid_v6_6_final.zip`  
 **새 production API:** `adaptive_mg.v67.PreparedAdaptiveMG`  

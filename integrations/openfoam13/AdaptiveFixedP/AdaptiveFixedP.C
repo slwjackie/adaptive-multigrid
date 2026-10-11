@@ -95,13 +95,54 @@ Foam::solverPerformance Foam::AdaptiveFixedP::solve(scalarField& psi,
         const fvMesh& mesh=refCast<const fvMesh>(matrix_.mesh().thisDb());
         const label nx=controlDict_.lookup<label>("nx"),ny=controlDict_.lookup<label>("ny");
         const word mode=controlDict_.lookupOrDefault<word>("mode","classical");
-        if(mode!="classical"&&mode!="hs"&&mode!="native")throw std::runtime_error("invalid AdaptiveFixedP mode");
+        const bool localNative=mode=="native_pcg"||mode=="native_gamg";
+        if(mode!="classical"&&mode!="hs"&&mode!="native"&&!localNative)throw std::runtime_error("invalid AdaptiveFixedP mode");
         const fileName path(controlDict_.lookup("socketPath"));
         const scalar atol=controlDict_.lookupOrDefault<scalar>("adaptiveAtol",1e-12);
         const scalar rtol=controlDict_.lookupOrDefault<scalar>("adaptiveRtol",1e-8);
         const label timeout=controlDict_.lookupOrDefault<label>("socketTimeout",120);
         if(!std::isfinite(atol)||!std::isfinite(rtol)||atol<=0||rtol<=0||rtol>=1||maxIter_<=0)
             throw std::runtime_error("invalid raw L2 stopping configuration");
+        if(localNative){
+            // Diagnostic native baseline: no Python, JSON, socket or exported
+            // matrix witnesses. Keep the same raw L2 acceptance check.
+            Session& local=sessions()[std::string("local:")+path.c_str()];
+            if(local.index==0)mapMesh(mesh,nx,ny);
+            const scalarField x0(psi);scalarField ax(psi.size()),tmp(psi.size());
+            matrix_.Amul(ax,x0,interfaceBouCoeffs_,interfaces_,cmpt);
+            const double initial=norm(scalarField(source-ax));
+            const double target=std::max(double(atol),double(rtol)*initial);
+            label iterations=0;
+            if(initial>target){
+                const scalar normalization=normFactor(x0,source,ax,tmp);
+                dictionary controls;
+                if(controlDict_.found("nativeControls"))controls=controlDict_.subDict("nativeControls");
+                if(mode=="native_pcg"){
+                    controls.set("solver",word("PCG"));
+                    if(!controls.found("preconditioner"))controls.add("preconditioner",word("DIC"));
+                }else{
+                    controls.set("solver",word("GAMG"));
+                    if(!controls.found("smoother"))controls.add("smoother",word("DICGaussSeidel"));
+                    if(!controls.found("nCellsInCoarsestLevel"))controls.add("nCellsInCoarsestLevel",label(10));
+                    if(!controls.found("cacheAgglomeration"))controls.add("cacheAgglomeration",true);
+                }
+                // Native solvers stop in normalized L1, so this conversion is
+                // conservative. Report that fact; do not label it optimal tuning.
+                controls.set("tolerance",scalar(target/std::max(double(normalization),1e-300)));
+                controls.set("relTol",scalar(0));controls.set("maxIter",maxIter_);
+                auto native=lduMatrix::solver::New(fieldName_,matrix_,interfaceBouCoeffs_,interfaceIntCoeffs_,interfaces_,controls);
+                iterations=native->solve(psi,source,cmpt).nIterations();
+            }
+            matrix_.Amul(ax,psi,interfaceBouCoeffs_,interfaces_,cmpt);
+            const double final=norm(scalarField(source-ax));
+            if(!std::isfinite(final)||final>target)
+                throw std::runtime_error("local native solver failed common raw L2 threshold");
+            Ostream& timingLog=Info();const int oldPrecision=timingLog.precision(17);
+            timingLog<<"H2FixedPPressureSeconds "<<seconds(started)<<" index "<<local.index++
+                <<" time "<<mesh.time().value()<<" mode "<<mode<<" residual "<<final<<" threshold "<<target<<nl;
+            timingLog.precision(oldPrecision);
+            return solverPerformance(typeName,fieldName_,scalar(initial),scalar(final),iterations,true,false);
+        }
         auto order=mapMesh(mesh,nx,ny);
         std::ostringstream geometry,boundaries;geometry<<std::setprecision(17);boundaries<<std::setprecision(17);
         const auto& centres=mesh.C().primitiveField();

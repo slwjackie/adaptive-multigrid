@@ -114,7 +114,7 @@ def parse_solver_log(text, contract, continuity_limit):
     if len(times) != count or not np.allclose(times, expected, rtol=1.e-8, atol=1.e-13):
         raise ValueError("CFD skipped/changed timesteps or did not reach declared end time")
     pattern = (r"H2FixedPPressureSeconds\s+(" + NUMBER + r")\s+index\s+(\d+)\s+time\s+(" + NUMBER +
-               r")\s+mode\s+(classical|hs)\s+residual\s+(" + NUMBER + r")\s+threshold\s+(" + NUMBER + r")")
+               r")\s+mode\s+(classical|hs|native_pcg|native_gamg)\s+residual\s+(" + NUMBER + r")\s+threshold\s+(" + NUMBER + r")")
     rows = [dict(seconds=float(s), index=int(i), time=float(t), mode=m, residual=float(r), threshold=float(th))
             for s, i, t, m, r, th in re.findall(pattern, text)]
     if not rows or len(rows) != text.count("H2FixedPPressureSeconds"):
@@ -273,11 +273,11 @@ def summarize_service_timing(stream):
             raise ValueError("invalid measured service phase: " + name)
         result[name] = float(sum(values))
     result["phase_scope"] = ("service includes admission and MG total; MG total includes setup, solve, "
-                             "feature, verification, recovery and orchestration. Nested totals must not be added.")
+                             "feature, verification, recovery, orchestration and the temporal controller when enabled. Nested totals must not be added.")
     return result
 
 
-def _one_run(out, prepared, contract, run_dir, cfg, settings, arm, timeout, hardware):
+def _one_run(out, prepared, contract, run_dir, cfg, settings, arm, timeout, hardware, *, smoother_policy=None):
     case = out / "case"
     shutil.copytree(prepared, case)
     mode = "classical" if arm == "classical" else "hs"
@@ -295,6 +295,8 @@ def _one_run(out, prepared, contract, run_dir, cfg, settings, arm, timeout, hard
                   continuity={"passed": False}, fields={}, evidence={}, timing={})
     input_key, input_hash = input_fingerprint(contract)
     status[input_key] = input_hash
+    if smoother_policy is not None:
+        status["smoother_policy"] = smoother_policy if arm == "H_S" else "classical"
     process = bridge = None
     foam_wall = startup = 0.
     execution_wall = None
@@ -305,6 +307,8 @@ def _one_run(out, prepared, contract, run_dir, cfg, settings, arm, timeout, hard
         argv = [sys.executable, "-c", "from adaptive_mg.v67.h2_fixed_p.study import main; main()",
                 "serve", "--run-dir", str(run_dir), "--case-contract", str(case / "contract.json"),
                 "--socket", str(socket_path), "--mode", mode, "--evidence", str(evidence), "--timeout", str(timeout)]
+        if smoother_policy is not None and arm == "H_S":
+            argv.extend(["--smoother-policy", smoother_policy])
         env = dict(os.environ)
         source = str(Path(__file__).resolve().parents[3])
         env["PYTHONPATH"] = source + os.pathsep + env.get("PYTHONPATH", "")
@@ -372,6 +376,9 @@ def _one_run(out, prepared, contract, run_dir, cfg, settings, arm, timeout, hard
                                       neural_apply_calls=int(uses), pressure_calls=len(stream),
                                       producer="this runner launched real foamRun and persistent pressure service")
             status["timing"].update(summarize_service_timing(stream))
+            status["timing"]["policy_seconds"] = sum(row.get("step", {}).get("stats", {}).get("policy_seconds", 0.) for row in stream)
+            status["timing"]["smoother_refreshes"] = sum(row.get("step", {}).get("stats", {}).get("smoother_refreshed", False) for row in stream)
+            status["timing"]["smoother_reuses"] = sum(row.get("step", {}).get("stats", {}).get("smoother_reused", False) for row in stream)
             status["timing"]["pressure_seconds"] = parsed["pressure_seconds"]
         except Exception as exc:
             status["success"] = False
@@ -392,7 +399,7 @@ def _one_run(out, prepared, contract, run_dir, cfg, settings, arm, timeout, hard
     return status
 
 
-def run_paired(run_dir, case, output, *, repeats=3, timeout=3600.):
+def run_paired(run_dir, case, output, *, repeats=3, timeout=3600., smoother_policy=None):
     """Run identical prepared CFD cases in independent C/H_S process pairs."""
     from .study import load_run, load_expert, check_freeze
 
@@ -415,6 +422,13 @@ def run_paired(run_dir, case, output, *, repeats=3, timeout=3600.):
     if out.exists():
         raise FileExistsError("new coupled output directory required")
     contract = _verify_prepared(prepared)
+    temporal_evidence = {}
+    if smoother_policy is not None:
+        from ..smoother_reuse.study import policy_solver
+        checked = policy_solver(run_dir, cfg, load_expert(run_dir, cfg), smoother_policy, split=contract["split"])
+        smoother_policy = checked.policy
+        temporal_evidence = dict(smoother_policy=smoother_policy,
+            temporal_training_sha256=file_hash(run_dir/"reuse/training.json"))
     if contract["split"] not in ("validation", "test"):
         raise ValueError("coupled evaluation requires an independent validation/test case")
     if contract["split"] == "test":
@@ -443,7 +457,8 @@ def run_paired(run_dir, case, output, *, repeats=3, timeout=3600.):
     write_json(out / "protocol.json", dict(case_contract=contract, tolerances=tolerances,
         continuity_limit=settings["continuity_max_cumulative"], hardware=hardware, repeats=repeats,
         run_manifest_sha256=file_hash(run_dir / "run_manifest.json"), configuration_digest=manifest["configuration_digest"],
-        source_digest=manifest["source_digest"], fixed_P=True, world_model_enabled=False))
+        source_digest=manifest["source_digest"], fixed_P=True,
+        world_model_enabled=bool(smoother_policy and smoother_policy.startswith("world")), **temporal_evidence))
     rng = np.random.default_rng(settings.get("seed", 20261010))
     first = int(rng.integers(0, 2))
     pairs = []
@@ -454,7 +469,8 @@ def run_paired(run_dir, case, output, *, repeats=3, timeout=3600.):
             destination = out / f"repeat_{repeat:03d}" / arm
             destination.mkdir(parents=True)
             try:
-                runs[arm] = _one_run(destination, prepared, contract, run_dir, cfg, settings, arm, timeout, hardware)
+                options = dict(smoother_policy=smoother_policy) if smoother_policy is not None else {}
+                runs[arm] = _one_run(destination, prepared, contract, run_dir, cfg, settings, arm, timeout, hardware, **options)
             except Exception as exc:
                 # Preparation/copy/bridge-dictionary errors also remain visible.
                 # This row explicitly does not attest that CFD was launched.
@@ -476,7 +492,8 @@ def run_paired(run_dir, case, output, *, repeats=3, timeout=3600.):
                   repeats=repeats, success=success, speed_claim_eligible=success, pairs=pairs,
                   full_cfd_speedup=float(np.median(wall["classical"]) / np.median(wall["H_S"])) if success else None,
                   pressure_speedup=float(np.median(pressure["classical"]) / np.median(pressure["H_S"])) if success else None,
-                  world_model_enabled=False, original_case_modified=False,
+                  world_model_enabled=bool(smoother_policy and smoother_policy.startswith("world")),
+                  original_case_modified=False, **temporal_evidence,
                   physical_claim="paired field agreement at saved times, not independent experimental physics validation",
                   provenance="locally launched online CFD runs; native compilation/runtime success must be established on target machine")
     write_json(out / "report.json", report)

@@ -14,6 +14,7 @@ independent trajectories. No World Model is involved in this first experiment.
 from __future__ import annotations
 
 from dataclasses import replace
+from copy import copy
 from time import perf_counter
 
 import numpy as np
@@ -42,6 +43,26 @@ def fixed_rules(plan):
     return replace(rules, strategy_by_rule=tuple((key, plan) for key in rules.rule_ids),
                    fallback_strategy_name=plan, require_coverage=False,
                    coverage_by_rule=(), provenance='fixed-P trajectory: single declared plan')
+
+
+def overlay_cached_smoother(current, cached):
+    """Reuse learned operators only; factors and residual matvecs use current A.
+
+    Frozen stencil coefficients include their original diagonal scaling.
+    Residual cascades must be rebound to current A even when their stages reuse.
+    """
+    if current.shape != cached.shape or current.index != cached.index:
+        raise ValueError('incompatible cached smoother level')
+    if (current.coarse is None) != (cached.coarse is None):
+        raise ValueError('incompatible cached smoother hierarchy')
+    result = copy(current)
+    stencil = cached.neural_stencil
+    if getattr(stencil, 'is_residual_cascade', False):
+        stencil = replace(stencil, a=current.a)
+    result.neural_stencil = stencil
+    if current.coarse is not None:
+        result.coarse = overlay_cached_smoother(current.coarse, cached.coarse)
+    return result
 
 
 class FixedPSolver:
@@ -95,8 +116,14 @@ class FixedPSolver:
         self._last_index = None
         self._last_time = None
         self._layout = None
+        self.cached_smoother = None
+        self.smoother_reference = None
+        self.smoother_age = 0
 
-    def step(self, snapshot: Snapshot) -> StepResult:
+    def step(self, snapshot: Snapshot, *, smoother_action='current') -> StepResult:
+        # 'current' preserves the historical exact-A cache semantics.
+        if smoother_action not in ('current', 'refresh', 'reuse'):
+            raise ValueError('smoother_action must be current, refresh or reuse')
         started = perf_counter()
         phase = dict(feature_seconds=0., setup_seconds=0., solve_seconds=0.,
                      verification_seconds=0., recovery_seconds=0.)
@@ -131,11 +158,28 @@ class FixedPSolver:
         base, st = self.backend.build(s, self.bank, 'REBUILD_C' if initial else 'REUSE_C', selection, cfg)
         builds.append(st)
         self.bank = base  # Preserve P even if a subsequent neural setup fails.
+        reused = refreshed = False
         if requested == 'H_S':
             try:
-                bank, st = self.backend.build(s, base, 'REUSE_HS', selection, cfg)
+                if smoother_action == 'reuse' and self.cached_smoother is not None:
+                    if self.backend.expert.signature() != self.backend.expert_signature:
+                        raise ValueError('expert changed after smoother generation')
+                    overlay = overlay_cached_smoother(base.classical_root, self.cached_smoother)
+                    bank = replace(base, root=overlay, smoother_root=overlay)
+                    st = dict(smoother_nn_calls=0, smoother_operator_cache_hits=0,
+                              stale_smoother_reused=True, numeric_refactorized=False)
+                    reused = True
+                else:
+                    if smoother_action == 'refresh':
+                        base = replace(base, smoother_root=None)
+                    bank, st = self.backend.build(s, base, 'REUSE_HS', selection, cfg)
+                    refreshed = bool(st.get('smoother_nn_calls', 0))
+                    self.cached_smoother = bank.smoother_root
+                    self.smoother_reference = s
+                    self.smoother_age = 0
                 # Overlay creation is not an additional physical timestep.
                 self.bank = replace(bank, p_age=base.p_age)
+                self.smoother_age += 1
                 builds.append(st)
             except (ValueError, RuntimeError, FloatingPointError, np.linalg.LinAlgError) as exc:
                 fallback = True
@@ -231,6 +275,9 @@ class FixedPSolver:
         if not preserved:
             raise RuntimeError('fixed interpolation mutated during solve')
         success = bool(np.isfinite(final_residual) and final_residual <= threshold)
+        if fallback or not success:
+            self.cached_smoother = self.smoother_reference = None
+            self.smoother_age = 0
         phase['verification_seconds'] += perf_counter() - before
         self._last_index, self._last_time, self._layout = s.index, s.time, layout
         actual = ('H_S_THEN_C' if accepted_neural and fallback else 'H_S' if accepted_neural else 'C')
@@ -238,6 +285,9 @@ class FixedPSolver:
                        neural_trial_cycles=neural_trials, accepted_neural_cycles=accepted_neural,
                        rejected_neural_cycles=rejected_neural, classical_trial_cycles=classical_trials,
                        actual_neural_used=bool(stats.neural_apply_calls),
+                       smoother_action_requested=smoother_action,
+                       smoother_reused=reused, smoother_refreshed=refreshed,
+                       smoother_age=self.smoother_age,
                        classical_P_only=True, fixed_P=True, learned_transfer=False,
                        hierarchy_p_digest_initial=self.initial_p_digest,
                        hierarchy_p_digest_final=final_digest, hierarchy_p_preserved=preserved,

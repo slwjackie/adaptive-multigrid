@@ -150,7 +150,7 @@ def decode_system(request, contract):
 
 
 class Session:
-    def __init__(self, cfg, contract, *, mode, expert=None, recording=None, evidence=None):
+    def __init__(self, cfg, contract, *, mode, expert=None, recording=None, evidence=None, solver=None):
         from .backend import FixedPSolver
         self.contract = validate_case_contract(contract)
         if mode not in ('native', 'classical', 'hs'):
@@ -160,7 +160,9 @@ class Session:
         if cfg.mg.residual_reference != 'initial':
             raise ValueError('live bridge uses the initial raw L2 residual')
         self.cfg, self.mode = cfg, mode
-        self.solver = FixedPSolver(cfg, expert) if mode != 'native' else None
+        if solver is not None and mode != 'hs':
+            raise ValueError('a temporal smoother policy requires the hs service arm')
+        self.solver = solver if solver is not None else FixedPSolver(cfg, expert) if mode != 'native' else None
         self.recorder = None
         if recording is not None:
             if mode != 'native':

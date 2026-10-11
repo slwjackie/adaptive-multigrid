@@ -1,17 +1,25 @@
 # OpenFOAM Foundation 13 fixed-P / learned-smoother bridge
 
-Two case families share this bridge: primary inert He/N2 variable-density
-mixing (`case/generate_variable_density.py`) and supplementary H2/air combustion
-(`case/generate.py`). See the [primary CFD runbook](../../docs/VARIABLE_DENSITY_RUNBOOK_KR.md).
+The primary case is a modulated He/N2 coflow shear layer
+(`case/generate_shear_layer.py`), with an unforced shear control. Basic He/N2
+counterflow (`case/generate_variable_density.py`) and supplementary H2/air
+combustion (`case/generate.py`) also share this bridge. See the
+[primary CFD runbook](../../docs/SHEAR_TEMPORAL_RUNBOOK_KR.md).
 The binary-gas case disables reactions and uses native thermophysical
 dictionaries; no Cantera or `chemkinToFoam` is needed for that case.
 
 This integration targets **OpenFOAM Foundation 13, Linux, double precision,
 serial execution**. OpenCFD releases such as v2312/v2406 are different APIs.
 The native library is separate from all existing Python numerical kernels.
-It does not contain a World Model. Classical and H_S execution retain the
+The optional temporal policy runs in the persistent Python service. The C++
+bridge does not contain the World Model. Classical and H_S execution retain the
 initial classical interpolation hierarchy, while updating its numerical
 coarse operators for the current pressure matrix.
+
+`native_pcg` and `native_gamg` run directly inside OpenFOAM, without a Python
+service or matrix serialization, for pressure-share diagnostics. They check the
+same raw-L2 residual, using a conservative normalized-L1 stopping conversion.
+They are declared references, not an assertion of optimally tuned native solvers.
 
 ## Status and scope
 

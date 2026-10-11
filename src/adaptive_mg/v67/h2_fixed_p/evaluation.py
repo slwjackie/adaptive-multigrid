@@ -343,7 +343,8 @@ def compare_coupled_runs(classical, neural, tolerances):
         timing[arm] = _json_finite(dict(wall_seconds=wall, pressure_seconds=pressure, success=run.get("success", False),
             **{key: times[key] for key in ("foam_process_wall_seconds", "bridge_startup_seconds", "pressure_scope", "scope",
                 "service_seconds", "admission_seconds", "mg_setup_seconds", "mg_solve_seconds", "mg_total_seconds",
-                "mg_feature_seconds", "mg_verification_seconds", "mg_recovery_seconds", "mg_orchestration_seconds", "phase_scope") if key in times}))
+                "mg_feature_seconds", "mg_verification_seconds", "mg_recovery_seconds", "mg_orchestration_seconds", "phase_scope",
+                "policy_seconds", "smoother_refreshes", "smoother_reuses") if key in times}))
         if kind == VARIABLE_DENSITY_KIND:
             evidence = run.get("physics_evidence", {})
             if evidence.get("passed") is not True or evidence.get("zero_heat_release_observed") is not True:

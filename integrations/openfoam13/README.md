@@ -1,5 +1,11 @@
 # OpenFOAM Foundation 13 fixed-P / learned-smoother bridge
 
+Two case families share this bridge: primary inert He/N2 variable-density
+mixing (`case/generate_variable_density.py`) and supplementary H2/air combustion
+(`case/generate.py`). See the [primary CFD runbook](../../docs/VARIABLE_DENSITY_RUNBOOK_KR.md).
+The binary-gas case disables reactions and uses native thermophysical
+dictionaries; no Cantera or `chemkinToFoam` is needed for that case.
+
 This integration targets **OpenFOAM Foundation 13, Linux, double precision,
 serial execution**. OpenCFD releases such as v2312/v2406 are different APIs.
 The native library is separate from all existing Python numerical kernels.

@@ -15,10 +15,11 @@ import numpy as np
 
 from ..world_model.data import digest
 from ...provenance import operator_digest
+from .data import FIELD_PROFILES, H2_KIND, VARIABLE_DENSITY_KIND
 
 
 ARMS = ("classical", "H_S")
-FIELDS = ("T", "H2", "U", "p")
+FIELDS = FIELD_PROFILES[H2_KIND]
 
 
 def _vector_digest(value):
@@ -201,6 +202,37 @@ def evaluate_replay(trajectories, cfg, expert, *, repeats=3, seed=20261010,
                 diagnostic=_heterogeneity(rows))
 
 
+def nonreacting_field_evidence(fields):
+    """Check actual saved He/N2 fields; spatial contrast is not time evolution.
+
+    Inputs must contain at least two saved output times on axis zero. Thresholds
+    exclude roundoff-sized contrasts; these tests do not certify CFD accuracy.
+    """
+    rho, he, n2, temperature = (np.asarray(fields[name], dtype=float) for name in ('rho', 'He', 'N2', 'T'))
+    if (rho.ndim != 2 or rho.shape[0] < 2 or not rho.shape[1]
+            or any(a.shape != rho.shape or not np.isfinite(a).all() for a in (rho, he, n2, temperature))):
+        raise ValueError('nonreacting physics evidence needs two finite saved scalar fields of matching shape')
+    scale = max(float(np.max(np.abs(rho))), np.finfo(float).tiny)
+    contrast = np.ptp(rho, axis=1)
+    change = float(np.max(np.abs(rho[1:] - rho[0])))
+    fraction_min = float(min(np.min(he), np.min(n2)))
+    fraction_max = float(max(np.max(he), np.max(n2)))
+    sum_error = float(np.max(np.abs(he + n2 - 1.)))
+    checks = dict(density_positive=bool(np.all(rho > 0)),
+                  density_spatially_nonuniform=bool(np.any(contrast > 1.e-8 * scale)),
+                  density_evolves=bool(change > 1.e-8 * scale),
+                  mass_fractions_bounded=bool(fraction_min >= -1.e-8 and fraction_max <= 1. + 1.e-8),
+                  mass_fractions_sum_one=bool(sum_error <= 1.e-8),
+                  temperature_positive=bool(np.all(temperature > 0)))
+    return dict(**checks, passed=all(checks.values()), minimum_density=float(np.min(rho)),
+                maximum_density=float(np.max(rho)), density_range_by_time=contrast.tolist(),
+                maximum_density_change_from_first_saved_time=change,
+                relative_density_change_from_first_saved_time=change / scale,
+                mass_fraction_minimum=fraction_min, mass_fraction_maximum=fraction_max,
+                maximum_mass_fraction_sum_error=sum_error, density_relative_threshold=1.e-8,
+                mass_fraction_tolerance=1.e-8, experimentally_validated=False)
+
+
 def compare_coupled_runs(classical, neural, tolerances):
     """Compare supplied online CFD runs and arrays without inventing a result.
 
@@ -213,6 +245,9 @@ def compare_coupled_runs(classical, neural, tolerances):
     solver_log_sha256, field_files_sha256}; the H_S evidence also needs
     expert_checkpoint_sha256 and neural_apply_calls > 0. timing={wall_seconds,
     pressure_seconds}, and fields={T,H2,U,p}.  H2 may be supplied as Y_H2.
+    Nonreacting runs declare experiment_kind='variable_density_nonreacting',
+    comparison_fields={T,He,N2,rho,U,p}, thermophysical_sha256 instead of
+    chemistry_sha256, and passed physics_evidence including zero Qdot.
 
     Arrays can describe a final field or a series.  A series must declare
     sample_times, with time on axis zero.  Tolerances must be predeclared:
@@ -233,7 +268,18 @@ def compare_coupled_runs(classical, neural, tolerances):
     alignment = tolerances.get("pressure_alignment", "none")
     if alignment not in ("none", "subtract_spatial_mean"):
         blockers.append("unknown pressure alignment")
-    match_keys = ("case_id", "mesh_sha256", "chemistry_sha256", "initial_conditions_sha256",
+    kinds = [run.get("experiment_kind", H2_KIND) for run in runs.values()]
+    kind = kinds[0]
+    if kinds[0] != kinds[1] or not isinstance(kind, str) or kind not in FIELD_PROFILES:
+        blockers.append("paired experiment kind mismatch or unsupported physics")
+    required_fields = FIELD_PROFILES.get(kind, FIELDS) if isinstance(kind, str) else FIELDS
+    for arm, run in runs.items():
+        declared = run.get("comparison_fields")
+        if (declared is not None and (not isinstance(declared, (list, tuple)) or tuple(declared) != required_fields)
+                or kind == VARIABLE_DENSITY_KIND and declared is None):
+            blockers.append(arm + ": comparison fields disagree with experiment profile")
+    input_key = "thermophysical_sha256" if kind == VARIABLE_DENSITY_KIND else "chemistry_sha256"
+    match_keys = ("case_id", "mesh_sha256", input_key, "initial_conditions_sha256",
                   "boundary_conditions_sha256", "dt_schedule", "stopping_criteria", "end_time",
                   "fixed_p_sha256", "hardware", "execution_threads", "pressure_gauge")
     for key in match_keys:
@@ -294,8 +340,25 @@ def compare_coupled_runs(classical, neural, tolerances):
             blockers.append(arm + ": positive finite full-wall and pressure timings required")
         elif pressure > wall:
             blockers.append(arm + ": pressure time exceeds CFD wall time")
-        timing[arm] = _json_finite(dict(wall_seconds=wall, pressure_seconds=pressure, success=run.get("success", False)))
-    for name in FIELDS:
+        timing[arm] = _json_finite(dict(wall_seconds=wall, pressure_seconds=pressure, success=run.get("success", False),
+            **{key: times[key] for key in ("foam_process_wall_seconds", "bridge_startup_seconds", "pressure_scope", "scope",
+                "service_seconds", "admission_seconds", "mg_setup_seconds", "mg_solve_seconds", "mg_total_seconds",
+                "mg_feature_seconds", "mg_verification_seconds", "mg_recovery_seconds", "mg_orchestration_seconds", "phase_scope") if key in times}))
+        if kind == VARIABLE_DENSITY_KIND:
+            evidence = run.get("physics_evidence", {})
+            if evidence.get("passed") is not True or evidence.get("zero_heat_release_observed") is not True:
+                blockers.append(arm + ": nonreacting variable-density physics checks did not pass")
+            try:
+                actual = nonreacting_field_evidence(run.get("fields", {}))
+                qdot = np.asarray(evidence.get("maximum_absolute_Qdot_by_time"), dtype=float)
+                if (sample_times is None or qdot.shape != (len(sample_times),)
+                        or not np.isfinite(qdot).all() or not np.all(qdot == 0)):
+                    blockers.append(arm + ": finite zero Qdot evidence required at every saved time")
+                if sample_times is None or not actual["passed"]:
+                    blockers.append(arm + ": saved fields do not demonstrate nonreacting variable-density evolution")
+            except (KeyError, TypeError, ValueError) as exc:
+                blockers.append(arm + ": invalid nonreacting physics evidence: " + str(exc))
+    for name in required_fields:
         try:
             ca, na = classical.get("fields", {}), neural.get("fields", {})
             cv = ca.get(name, ca.get("Y_H2") if name == "H2" else None)
@@ -333,8 +396,10 @@ def compare_coupled_runs(classical, neural, tolerances):
     valid = not blockers
     run_summaries = {arm: _json_finite({key: run.get(key) for key in
                      ("schema", "arm", "source_kind", "execution_mode", "success", *match_keys,
-                      "sample_times", "evidence", "continuity")}) for arm, run in runs.items()}
-    return dict(schema="h2-fixed-p-coupled-comparison-v1", success=valid,
+                      "sample_times", "evidence", "continuity", "experiment_kind", "comparison_fields",
+                      "physics_evidence", "reaction_evidence")}) for arm, run in runs.items()}
+    return dict(schema="h2-fixed-p-coupled-comparison-v1", experiment_kind=kind,
+                comparison_fields=list(required_fields), success=valid,
                 evidence_contract_valid=valid, speed_claim_eligible=valid, blockers=blockers,
                 full_cfd_speedup=classical["timing"]["wall_seconds"] / neural["timing"]["wall_seconds"] if valid else None,
                 pressure_speedup=classical["timing"]["pressure_seconds"] / neural["timing"]["pressure_seconds"] if valid else None,

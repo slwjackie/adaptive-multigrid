@@ -9,7 +9,7 @@
       "coarsest_n": 3,
       "nn_levels": 1,
       "max_cycles": 150,
-      "tolerance": 1e-8,
+      "tolerance": 1e-08,
       "absolute_tolerance": 1e-12,
       "residual_reference": "initial",
       "stencil_backend": "csr",
@@ -45,12 +45,29 @@
     "declared_before_evaluation": true,
     "pressure_alignment": "none",
     "fields": {
-      "T": {"atol": 0.1, "rtol": 0.0001},
-      "H2": {"atol": 0.000001, "rtol": 0.001},
-      "U": {"atol": 0.0001, "rtol": 0.001},
-      "p": {"atol": 0.1, "rtol": 0.00001}
+      "T": {
+        "atol": 0.1,
+        "rtol": 0.0001
+      },
+      "H2": {
+        "atol": 1e-06,
+        "rtol": 0.001
+      },
+      "U": {
+        "atol": 0.0001,
+        "rtol": 0.001
+      },
+      "p": {
+        "atol": 0.1,
+        "rtol": 1e-05
+      }
     }
   },
   "continuity_max_cumulative": 0.001,
-  "world_model_enabled": false
+  "world_model_enabled": false,
+  "benchmark": {
+    "role": "supplementary",
+    "experiment_kind": "h2_combustion",
+    "pressure_fraction_threshold": 0.5
+  }
 }

@@ -60,8 +60,13 @@ def main():
     root = Path(args.case).resolve()
     contract_path = root / "contract.json"
     contract = json.loads(contract_path.read_text())
-    if contract.get("schema") != "h2-fixed-p-case-v1":
-        raise ValueError("Not a generated H2 case; refusing mutation")
+    nonreacting = contract.get("schema") == "variable-density-case-v1"
+    if contract.get("schema") not in ("h2-fixed-p-case-v1", "variable-density-case-v1"):
+        raise ValueError("Not a generated supported CFD case; refusing mutation")
+    if nonreacting and (contract.get("preparation_kind") != "native_thermophysical"
+                        or contract.get("physics", {}).get("reacting") is not False
+                        or contract.get("reaction_count") != 0):
+        raise ValueError("Invalid nonreacting native-thermophysical case contract")
     if args.clean:
         if not args.yes:
             raise ValueError("Cleaning generated outputs requires Allclean --yes")
@@ -76,28 +81,48 @@ def main():
                 path.unlink()
         contract["status"] = "generated_not_executed"
         contract.pop("mesh_sha256", None)
+        if nonreacting:
+            contract["foam_conversion_verified"] = False
+            contract.pop("native_thermophysical_verified", None)
         contract_path.write_text(json.dumps(contract, indent=2) + "\n")
         return
     if os.environ.get("WM_PROJECT_VERSION") != "13":
         raise RuntimeError("Source the OpenFOAM Foundation 13 environment first (WM_PROJECT_VERSION=13)")
-    required = ["blockMesh", "checkMesh", "chemkinToFoam", "foamRun"]
+    required = ["blockMesh", "checkMesh", "foamRun"]
+    if not nonreacting:
+        required.append("chemkinToFoam")
     for executable in required:
         if not shutil.which(executable):
             raise RuntimeError(f"Missing OpenFOAM command: {executable}")
     if times(root):
         raise RuntimeError("Positive-time output already exists. Copy a fresh case or explicitly use Allclean --yes")
-    if digest_files(root, contract["chemistry_files"]) != contract["chemistry_sha256"]:
-        raise RuntimeError("Chemistry input content changed after generation")
+    source_files = contract["thermophysical_files"] if nonreacting else contract["chemistry_files"]
+    source_hash = contract["thermophysical_sha256"] if nonreacting else contract["chemistry_sha256"]
+    if digest_files(root, source_files) != source_hash:
+        raise RuntimeError("Thermophysical input content changed after generation" if nonreacting
+                           else "Chemistry input content changed after generation")
     fields = [f"0/{name}" for name in [*contract["species"], "T", "p", "U"]]
     if digest_files(root, fields) != contract["initial_conditions_sha256"]:
         raise RuntimeError("Initial fields changed after generation; regenerate the case")
-    command(root, ["chemkinToFoam", "-precision", "16", "chemkin/h2.inp", "chemkin/thermo.dat",
-                   "chemkin/transport.foam", "constant/reactions", "constant/thermo.compressibleGas"], "log.chemkinToFoam")
-    native_chemistry = ["constant/reactions", "constant/thermo.compressibleGas"]
-    if any(not (root / path).stat().st_size for path in native_chemistry):
-        raise RuntimeError("chemkinToFoam produced empty files")
-    contract["foam_conversion_verified"] = True
-    contract["converted_chemistry_sha256"] = digest_files(root, native_chemistry)
+    if nonreacting:
+        for relative, pattern in (("constant/combustionProperties", r"\bcombustionModel\s+none\s*;"),
+                                  ("constant/chemistryProperties", r"\bchemistry\s+off\s*;")):
+            if not re.search(pattern, (root / relative).read_text()):
+                raise RuntimeError("Nonreacting case must explicitly disable chemistry and combustion")
+        if any(not (root / relative).stat().st_size for relative in source_files):
+            raise RuntimeError("Empty native thermophysical input")
+        # Historical flag means preparation verified for both schemas; no
+        # CHEMKIN conversion is performed for the native dictionary pathway.
+        contract["foam_conversion_verified"] = True
+        contract["native_thermophysical_verified"] = True
+    else:
+        command(root, ["chemkinToFoam", "-precision", "16", "chemkin/h2.inp", "chemkin/thermo.dat",
+                       "chemkin/transport.foam", "constant/reactions", "constant/thermo.compressibleGas"], "log.chemkinToFoam")
+        native_chemistry = ["constant/reactions", "constant/thermo.compressibleGas"]
+        if any(not (root / path).stat().st_size for path in native_chemistry):
+            raise RuntimeError("chemkinToFoam produced empty files")
+        contract["foam_conversion_verified"] = True
+        contract["converted_chemistry_sha256"] = digest_files(root, native_chemistry)
     command(root, ["blockMesh"], "log.blockMesh")
     command(root, ["checkMesh", "-allGeometry", "-allTopology"], "log.checkMesh")
     check = (root / "log.checkMesh").read_text()
@@ -108,7 +133,8 @@ def main():
     contract["status"] = "prepared_not_executed"
     contract_path.write_text(json.dumps(contract, indent=2) + "\n")
     if args.prepare_only:
-        print("OpenFOAM chemistry conversion and mesh checks passed; no CFD trajectory executed.")
+        print("OpenFOAM native thermophysical input and mesh checks passed; no CFD trajectory executed."
+              if nonreacting else "OpenFOAM chemistry conversion and mesh checks passed; no CFD trajectory executed.")
         return
 
     solution = root / "system/fvSolution"
@@ -117,7 +143,8 @@ def main():
     if args.native_only:
         solution.write_text((root / "system/fvSolution.native").read_text())
         control.write_text(original_control.replace('libs ("libAdaptiveFixedP.so");', ""))
-    status = {"schema": "h2-cfd-execution-v1", "case_id": contract["case_id"],
+    status = {"schema": "variable-density-cfd-execution-v1" if nonreacting else "h2-cfd-execution-v1",
+              "case_id": contract["case_id"],
               "native_only_preflight": args.native_only,
               "timing_scope": "foamRun process wall time, including CFD setup/output; case preparation excluded",
               "success": False, "physical_validation_performed": False}

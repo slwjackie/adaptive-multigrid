@@ -31,6 +31,43 @@ World Model은 사용하지 않는다. 기존 실행 경로·설정·체크포�
   AF_UNIX 생성도 이 개발 컨테이너에서 차단되어 native socket smoke test는
   대상 Linux 환경에서 실행해야 한다. 실제 화염의 가속률·물리적 타당성은 아직 측정하지 않았다.
 
+## 연결 preflight 성공 후 한 터미널에서 계속 실행
+
+`artifacts/h2_bridge_preflight/log.foamRun`, `artifacts/h2_record_preflight`,
+`artifacts/h2_record_preflight_service.jsonl`이 있는 환경에서 다음을 실행한다.
+새 실행기는 기존 명령들을 순서대로 호출하며, 각 case의 서비스와 CFD 프로세스를
+자동으로 시작하고 종료한다. 사용자 컴퓨터의 실제 `foamRun` 실행이 필요하다.
+
+```bash
+source /opt/openfoam13/etc/bashrc
+source .venv/bin/activate
+export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
+python scripts/build_native_stencil.py --no-openmp
+python -u scripts/run_v6_7_h2_pipeline.py --output artifacts/h2_pipeline_v1
+```
+
+기본 설정은 31×31, `end_time=2e-4 s`, `delta_t=1e-6 s`이다. 유입 온도
+300/400 K 두 case를 train, 325 K를 validation, 350 K를 test로 지정한다.
+각 case의 200 timestep × 2 pressure solve를 전부 기록하므로 총 1,600개의
+압력 시스템을 수집한다. 초기 preflight 자료는 검사 후 본 학습 데이터에서 제외한다.
+기존 설정의 H_S 200 update와 각 평가의 3회 반복을 사용한다.
+
+실행 순서는 preflight 실제 배열 import → 4개 case 수집 → 합동 import → H_S 학습
+→ validation replay → validation coupled CFD → freeze → test replay → test coupled CFD다.
+각 물리 case는 하나의 split에만 속한다. 준비된 원본은 보존하고 native 수집은 복사본에서
+실행한다. validation 계산/물리량 비교가 실패하면 freeze와 test 평가 전에 멈춘다.
+속도가 느린 결과도 정상적인 측정 결과로 보존하며 자동 재학습이나 test 기반 조정은 하지 않는다.
+
+기존 결과 폴더는 덮어쓰지 않는다. 실패 시 `pipeline_status.json`의 `stage`, `error`와
+`logs/`, `record_cases/<case>/log.foamRun`, `coupled_validation/` 또는 `coupled_test/`의
+로그를 확인한다. 이미 성공한 단계의 자료는 남아 있으므로 아래 개별 명령으로 이어갈 수 있다.
+진행 상황은 `cat artifacts/h2_pipeline_v1/pipeline_status.json`, 성공한 최종 결과는
+`cat artifacts/h2_pipeline_v1/summary.json`으로 확인한다.
+
+`--stop-after validation`은 테스트 평가 전에 종료한다. 격자·시간 변경은 새 결과 폴더에
+`--n`, `--end-time`, `--delta-t`를 명시한다. 기본 크기는 전체 절차의 첫 실행용이며,
+독립된 격자·시간 수렴 연구나 충분히 다양한 물리 조건의 본 실험을 대신하지 않는다.
+
 ## 대상 물리 모델
 
 `integrations/openfoam13/case/generate.py`는 고정 Cartesian mesh의 2D

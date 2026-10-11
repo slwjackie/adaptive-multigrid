@@ -61,6 +61,35 @@ def write(root: Path, relative: str, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def normalize_thermo_header(path: Path) -> None:
+    """Adapt yaml2ck's separate NASA7 file to Foundation 13's lexer.
+
+    OpenFOAM reads global temperatures only after THERMO ALL, as three
+    ten-column fields. With plain THERMO it treats the temperature row as
+    a species header. Species records and NASA coefficients stay unchanged.
+    """
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    headers = [i for i, line in enumerate(lines)
+               if line.strip().upper() in ("THERMO", "THERMO ALL")]
+    if len(headers) != 1:
+        raise ValueError("Expected one THERMO section in exported NASA7 file")
+    header = headers[0]
+    temperature_row = next((i for i in range(header + 1, len(lines))
+                            if lines[i].strip() and not lines[i].lstrip().startswith("!")), None)
+    if temperature_row is None:
+        raise ValueError("Missing global NASA7 temperatures")
+    temperatures = [float(value) for value in lines[temperature_row].split()]
+    if (len(temperatures) != 3 or not all(math.isfinite(t) for t in temperatures)
+            or not 0 < temperatures[0] < temperatures[1] < temperatures[2]):
+        raise ValueError("Expected three increasing global NASA7 temperatures")
+    fields = [f"{t:10.3f}" for t in temperatures]
+    if any(len(field) != 10 or float(field) != t for field, t in zip(fields, temperatures)):
+        raise ValueError("Global NASA7 temperatures cannot be preserved in 10-column fields")
+    lines[header] = "THERMO ALL\n"
+    lines[temperature_row] = "".join(fields) + "\n"
+    path.write_text("".join(lines), encoding="utf-8")
+
+
 def scalar_field(name: str, dimensions: str, values: list[float], fuel: str,
                  air: str, outlet: str) -> str:
     internal = "\n".join(f"{v:.16g}" for v in values)
@@ -133,6 +162,7 @@ def generate(args: argparse.Namespace) -> Path:
     yaml2ck.convert(gas, mechanism_path=root / "chemkin/h2.inp",
                     thermo_path=root / "chemkin/thermo.dat",
                     transport_path=root / "chemkin/transport.dat")
+    normalize_thermo_header(root / "chemkin/thermo.dat")
     # Remove only volatile writer timestamps so identical case definitions have
     # identical provenance hashes when generated at different wall-clock times.
     for path in (root / "chemkin").iterdir():

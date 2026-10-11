@@ -83,6 +83,14 @@ OpenFOAM `chemkinToFoam` converter creates `constant/reactions` and
 are retained and hashed, along with the installed Cantera version. No methane
 mechanism is renamed to claim H2 support.
 
+The exporter normalizes the NASA7 global-temperature header to `THERMO ALL`
+and three ten-column temperature fields for Foundation 13. Cantera's separate
+file uses `THERMO` with a free-width temperature row; OpenFOAM interprets that
+row as a species name and fails with `reading thermodynamic data specie formula`.
+Only these two header lines change; species compositions and NASA coefficients
+are preserved. Regenerate old cases in a new output directory after updating
+the generator so their chemistry hashes match the corrected input.
+
 **OpenFOAM-13's `chemkinToFoam` third argument is an OpenFOAM species transport
 dictionary**, despite its command-line label saying "CHEMKIN transport file".
 This generator passes `chemkin/transport.foam`, not `transport.dat`. The latter

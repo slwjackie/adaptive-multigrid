@@ -42,6 +42,23 @@ def test_chemkin_roundtrip_preserves_hydrogen_rates(tmp_path):
             np.testing.assert_allclose(restored.standard_enthalpies_RT, original.standard_enthalpies_RT, rtol=1e-6)
 
 
+def test_thermo_header_matches_foundation13_lexer_without_changing_species(tmp_path):
+    ct = pytest.importorskip("cantera", minversion="3.0")
+    from cantera import yaml2ck
+    root = generator.generate(args(tmp_path / "case"))
+    raw = yaml2ck.build_thermodynamics_text(ct.Solution("h2o2.yaml").species(), separate_file=True)
+    generated = (root / "chemkin/thermo.dat").read_text()
+    section = generated[generated.index("\nTHERMO") + 1:].splitlines()
+    # Foundation 13: THERMO enters readThermoSpecieName immediately; only
+    # THERMO ALL enters readThermoAll, which consumes .{10}.{10}.{10}.
+    assert section[0] == "THERMO ALL"
+    assert len(section[1]) == 30
+    assert [float(section[1][i:i + 10]) for i in (0, 10, 20)] == [200., 1000., 5000.]
+    assert section[2:] == raw.splitlines()[2:]
+    generator.normalize_thermo_header(root / "chemkin/thermo.dat")
+    assert (root / "chemkin/thermo.dat").read_text() == generated
+
+
 def test_initialization_is_mass_conserving_and_actually_two_dimensional(tmp_path):
     pytest.importorskip("cantera", minversion="3.0")
     root = generator.generate(args(tmp_path / "case", "--fuel-h2-mole-fraction", "0.7"))

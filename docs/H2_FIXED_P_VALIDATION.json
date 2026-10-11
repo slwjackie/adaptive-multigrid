@@ -56,5 +56,25 @@
   "real_h2_full_cfd_speedup_measured": false,
   "physical_flame_validated": false,
   "world_model_enabled": false,
-  "test_fixture_scope": "Unit and pipeline tests use explicitly identified nonphysical fixtures; they are not combustion or CFD performance evidence."
+  "test_fixture_scope": "Unit and pipeline tests use explicitly identified nonphysical fixtures; they are not combustion or CFD performance evidence.",
+  "record_scope": "Original implementation results above apply to f63b640991286ef13e475e1c5f2d238756cc6789; follow-up validation is recorded separately below.",
+  "thermo_header_fix": {
+    "date_utc": "2026-10-11",
+    "source_digest": "cc78ea1ac5f85ad6393abf9883058e6182ef3af73f43ec5dfd2b54128859bdfb",
+    "cantera_version": "3.2.0",
+    "cause": "Separate yaml2ck thermo output has THERMO and a 28-column global temperature row. Foundation 13 requires THERMO ALL to enter readThermoAll, followed by three ten-column fields.",
+    "change": "Normalize only the global header and temperature row before chemistry hashing; preserve species records and polynomial coefficients.",
+    "command": "python -m pytest integrations/openfoam13/case/test_generation.py -q",
+    "passed": 5,
+    "scope": "Foundation 13 header grammar, unchanged species records, idempotence, CHEMKIN roundtrip thermochemistry/rates, initialization and provenance checks",
+    "full_regression_rerun": false,
+    "native_chemkinToFoam_executed": false,
+    "native_cfd_executed": false,
+    "limitation": "OpenFOAM is unavailable in this development environment; native conversion and CFD rerun are required on the target laptop.",
+    "target_user_report": {
+      "plugin_build_passed": true,
+      "wire_checks_passed": true,
+      "evidence": "User-provided Foundation 13 DP Int32 link log and two wire checks passed outputs; not independently rerun here."
+    }
+  }
 }

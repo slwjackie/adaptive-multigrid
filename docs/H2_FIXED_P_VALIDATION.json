@@ -104,5 +104,20 @@
     "full_regression_rerun": false,
     "native_cfd_executed_in_development_environment": false,
     "limitation": "The corrected native ODE setup and full CFD trajectory still require execution on the target laptop."
+  },
+  "physical_time_log_fix": {
+    "date_utc": "2026-10-11",
+    "parent_commit": "30650174e8000bbeeacf9426f7103b15ff2fe027",
+    "source_digest": "61a3f6aed4e7dffe662671b39f6144253351defbcc6a87d48e41b983d0ade2db",
+    "change": "Accept Foundation 13 Time = 2e-05s and optional spaced seconds in both native preflight and paired CFD parsers. Preflight also requires End and no FOAM FATAL.",
+    "command": "OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 python -m pytest integrations/openfoam13/case/test_generation.py integrations/openfoam13/case/test_run_case.py tests/test_h2_fixed_p_fullrun.py -ra",
+    "passed": 35,
+    "scope": "Generation, preflight physical time parsing and coupled run evidence/field handling; includes suffixed and unsuffixed times, rejects unsupported units and incomplete logs.",
+    "target_user_report": "Foundation 13 native-only 15x15 preflight reached Time = 2e-05s and End; final ExecutionTime 0.359528 s, cumulative continuity 2.589950142540032e-13. Not independently executed here.",
+    "old_status_note": "The previous wrapper can mark this normally completed native run as execution_failed because it cannot parse the seconds suffix. Retain its original log as evidence; no old status files were modified by this code change.",
+    "full_regression_rerun": false,
+    "native_cfd_executed_in_development_environment": false,
+    "physical_flame_validated": false,
+    "neural_speedup_measured": false
   }
 }

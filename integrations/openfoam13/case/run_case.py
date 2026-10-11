@@ -40,6 +40,15 @@ def command(root, argv, log_name):
         raise RuntimeError(f"{argv[0]} failed ({result.returncode}); inspect {root / log_name}")
 
 
+def completed_time(log):
+    """Read completed physical time, accepting Foundation 13's seconds suffix."""
+    if "FOAM FATAL" in log or not re.search(r"^End\s*$", log, re.M):
+        raise RuntimeError("OpenFOAM log does not show normal completion")
+    number = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?"
+    observed = re.findall(r"^Time[ \t]*=[ \t]*(" + number + r")[ \t]*(?:s)?[ \t]*$", log, re.M)
+    return max((float(value) for value in observed), default=0.)
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--case", default=str(Path(__file__).resolve().parent))
@@ -116,13 +125,10 @@ def main():
     try:
         command(root, ["foamRun"], "log.foamRun")
         log = (root / "log.foamRun").read_text()
-        observed_times = [float(v) for v in re.findall(r"^Time = ([0-9.eE+\-]+)\s*$", log, re.M)]
-        final_time = max(observed_times, default=0.)
+        final_time = completed_time(log)
         status["last_observed_time"] = final_time
         if final_time < contract["end_time"] - max(1e-12, 1e-8 * contract["end_time"]):
             raise RuntimeError("foamRun exited before the requested physical end time")
-        if "FOAM FATAL" in log:
-            raise RuntimeError("OpenFOAM reported a fatal error")
         status["success"] = True
         contract["status"] = "executed_physics_not_yet_validated"
     except BaseException as error:

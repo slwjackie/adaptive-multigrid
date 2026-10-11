@@ -104,7 +104,8 @@ def parse_solver_log(text, contract, continuity_limit):
     """Require the completed fixed-dt trajectory and every pressure witness."""
     if "FOAM FATAL" in text or not re.search(r"^End\s*$", text, re.M):
         raise ValueError("CFD log does not show normal completion")
-    times = np.array([float(v) for v in re.findall(r"^Time\s*=\s*(" + NUMBER + r")\s*$", text, re.M)])
+    times = np.array([float(v) for v in re.findall(
+        r"^Time[ \t]*=[ \t]*(" + NUMBER + r")[ \t]*(?:s)?[ \t]*$", text, re.M)])
     end, dt = float(contract["end_time"]), float(contract["delta_t"])
     count = int(round(end / dt))
     expected = np.arange(1, count + 1) * dt

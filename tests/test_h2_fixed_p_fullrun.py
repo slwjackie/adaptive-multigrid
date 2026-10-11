@@ -58,17 +58,20 @@ End
 """
 
 
-def test_actual_log_requires_complete_time_pressure_and_continuity_evidence():
-    result = parse_solver_log(log_text(), {"end_time": .02, "delta_t": .01}, 1.e-6)
+@pytest.mark.parametrize("suffix", ["", "s", " s"])
+def test_actual_log_requires_complete_time_pressure_and_continuity_evidence(suffix):
+    text = log_text().replace("Time = 0.01", "Time = 0.01" + suffix).replace("Time = 0.02", "Time = 0.02" + suffix)
+    result = parse_solver_log(text, {"end_time": .02, "delta_t": .01}, 1.e-6)
     assert result["pressure_seconds"] == .005
     assert result["dt_schedule"] == [.01, .01]
     assert result["continuity"]["passed"]
-    result = parse_solver_log(log_text(), {"end_time": .02, "delta_t": .01}, 1.e-10)
+    result = parse_solver_log(text, {"end_time": .02, "delta_t": .01}, 1.e-10)
     assert not result["continuity"]["passed"]
 
 
 @pytest.mark.parametrize("old,new", [
     ("End", ""), ("Time = 0.02", "Time = 0.03"),
+    ("Time = 0.02", "Time = 0.02ms"),
     ("index 1", "index 2"), ("residual 2e-10", "residual 2e-3"),
     ("H2FixedPPressureSeconds 0.003", "H2FixedPPressureSeconds nan"),
     ("continuity errors", "other errors"),

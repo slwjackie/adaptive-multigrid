@@ -35,5 +35,17 @@
     "separate_chemistry_timer_implemented": false,
     "full_cfd_wall_time_includes_chemistry": true
   },
+  "bridge_rewrite_fix": {
+    "source_digest": "35fda81d4e92a2c199e81324789aee4007a024016c17414ff6326afab726c2b7",
+    "command": "OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 python -m pytest tests/test_h2_fixed_p_fullrun.py tests/test_propulsion_flow_generators.py tests/test_flow_comparison_pipeline.py -ra",
+    "passed": 66,
+    "skipped": 1,
+    "failed": 0,
+    "skipped_reason": "Cantera unavailable; existing optional reacting-case generation test skipped",
+    "scope": "Real generated three-flow dictionaries through the native/coupled bridge rewrite; scoped controls, nested dictionaries, comments, duplicate/missing controls and pipeline regression tests",
+    "full_suite_rerun": false,
+    "previous_full_suite": "top-level source_digest and pytest describe the pre-fix version",
+    "actual_cfd_executed": false
+  },
   "scope": "Implementation, numerical unit/regression tests, and dictionary generation only; no CFD speed or physical fidelity claim"
 }

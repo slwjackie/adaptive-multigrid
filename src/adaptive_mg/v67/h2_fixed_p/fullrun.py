@@ -254,18 +254,61 @@ def _verify_prepared(root):
     return contract
 
 
+def _bridge_entries(text):
+    """Find direct entries of the sole AdaptiveFixedP dictionary.
+
+    Other solver dictionaries (e.g. sloshing pcorr) legitimately repeat controls
+    such as maxIter. Comments, quoted strings and nested dictionaries must not
+    change which controls belong to this bridge. Token offsets preserve every
+    byte outside the edited scalar values; this does not expand Foam directives.
+    """
+    tokens = re.finditer(r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"|[{};]|(?:(?!//|/\*)[^\s{};"])+', text, re.S)
+    stack, bridges = [], []
+    for token in tokens:
+        value = token.group()
+        if value.startswith(("//", "/*")):
+            continue
+        if value == "{":
+            if stack:
+                stack[-1]["pending"] = []  # The preceding token names this child dictionary.
+            stack.append(dict(entries=[], pending=[]))
+        elif value == "}":
+            if not stack:
+                raise ValueError("unbalanced fvSolution dictionaries")
+            frame = stack.pop()
+            solvers = [e for e in frame["entries"] if e[0].group() == "solver"]
+            if any(len(e) == 3 and e[1].group() == "AdaptiveFixedP" for e in solvers):
+                if len(solvers) != 1:
+                    raise ValueError("exactly one solver entry required in bridge dictionary")
+                bridges.append(frame["entries"])
+        elif stack:
+            stack[-1]["pending"].append(token)
+            if value == ";":
+                stack[-1]["entries"].append(stack[-1]["pending"])
+                stack[-1]["pending"] = []
+    if stack:
+        raise ValueError("unbalanced fvSolution dictionaries")
+    if len(bridges) != 1:
+        raise ValueError("exactly one AdaptiveFixedP solver dictionary required")
+    return bridges[0]
+
+
 def _rewrite_bridge(case, mode, socket_path, cfg):
     path = case / "system/fvSolution"
     text = path.read_text()
-    if "solver AdaptiveFixedP;" not in text:
-        raise ValueError("case pressure solver must be AdaptiveFixedP")
+    entries = _bridge_entries(text)
     substitutions = {"mode": mode, "socketPath": '"' + str(socket_path) + '"',
                      "adaptiveAtol": repr(cfg.mg.absolute_tolerance), "adaptiveRtol": repr(cfg.mg.tolerance),
                      "maxIter": str(cfg.mg.max_cycles)}
+    edits = []
     for key, value in substitutions.items():
-        text, count = re.subn(r"\b" + key + r"\s+[^;]+;", key + " " + value + ";", text)
-        if count != 1:
+        matches = [e for e in entries if e[0].group() == key]
+        if len(matches) != 1 or len(matches[0]) != 3:
             raise ValueError("exactly one bridge control required: " + key)
+        token = matches[0][1]
+        edits.append((token.start(), token.end(), value))
+    for start, end, value in sorted(edits, reverse=True):
+        text = text[:start] + value + text[end:]
     path.write_text(text)
 
 

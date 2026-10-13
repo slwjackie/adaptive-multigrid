@@ -90,6 +90,33 @@ python -u scripts/run_v6_7_flow_comparison.py \
 
 완료된 단계는 재사용하지만, CFD나 학습 도중 실패해 불완전한 출력이 생긴 디렉터리를 자동 삭제·덮어쓰기하지 않는다. 해당 오류를 확인한 뒤 새 출력 디렉터리에서 재실행한다. `summary.json` 또는 `status.json`의 `status: failed`와 로그를 함께 확인한다.
 
+### 슬로싱 수집의 `exactly one bridge control required: maxIter` 오류
+
+초기 구현은 `fvSolution` 파일 전체에서 `maxIter`가 하나라고 가정했다. 슬로싱에는 `pcorr`와 `p_rgh`에 각각 이 설정이 있어, 실제 CFD 실행 전에 bridge 설정 변경이 실패했다. 수정본은 `solver AdaptiveFixedP`가 선언된 단일 dictionary의 직접 항목만 바꾸며 다른 solver·주석·문자열·하위 dictionary의 설정은 보존한다. 중복/누락된 bridge 설정은 파일을 쓰기 전에 거부한다. 생성된 세 비반응 케이스에 실제 `_rewrite_bridge`를 적용하는 회귀시험도 추가했다.
+
+이 수정은 Python 코드이며 OpenFOAM C++ 플러그인 재빌드는 필요 없다. 소스 해시가 바뀌고 실패한 collection 복사본이 남아 있으므로 **기존 `three_flow_merge_check_v1`에 `--resume`하지 않는다**. 원본 폴더·로그를 보존하고 새 계획으로 수집한다. 기록의 소스 해시를 수동 변경하거나 실패 폴더를 삭제해서 재개하지 않는다.
+
+```bash
+cd /home/jackie/adaptive-multigrid-h2
+git pull --ff-only origin research/modulated-shear-temporal
+source /opt/openfoam13/etc/bashrc
+source .venv/bin/activate
+export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
+set -o pipefail
+mkdir -p artifacts/merge_verify_logs_v1
+
+python -m pytest tests/test_h2_fixed_p_fullrun.py tests/test_propulsion_flow_generators.py -ra
+
+python -u scripts/run_v6_7_flow_comparison.py \
+  --output artifacts/three_flow_merge_check_v2 \
+  --profile quick --n 31 --repeats 3 \
+  --independent-grus --with-h2 --h2-source-family h2_crossflow \
+  --stop-after collect \
+  2>&1 | tee artifacts/merge_verify_logs_v1/collect_v2.log
+```
+
+`collect`는 새 케이스 생성도 수행한다. 세 유동이 모두 수집되면 이후 `--resume --stop-after probe`, `validation`, `test`도 같은 `artifacts/three_flow_merge_check_v2`를 사용한다. 이미 성공한 혼합층의 기존 결과는 v1에 그대로 보존되며 v2에서는 수정된 소스로 다시 수집한다.
+
 새 유동의 mesh/time-step 수렴성, 슬로싱 고유진동수·감쇠, 제트 궤적·혼합률의 실험 대조는 별도로 검증해야 한다. 생성된 케이스와 Python 테스트는 OpenFOAM Foundation 13에서의 실제 빌드·실행 검증을 대체하지 않는다.
 
 구현 검증의 최신 시험 수와 범위는 `FLOW_COMPARISON_VALIDATION.json`에 기록한다. 독립 C++ wire 검사 및 27개 비반응 케이스 생성·계약 검증을 통과했다. OpenFOAM 플러그인 빌드·실제 CFD·속도 이득은 아직 검증하지 않았다.

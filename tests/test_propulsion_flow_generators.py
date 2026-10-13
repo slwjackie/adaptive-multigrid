@@ -8,7 +8,8 @@ import numpy as np
 import pytest
 
 from adaptive_mg.v67.h2_fixed_p.data import validate_case_contract
-from adaptive_mg.v67.h2_fixed_p.fullrun import read_internal_field, _verify_prepared
+from adaptive_mg.v67.h2_fixed_p.fullrun import read_internal_field, _verify_prepared, _rewrite_bridge
+from adaptive_mg.v67.config import AdaptiveConfig
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -22,6 +23,7 @@ def module(name, filename):
 
 jet = module('test_crossflow_generator', 'generate_crossflow.py')
 slosh = module('test_sloshing_generator', 'generate_sloshing.py')
+shear = module('test_shear_bridge_generator', 'generate_shear_layer.py')
 case_runner = module('test_new_flow_case_runner', 'run_case.py')
 
 
@@ -134,3 +136,32 @@ def test_new_native_case_preparation_never_calls_chemkin(tmp_path, monkeypatch, 
     (root/changed).write_text((root/changed).read_text()+'\n// changed\n')
     with pytest.raises(ValueError, match='thermophysical'):
         _verify_prepared(root)
+
+
+@pytest.mark.parametrize('generator', [jet, slosh, shear])
+def test_generated_pressure_bridge_rewrite_preserves_other_solver_controls(tmp_path, generator):
+    """Exercise the real collect/profile dictionary path, not just generation."""
+    from dataclasses import replace
+    root = generator.generate(args(generator, tmp_path/'case'))
+    path = root/'system/fvSolution'
+    original = path.read_text()
+    original_native = (root/'system/fvSolution.native').read_bytes()
+    cfg = AdaptiveConfig()
+    cfg = replace(cfg, mg=replace(cfg.mg, max_cycles=417, tolerance=2e-9, absolute_tolerance=3e-13))
+    # Collect, native timing and both coupled solvers all use the same rewrite.
+    for mode in ('native', 'native_pcg', 'native_gamg', 'classical', 'hs'):
+        path.write_text(original)
+        _rewrite_bridge(root, mode, '/tmp/bridge-regression.sock', cfg)
+        result = path.read_text()
+        assert 'mode '+mode+';' in result
+        assert 'socketPath "/tmp/bridge-regression.sock";' in result
+        assert 'adaptiveAtol 3e-13;' in result and 'adaptiveRtol 2e-09;' in result
+        assert 'maxIter 417;' in result
+        # Reverse only the declared bridge edits: all other bytes must be intact.
+        import re
+        for key in ('mode', 'socketPath', 'adaptiveAtol', 'adaptiveRtol'):
+            previous = re.search(r'\b'+key+r'\s+([^;]+);', original).group(1)
+            result = re.sub(r'\b'+key+r'\s+[^;]+;', key+' '+previous+';', result)
+        previous = original.split('solver AdaptiveFixedP;', 1)[1].split('maxIter', 1)[1].split(';', 1)[0].strip()
+        assert result.replace('maxIter 417;', 'maxIter '+previous+';') == original
+        assert (root/'system/fvSolution.native').read_bytes() == original_native

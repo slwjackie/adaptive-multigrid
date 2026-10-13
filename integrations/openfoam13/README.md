@@ -1,17 +1,32 @@
 # OpenFOAM Foundation 13 fixed-P / learned-smoother bridge
 
-Two case families share this bridge: primary inert He/N2 variable-density
-mixing (`case/generate_variable_density.py`) and supplementary H2/air combustion
-(`case/generate.py`). See the [primary CFD runbook](../../docs/VARIABLE_DENSITY_RUNBOOK_KR.md).
+The three-flow comparison additionally supplies `case/generate_sloshing.py`
+(fixed-property, isothermal LOX/pure-He VOF) and `case/generate_crossflow.py`
+(nonreacting H2/N2 slot jet in crossflow). See the
+[comparison runbook](../../docs/FLOW_COMPARISON_RUNBOOK_KR.md).
+LOX/He gas mixing, oxygen vapor, heat transfer and phase change are outside the
+mechanical sloshing model. These new cases require native verification.
+
+The original primary case is a modulated He/N2 coflow shear layer
+(`case/generate_shear_layer.py`), with an unforced shear control. Basic He/N2
+counterflow (`case/generate_variable_density.py`) and supplementary H2/air
+combustion (`case/generate.py`) also share this bridge. See the
+[primary CFD runbook](../../docs/SHEAR_TEMPORAL_RUNBOOK_KR.md).
 The binary-gas case disables reactions and uses native thermophysical
 dictionaries; no Cantera or `chemkinToFoam` is needed for that case.
 
 This integration targets **OpenFOAM Foundation 13, Linux, double precision,
 serial execution**. OpenCFD releases such as v2312/v2406 are different APIs.
 The native library is separate from all existing Python numerical kernels.
-It does not contain a World Model. Classical and H_S execution retain the
+The optional temporal policy runs in the persistent Python service. The C++
+bridge does not contain the World Model. Classical and H_S execution retain the
 initial classical interpolation hierarchy, while updating its numerical
 coarse operators for the current pressure matrix.
+
+`native_pcg` and `native_gamg` run directly inside OpenFOAM, without a Python
+service or matrix serialization, for pressure-share diagnostics. They check the
+same raw-L2 residual, using a conservative normalized-L1 stopping conversion.
+They are declared references, not an assertion of optimally tuned native solvers.
 
 ## Status and scope
 
@@ -30,7 +45,8 @@ specific experimental flame. See `case/README.md` for chemistry/transport
 assumptions and generation commands. In particular, OpenFOAM transport is not
 automatically equivalent to Cantera mixture-averaged/Soret transport.
 
-Admission is deliberately limited to pressure field `p`, symmetric finalized
+Admission is deliberately limited to pressure field `p` or reference-anchored
+`p_rgh`, symmetric finalized
 LDU storage, an anchored SPD operator, no coupled patches, and uniform Cartesian
 x-y centres with exactly one z layer. Each x/y dimension must be `2**L-1`, at
 least 3. Mesh motion, AMR, MPI, cyclic patches, transonic asymmetric operators,
@@ -59,7 +75,8 @@ one socket. These tests do not compile the OpenFOAM-facing class.
 ## Solver dictionary
 
 The generated case loads `libAdaptiveFixedP.so` in `system/controlDict`. Its
-`p` and `pFinal` entries in `system/fvSolution` use these controls:
+`p` and `pFinal` entries (or `p_rgh` and `p_rghFinal` for VOF) in
+`system/fvSolution` use these controls:
 
 ```text
 solver          AdaptiveFixedP;
@@ -69,7 +86,7 @@ nx              63;
 ny              63;
 adaptiveAtol    1e-12;
 adaptiveRtol    1e-8;
-maxIter         150;
+maxIter         600;
 socketTimeout   120;
 tolerance       1e-12;
 relTol          0;

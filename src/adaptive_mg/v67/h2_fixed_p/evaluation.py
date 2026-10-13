@@ -15,7 +15,8 @@ import numpy as np
 
 from ..world_model.data import digest
 from ...provenance import operator_digest
-from .data import FIELD_PROFILES, H2_KIND, VARIABLE_DENSITY_KIND
+from .data import (FIELD_PROFILES, H2_KIND, VARIABLE_DENSITY_KIND, CROSSFLOW_KIND,
+                   SLOSHING_KIND, NONREACTING_GAS_KINDS, validate_case_contract, experiment_kind)
 
 
 ARMS = ("classical", "H_S")
@@ -202,13 +203,15 @@ def evaluate_replay(trajectories, cfg, expert, *, repeats=3, seed=20261010,
                 diagnostic=_heterogeneity(rows))
 
 
-def nonreacting_field_evidence(fields):
-    """Check actual saved He/N2 fields; spatial contrast is not time evolution.
+def nonreacting_field_evidence(fields, species=('He', 'N2')):
+    """Check actual saved inert two-species fields; contrast is not evolution.
 
     Inputs must contain at least two saved output times on axis zero. Thresholds
     exclude roundoff-sized contrasts; these tests do not certify CFD accuracy.
     """
-    rho, he, n2, temperature = (np.asarray(fields[name], dtype=float) for name in ('rho', 'He', 'N2', 'T'))
+    if tuple(species) not in (('He', 'N2'), ('H2', 'N2')):
+        raise ValueError('unsupported inert species pair')
+    rho, he, n2, temperature = (np.asarray(fields[name], dtype=float) for name in ('rho', *species, 'T'))
     if (rho.ndim != 2 or rho.shape[0] < 2 or not rho.shape[1]
             or any(a.shape != rho.shape or not np.isfinite(a).all() for a in (rho, he, n2, temperature))):
         raise ValueError('nonreacting physics evidence needs two finite saved scalar fields of matching shape')
@@ -224,13 +227,56 @@ def nonreacting_field_evidence(fields):
                   mass_fractions_bounded=bool(fraction_min >= -1.e-8 and fraction_max <= 1. + 1.e-8),
                   mass_fractions_sum_one=bool(sum_error <= 1.e-8),
                   temperature_positive=bool(np.all(temperature > 0)))
-    return dict(**checks, passed=all(checks.values()), minimum_density=float(np.min(rho)),
+    return dict(**checks, passed=all(checks.values()), species=list(species), minimum_density=float(np.min(rho)),
                 maximum_density=float(np.max(rho)), density_range_by_time=contrast.tolist(),
                 maximum_density_change_from_first_saved_time=change,
                 relative_density_change_from_first_saved_time=change / scale,
                 mass_fraction_minimum=fraction_min, mass_fraction_maximum=fraction_max,
                 maximum_mass_fraction_sum_error=sum_error, density_relative_threshold=1.e-8,
                 mass_fraction_tolerance=1.e-8, experimentally_validated=False)
+
+
+def sloshing_field_evidence(fields, contract, initial_alpha=None):
+    """Mechanical VOF checks on actual fields, not cryogenic thermal validation.
+
+    Equal cell volumes follow from the admitted uniform Cartesian mesh. Liquid
+    conservation is compared with the *initial* discrete field, never with the
+    first positive-time output. A stationary interface cannot pass the motion
+    gate merely because liquid and gas have different densities.
+    """
+    validate_case_contract(contract)
+    if experiment_kind(contract) != SLOSHING_KIND:
+        raise ValueError('sloshing contract required')
+    alpha = np.asarray(fields['alpha.lox'], float)
+    n = int(np.prod(contract['shape']))
+    if alpha.ndim != 2 or alpha.shape[0] < 2 or alpha.shape[1] != n or not np.isfinite(alpha).all():
+        raise ValueError('two finite saved alpha.lox fields on the declared grid required')
+    for name in ('p', 'p_rgh', 'U'):
+        a = np.asarray(fields[name], float)
+        expected = (*alpha.shape, 3) if name == 'U' else alpha.shape
+        if a.shape != expected or not np.isfinite(a).all():
+            raise ValueError('finite saved sloshing field required: ' + name)
+    fraction = float(contract['initial_liquid_fraction'])
+    if initial_alpha is not None:
+        a0 = np.asarray(initial_alpha, float)
+        if a0.shape != (n,) or not np.isfinite(a0).all() or not np.isclose(a0.mean(), fraction, rtol=1e-12, atol=1e-14):
+            raise ValueError('initial alpha.lox disagrees with discrete liquid volume in contract')
+    limits = contract['physics_checks']
+    lower, upper = float(alpha.min()), float(alpha.max())
+    mean = alpha.mean(axis=1)
+    volume_error = np.abs(mean - fraction) / fraction
+    motion = float(np.max(np.abs(alpha[1:] - alpha[0])))
+    checks = dict(alpha_bounded=lower >= -limits['alpha_bounds_tolerance'] and upper <= 1 + limits['alpha_bounds_tolerance'],
+                  liquid_volume_conserved=bool(np.all(volume_error <= limits['liquid_volume_relative_tolerance'])),
+                  interface_moves=motion > limits['interface_motion_threshold'],
+                  finite_pressure_and_velocity=True)
+    return dict(**checks, passed=all(checks.values()), alpha_minimum=lower, alpha_maximum=upper,
+                initial_liquid_fraction=fraction, liquid_fraction_by_time=mean.tolist(),
+                relative_liquid_volume_error_by_time=volume_error.tolist(),
+                maximum_interface_change_from_first_saved_time=motion,
+                criteria=limits, no_reaction_model=True, heat_release_observation_required=False,
+                thermal_physics_validated=False, phase_change_modeled=False,
+                gas_phase_approximation='pure_helium', experimentally_validated=False)
 
 
 def compare_coupled_runs(classical, neural, tolerances):
@@ -276,12 +322,14 @@ def compare_coupled_runs(classical, neural, tolerances):
     for arm, run in runs.items():
         declared = run.get("comparison_fields")
         if (declared is not None and (not isinstance(declared, (list, tuple)) or tuple(declared) != required_fields)
-                or kind == VARIABLE_DENSITY_KIND and declared is None):
+                or kind != H2_KIND and declared is None):
             blockers.append(arm + ": comparison fields disagree with experiment profile")
-    input_key = "thermophysical_sha256" if kind == VARIABLE_DENSITY_KIND else "chemistry_sha256"
+    input_key = "chemistry_sha256" if kind == H2_KIND else "thermophysical_sha256"
     match_keys = ("case_id", "mesh_sha256", input_key, "initial_conditions_sha256",
                   "boundary_conditions_sha256", "dt_schedule", "stopping_criteria", "end_time",
                   "fixed_p_sha256", "hardware", "execution_threads", "pressure_gauge")
+    if kind == SLOSHING_KIND:
+        match_keys += ('physics_contract',)
     for key in match_keys:
         a, b = classical.get(key), neural.get(key)
         def missing(value):
@@ -322,7 +370,7 @@ def compare_coupled_runs(classical, neural, tolerances):
             blockers.append(arm + ": actual online coupled CFD evidence required")
         if run.get("success") is not True:
             blockers.append(arm + ": coupled run failed")
-        if run.get("pressure_gauge") not in ("absolute", "free_constant"):
+        if run.get("pressure_gauge") not in ("absolute", "free_constant", "reference_fixed"):
             blockers.append(arm + ": pressure gauge must be declared")
         if run.get("continuity", {}).get("passed") is not True:
             blockers.append(arm + ": declared continuity check did not pass")
@@ -343,13 +391,15 @@ def compare_coupled_runs(classical, neural, tolerances):
         timing[arm] = _json_finite(dict(wall_seconds=wall, pressure_seconds=pressure, success=run.get("success", False),
             **{key: times[key] for key in ("foam_process_wall_seconds", "bridge_startup_seconds", "pressure_scope", "scope",
                 "service_seconds", "admission_seconds", "mg_setup_seconds", "mg_solve_seconds", "mg_total_seconds",
-                "mg_feature_seconds", "mg_verification_seconds", "mg_recovery_seconds", "mg_orchestration_seconds", "phase_scope") if key in times}))
-        if kind == VARIABLE_DENSITY_KIND:
+                "mg_feature_seconds", "mg_verification_seconds", "mg_recovery_seconds", "mg_orchestration_seconds", "phase_scope",
+                "policy_seconds", "smoother_refreshes", "smoother_reuses") if key in times}))
+        if kind in NONREACTING_GAS_KINDS:
             evidence = run.get("physics_evidence", {})
             if evidence.get("passed") is not True or evidence.get("zero_heat_release_observed") is not True:
                 blockers.append(arm + ": nonreacting variable-density physics checks did not pass")
             try:
-                actual = nonreacting_field_evidence(run.get("fields", {}))
+                actual = nonreacting_field_evidence(run.get("fields", {}),
+                    ('H2', 'N2') if kind == CROSSFLOW_KIND else ('He', 'N2'))
                 qdot = np.asarray(evidence.get("maximum_absolute_Qdot_by_time"), dtype=float)
                 if (sample_times is None or qdot.shape != (len(sample_times),)
                         or not np.isfinite(qdot).all() or not np.all(qdot == 0)):
@@ -358,6 +408,18 @@ def compare_coupled_runs(classical, neural, tolerances):
                     blockers.append(arm + ": saved fields do not demonstrate nonreacting variable-density evolution")
             except (KeyError, TypeError, ValueError) as exc:
                 blockers.append(arm + ": invalid nonreacting physics evidence: " + str(exc))
+        elif kind == SLOSHING_KIND:
+            try:
+                if run.get('pressure_gauge') != 'reference_fixed':
+                    blockers.append(arm + ': sealed sloshing pressure reference is not fixed')
+                physics = run.get('physics_contract', {})
+                actual = sloshing_field_evidence(run.get('fields', {}), physics)
+                if sample_times is None or not actual['passed'] or run.get('physics_evidence', {}).get('passed') is not True:
+                    blockers.append(arm + ': sloshing alpha bounds, conservation or interface motion checks failed')
+                if physics.get('thermophysical_sha256') != run.get('thermophysical_sha256'):
+                    blockers.append(arm + ': sloshing thermophysical provenance mismatch')
+            except (KeyError, TypeError, ValueError) as exc:
+                blockers.append(arm + ': invalid sloshing physics evidence: ' + str(exc))
     for name in required_fields:
         try:
             ca, na = classical.get("fields", {}), neural.get("fields", {})
@@ -374,7 +436,7 @@ def compare_coupled_runs(classical, neural, tolerances):
             atol, rtol = tol.get("atol"), tol.get("rtol")
             if not _finite_number(atol) or not _finite_number(rtol):
                 raise ValueError("explicit finite nonnegative atol and rtol required")
-            if name == "p" and alignment == "subtract_spatial_mean":
+            if name in ('p', 'p_rgh') and alignment == "subtract_spatial_mean":
                 axes = tuple(range(1, a.ndim)) if sample_times is not None else tuple(range(a.ndim))
                 if not axes:
                     raise ValueError("pressure series needs a spatial axis")
@@ -386,7 +448,7 @@ def compare_coupled_runs(classical, neural, tolerances):
                                        rms_error=float(np.sqrt(np.mean(error ** 2))),
                                        classical_mean=float(np.mean(a)), neural_mean=float(np.mean(b)),
                                        classical_max=float(np.max(a)), neural_max=float(np.max(b)),
-                                       pressure_aligned=name == "p" and alignment != "none")
+                                       pressure_aligned=name in ('p', 'p_rgh') and alignment != "none")
             if not passed:
                 blockers.append("physical field outside declared tolerance: " + name)
         except (TypeError, ValueError) as exc:

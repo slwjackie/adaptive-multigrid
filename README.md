@@ -1,21 +1,49 @@
 # World-Model-Guided Adaptive Neural Smoothing
 
-## Current CFD experiments: nonreacting variable density first, hydrogen second
+## Current comparison: three flows, multilevel CNNs and solver world models
 
-The primary CFD benchmark is now inert He/N2 variable-density mixing. H2/air
-combustion remains a supplementary application. Both use the same fixed-P
-classical/H_S solver, stopping criteria, and paired CFD comparison. Start with
-[`VARIABLE_DENSITY_RUNBOOK_KR.md`](docs/VARIABLE_DENSITY_RUNBOOK_KR.md) and
-`scripts/run_v6_7_variable_density_pipeline.py`. The new benchmark needs no
-Cantera or chemistry conversion. It records density/species checks, matrix
-drift and the measured pressure-call fraction instead of assuming dominance.
+[`run_v6_7_flow_comparison.py`](scripts/run_v6_7_flow_comparison.py) compares
+composition-modulated He/N2 shear, idealized isothermal LOX/He sloshing and a
+nonreacting H2 slot jet in N2 crossflow. It records each physical cohort once,
+compares one-level shared, two-level shared and two-level independent CNNs,
+then sweeps GRU widths 16/32/64 and linear/role-specific MLP heads. Independent
+role memories and the full CNN-by-world-model comparison are optional.
+All speed comparisons include online policy and recovery costs; selection uses
+tune data and test follows frozen validation. No CFD speedup is established by
+implementing these options. See the [Korean runbook](docs/FLOW_COMPARISON_RUNBOOK_KR.md).
 
-This first CFD stage keeps the World Model disabled. The separate temporal
-controller workflow below remains available for subsequent action-cost studies.
-Native OpenFOAM execution of the new case must be validated on the target host;
-Python tests do not establish CFD correctness or a speedup.
+Declare `--with-h2` in the initial plan to add actual H2/air reacting validation.
+The predeclared source flow (default `h2_crossflow`) supplies its tune-selected
+architecture, not its weights: CNN and world model are trained afresh on H2
+train/tune data, with a separate reactive tradeoff gate. Paired full-CFD wall
+time includes chemistry; T/H2/U/p and continuity checks gate held-out testing.
+Each nonreacting flow likewise has independently trained weights; a shared GRU
+shares memory across prediction roles, not across flow families.
 
-## Separate temporal workflow: C_tuned + H_S + solver world model
+## Earlier CFD experiment: modulated shear, temporal smoother reuse, H2 validation
+
+The primary benchmark is a spatial He/N2 coflow shear layer with smooth inlet
+velocity modulation. An unforced shear layer is its control; held-out cases
+change forcing frequencies, pulse timing and composition. H2/air combustion is
+a separate supplementary study. Start with
+[`SHEAR_TEMPORAL_RUNBOOK_KR.md`](docs/SHEAR_TEMPORAL_RUNBOOK_KR.md) and
+`scripts/run_v6_7_shear_pipeline.py` (`--with-h2` adds the separate reacting study).
+
+Classical P stays fixed. Every changed A gets fresh Galerkin operators and
+numeric factors; only the generated NN smoother may be reused across matrices.
+Refresh, reuse, periodic and drift/contraction rules are measured first. A small
+solver world model is fitted only when train/tune counterfactual rollouts show
+both actions can win. A fitted memoryless policy, horizon-one and no-hidden-state
+ablations accompany the recurrent policy. This does not establish a speedup.
+
+The runner measures native PCG/GAMG pressure share without Python IPC and retains
+coupled CFD field/timing checks. Native OpenFOAM build and execution of the new
+case must be validated on the target host; Python tests do not validate its CFD
+physics. This 2D mechanism study is not a turbulent DNS or a turbine simulation.
+The previous basic He/N2 counterflow workflow remains available via
+[`VARIABLE_DENSITY_RUNBOOK_KR.md`](docs/VARIABLE_DENSITY_RUNBOOK_KR.md).
+
+## Earlier temporal workflow: C_tuned + H_S + solver world model
 
 Use [`run_v6_7_hs_world_study.py`](scripts/run_v6_7_hs_world_study.py), with the
 [complete Korean runbook](docs/HS_WORLD_THESIS_RUNBOOK_KR.md). One global classical

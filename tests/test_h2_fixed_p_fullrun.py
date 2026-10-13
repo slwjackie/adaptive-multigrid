@@ -112,6 +112,61 @@ def test_native_absence_explicit_without_output_mutation(tmp_path, monkeypatch):
     assert not output.exists()
 
 
+def bridge_dictionary():
+    return '''FoamFile { version 2.0; format ascii; }
+// solver AdaptiveFixedP; maxIter 999; }
+solvers
+{
+    "pcorr.*" { solver PCG; maxIter 600; }
+    p_rgh
+    {
+        solver/* solver comment with } */AdaptiveFixedP;
+        nested { maxIter 27; mode untouched; }
+        description "maxIter 88; solver AdaptiveFixedP; { }";
+        mode native;
+        socketPath "/tmp/old.sock";
+        adaptiveAtol 1e-12;
+        adaptiveRtol 1e-8;
+        maxIter /* retain this comment */ 600;
+    }
+    p_rghFinal { $p_rgh; }
+}
+'''
+
+
+def test_bridge_rewrite_ignores_comments_strings_and_nested_controls(tmp_path):
+    path = tmp_path/'system/fvSolution'
+    path.parent.mkdir()
+    original = bridge_dictionary()
+    path.write_text(original)
+    cfg = AdaptiveConfig()
+    _rewrite_bridge(tmp_path, 'hs', Path('/tmp/new.sock'), cfg)
+    expected = original.replace('mode native;', 'mode hs;').replace('"/tmp/old.sock"', '"/tmp/new.sock"')
+    expected = expected.replace('adaptiveAtol 1e-12;', 'adaptiveAtol '+repr(cfg.mg.absolute_tolerance)+';')
+    expected = expected.replace('adaptiveRtol 1e-8;', 'adaptiveRtol '+repr(cfg.mg.tolerance)+';')
+    expected = expected.replace('*/ 600;', '*/ '+str(cfg.mg.max_cycles)+';')
+    assert path.read_text() == expected
+
+
+@pytest.mark.parametrize('corruption', ['duplicate', 'missing', 'two_bridges', 'unbalanced'])
+def test_invalid_bridge_controls_rejected_without_partial_file_write(tmp_path, corruption):
+    path = tmp_path/'system/fvSolution'
+    path.parent.mkdir()
+    text = bridge_dictionary()
+    if corruption == 'duplicate':
+        text = text.replace('mode native;', 'mode native; mode hs;')
+    elif corruption == 'missing':
+        text = text.replace('maxIter /* retain this comment */ 600;', '')
+    elif corruption == 'two_bridges':
+        text += '\nother { solver AdaptiveFixedP; }\n'
+    else:
+        text += '\n}\n'
+    path.write_text(text)
+    with pytest.raises(ValueError):
+        _rewrite_bridge(tmp_path, 'hs', Path('/tmp/new.sock'), AdaptiveConfig())
+    assert path.read_text() == text
+
+
 def test_real_generated_dictionary_rewrite_preserves_original_and_checks_hashes(tmp_path):
     """Native preparation outputs are hash fixtures, not executed CFD results."""
     pytest.importorskip("cantera", minversion="3.0")

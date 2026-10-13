@@ -30,6 +30,16 @@ Both timing arms always undergo a final current-matrix OpenFOAM `Amul` check.
 Initial residual diagnostic comparisons account for different summation order
 under cancellation; this does not relax final acceptance.
 
+The mechanical VOF extension admits reference-anchored `p_rgh` as well as `p`.
+For `p_rgh` with uniformly negative diagonal entries, native export multiplies
+the entire equation and its `Amul` witness products by -1. The solution and raw
+L2 residual norm are unchanged. Python still requires an anchored SPD operator;
+OpenFOAM checks the returned solution with the original native matrix. The
+transformation is recorded as `context.native_to_spd_scale`. A mixed-sign or
+unanchored system is not made admissible by this rule. The standalone helper
+tests cover the sign transformation; native VOF coupling remains an execution
+gate on a Foundation 13 host.
+
 The current local verification covers standalone C++ wire compilation, strict
 response parsing, and Python case generation/chemistry roundtrip. Native plugin
 compilation, runtime library loading, `chemkinToFoam`, mesh generation and live

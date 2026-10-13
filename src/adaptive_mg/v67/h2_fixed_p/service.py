@@ -95,6 +95,13 @@ def decode_system(request, contract):
         raise ValueError('finalized uncoupled serial LDU required')
     if request.get('nullspace') != 'none':
         raise ValueError('pressure reference/Dirichlet anchor required')
+    expected_field = contract.get('pressure_field', 'p')
+    actual_field = request.get('pressure_field', 'p')
+    if actual_field != expected_field or actual_field not in ('p', 'p_rgh'):
+        raise ValueError('native pressure field and physical case contract disagree')
+    scale = request.get('context', {}).get('native_to_spd_scale', 1)
+    if type(scale) not in (int, float) or scale not in (-1, 1) or scale == -1 and actual_field != 'p_rgh':
+        raise ValueError('invalid native pressure equation sign convention')
     diag = _array(request['diag'], 'diag')
     if diag.ndim != 1 or len(diag) < 9:
         raise ValueError('invalid diagonal')
@@ -128,7 +135,7 @@ def decode_system(request, contract):
     a = native[order][:, order].tocsr()
     a.sum_duplicates(); a.eliminate_zeros(); a.sort_indices()
     context = dict(request.get('context', {}), layout='structured_2d_xmajor',
-                   case_contract_digest=digest(contract), physics=contract['physics'])
+                   case_contract_digest=digest(contract), physics=contract['physics'], pressure_field=actual_field)
     if isinstance(request['index'], bool) or not isinstance(request['index'], int) or request['index'] < 0:
         raise ValueError('solve index must be a nonnegative integer')
     if any(not isinstance(request[k], str) or not request[k] for k in ('mesh_id', 'boundary_id')):
@@ -150,7 +157,7 @@ def decode_system(request, contract):
 
 
 class Session:
-    def __init__(self, cfg, contract, *, mode, expert=None, recording=None, evidence=None):
+    def __init__(self, cfg, contract, *, mode, expert=None, recording=None, evidence=None, solver=None):
         from .backend import FixedPSolver
         self.contract = validate_case_contract(contract)
         if mode not in ('native', 'classical', 'hs'):
@@ -160,7 +167,9 @@ class Session:
         if cfg.mg.residual_reference != 'initial':
             raise ValueError('live bridge uses the initial raw L2 residual')
         self.cfg, self.mode = cfg, mode
-        self.solver = FixedPSolver(cfg, expert) if mode != 'native' else None
+        if solver is not None and mode != 'hs':
+            raise ValueError('a temporal smoother policy requires the hs service arm')
+        self.solver = solver if solver is not None else FixedPSolver(cfg, expert) if mode != 'native' else None
         self.recorder = None
         if recording is not None:
             if mode != 'native':

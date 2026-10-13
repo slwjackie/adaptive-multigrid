@@ -1,0 +1,95 @@
+{
+  "schema": "three-flow-implementation-validation-v1",
+  "source_digest": "1f286b29b9f0bd8b34d047f5dfd13c361ebbf0d42c9b1c1fb80cf48de7e4fd81",
+  "pytest": {
+    "command": "OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 python -m pytest -ra",
+    "passed": 960,
+    "skipped": 1,
+    "failed": 0,
+    "skipped_reason": "Cantera is not installed; optional legacy reacting-case generation test skipped"
+  },
+  "native_stencil_build": "passed",
+  "standalone_cpp_wire_checks": "passed",
+  "unix_socket_integration": "not_executed_environment_socket_restriction",
+  "real_case_generation": {
+    "cases": 27,
+    "families": [
+      "shear_composition",
+      "lox_he_sloshing",
+      "h2_crossflow",
+      "shear_control"
+    ],
+    "contract_validation": "passed"
+  },
+  "openfoam13_plugin_build": "not_executed_openfoam_unavailable",
+  "native_cfd_execution": "not_executed_openfoam_unavailable",
+  "world_model_benefit_established": false,
+  "physical_validation_completed": false,
+  "reacting_workflow": {
+    "implemented": true,
+    "entrypoint": "scripts/run_v6_7_flow_comparison.py --with-h2",
+    "transfer_mode": "architecture_retrained_on_h2",
+    "weights_transferred": false,
+    "control_flow_and_provenance_tests": "passed_with_mocked_CFD_dependencies",
+    "actual_reacting_cfd_executed": false,
+    "separate_chemistry_timer_implemented": false,
+    "full_cfd_wall_time_includes_chemistry": true
+  },
+  "bridge_rewrite_fix": {
+    "source_digest": "35fda81d4e92a2c199e81324789aee4007a024016c17414ff6326afab726c2b7",
+    "command": "OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 python -m pytest tests/test_h2_fixed_p_fullrun.py tests/test_propulsion_flow_generators.py tests/test_flow_comparison_pipeline.py -ra",
+    "passed": 66,
+    "skipped": 1,
+    "failed": 0,
+    "skipped_reason": "Cantera unavailable; existing optional reacting-case generation test skipped",
+    "scope": "Real generated three-flow dictionaries through the native/coupled bridge rewrite; scoped controls, nested dictionaries, comments, duplicate/missing controls and pipeline regression tests",
+    "full_suite_rerun": false,
+    "previous_full_suite": "top-level source_digest and pytest describe the pre-fix version",
+    "actual_cfd_executed": false
+  },
+  "scope": "Implementation, numerical unit/regression tests, and dictionary generation only; no CFD speed or physical fidelity claim",
+  "sloshing_alpha_recheck": {
+    "source_digest": "cf1e6deafbc81dedeb60d961d27b981130173a816c9e894b9a2bb75ed8fc6495",
+    "command": "OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 python -m pytest tests/test_propulsion_flow_generators.py tests/test_new_flow_physics.py tests/test_flow_comparison_pipeline.py -ra",
+    "passed": 60,
+    "skipped": 0,
+    "failed": 0,
+    "alpha_linear_solver_tolerance_before": 1e-10,
+    "alpha_linear_solver_tolerance_after": 1e-12,
+    "alpha_bounds_acceptance_tolerance_unchanged": 1e-08,
+    "scope": "Generator controls, unchanged raw-field bound gate, single train/tune collection and full-plan resume; CFD dependencies mocked in pipeline tests",
+    "full_suite_rerun": false,
+    "actual_cfd_executed": false,
+    "overshoot_resolution_confirmed": false,
+    "next_step": "WSL tune_slosh single-case native collection, then full collection only if it passes"
+  },
+  "sloshing_pressure_precision": {
+    "source_digest": "2528b7687d794690a179517f26eaef1ef84e5809de1046277b55879d53d74da8",
+    "command": "OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 python -m pytest tests/test_flow_comparison_pipeline.py tests/test_propulsion_flow_generators.py tests/test_new_flow_physics.py -ra",
+    "passed": 67,
+    "skipped": 0,
+    "failed": 0,
+    "pressure_absolute_tolerance": 1e-13,
+    "pressure_relative_tolerance": 1e-08,
+    "alpha_bounds_acceptance_tolerance_unchanged": 1e-08,
+    "scope": "Per-flow pressure tolerances shared by all study arms and all native/coupled bridge modes; WM clone preserves solver settings; reacting transfer preserves target pressure criteria",
+    "user_reported_native_diagnostic": {
+      "case": "lox_he_sloshing/tune_slosh",
+      "shape": [
+        31,
+        31
+      ],
+      "profile": "quick",
+      "pressure_absolute_tolerance": 1e-13,
+      "status": "partial",
+      "completed_through": "collect_one",
+      "source": "User-provided WSL console output; complete field statistics not supplied",
+      "all_time_step_alpha_bounds_verified": false,
+      "all_sloshing_cases_validated": false
+    },
+    "full_suite_rerun": false,
+    "actual_cfd_executed_by_assistant": false,
+    "root_cause_mechanism_established": false,
+    "next_step": "New v5 full three-flow native collection; continue probe/validation/test only through their existing gates"
+  }
+}

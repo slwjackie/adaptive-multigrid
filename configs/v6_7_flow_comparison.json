@@ -1,0 +1,197 @@
+{
+  "schema": "three-flow-comparison-v1",
+  "base": {
+    "schema": "h2-fixed-p-study-v1",
+    "seed": 20261010,
+    "torch_threads": 1,
+    "solver": {
+      "mg": {
+        "mode": "classical",
+        "strategy_name": "line_alt_energymin_full__em5__v11",
+        "coarsest_n": 3,
+        "nn_levels": 2,
+        "max_cycles": 600,
+        "tolerance": 1e-08,
+        "absolute_tolerance": 1e-12,
+        "residual_reference": "initial",
+        "stencil_backend": "csr",
+        "native_threads": 1,
+        "safety_growth": 1.0,
+        "stagnation_patience": 2,
+        "reserve_classical_cycles": 1
+      },
+      "mode": "research",
+      "branch": "H_S",
+      "use_smoother": true,
+      "use_transfer": false,
+      "application": "replace",
+      "replace_pre": 1,
+      "replace_post": 0,
+      "spatial": false,
+      "gate_mode": "open",
+      "use_learned_controller": false,
+      "inference_device": "cpu",
+      "inference_dtype": "float32",
+      "smoother_levels": [
+        0,
+        1
+      ]
+    },
+    "training": {
+      "updates": 200,
+      "seed": 20261010,
+      "hidden": 8,
+      "learning_rate": 0.0001,
+      "cycles": 3,
+      "classical_prefix_cycles": 0,
+      "lambda_stability": 0.1,
+      "lambda_noharm": 0.1,
+      "smoother_architecture": "shared"
+    },
+    "physical_tolerances": {
+      "declared_before_evaluation": true,
+      "pressure_alignment": "none",
+      "fields": {
+        "T": {
+          "atol": 0.1,
+          "rtol": 0.0001
+        },
+        "He": {
+          "atol": 1e-06,
+          "rtol": 0.001
+        },
+        "N2": {
+          "atol": 1e-06,
+          "rtol": 0.001
+        },
+        "rho": {
+          "atol": 1e-06,
+          "rtol": 0.001
+        },
+        "U": {
+          "atol": 0.0001,
+          "rtol": 0.001
+        },
+        "p": {
+          "atol": 0.1,
+          "rtol": 1e-05
+        }
+      }
+    },
+    "continuity_max_cumulative": 0.001,
+    "world_model_enabled": false,
+    "benchmark": {
+      "role": "primary",
+      "experiment_kind": "variable_density_nonreacting",
+      "pressure_fraction_threshold": 0.5,
+      "flow_family": "planar_shear_mixing_layer"
+    },
+    "smoother_reuse": {
+      "schema": "fixed-p-smoother-reuse-v1",
+      "seed": 20261011,
+      "policies": [
+        "refresh",
+        "reuse",
+        "periodic_8",
+        "periodic_32",
+        "drift_0.001",
+        "drift_0.01",
+        "residual_0.001"
+      ],
+      "measurement_repeats": 3,
+      "baseline_repeats": 3,
+      "behavior_max_age": 64,
+      "probe_horizon": 4,
+      "hidden": 16,
+      "epochs": 30,
+      "minimum_gain": 0.05,
+      "fit_world": true,
+      "world_memory": "shared",
+      "world_head": "linear",
+      "world_head_hidden": 16
+    }
+  },
+  "pressure_tolerances": {
+    "lox_he_sloshing": {
+      "absolute_tolerance": 1e-13
+    }
+  },
+  "default_families": [
+    "shear_composition",
+    "lox_he_sloshing",
+    "h2_crossflow"
+  ],
+  "smoother_architectures": [
+    "shared",
+    "per_level"
+  ],
+  "world_hidden_sizes": [
+    16,
+    32,
+    64
+  ],
+  "world_heads": [
+    "linear",
+    "role_mlp"
+  ],
+  "world_head_hidden": 16,
+  "profiles": {
+    "quick": {
+      "n": 31,
+      "training_updates": 50,
+      "world_epochs": 10,
+      "families": {
+        "shear_composition": {
+          "end_time": 0.008,
+          "delta_t": 0.0001
+        },
+        "shear_control": {
+          "end_time": 0.008,
+          "delta_t": 0.0001
+        },
+        "h2_crossflow": {
+          "end_time": 0.008,
+          "delta_t": 2e-05
+        },
+        "lox_he_sloshing": {
+          "end_time": 3.2,
+          "delta_t": 0.002
+        }
+      }
+    },
+    "full": {
+      "n": 31,
+      "training_updates": 200,
+      "world_epochs": 30,
+      "families": {
+        "shear_composition": {
+          "end_time": 0.04,
+          "delta_t": 0.0001
+        },
+        "shear_control": {
+          "end_time": 0.04,
+          "delta_t": 0.0001
+        },
+        "h2_crossflow": {
+          "end_time": 0.04,
+          "delta_t": 2e-05
+        },
+        "lox_he_sloshing": {
+          "end_time": 4.0,
+          "delta_t": 0.002
+        }
+      }
+    }
+  },
+  "selection": {
+    "smoother": "minimum successful tune always-refresh wall time; same levels",
+    "world": "minimum successful tune world policy wall time; validation is a gate",
+    "test": "frozen finalists only; no test-driven ranking or reselection"
+  },
+  "notes": [
+    "quick is a functionality/tradeoff screen, not a converged-physics or speed claim",
+    "three-dimensional turbulence, combustion, LOX heat transfer and phase change are not modeled",
+    "all recorded matrices are real OpenFOAM pressure systems; no synthetic fallback",
+    "total solver time includes setup, neural generation/application, prediction, safeguards and recovery"
+  ]
+}

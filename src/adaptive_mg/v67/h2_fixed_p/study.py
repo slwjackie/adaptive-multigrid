@@ -21,7 +21,7 @@ from ..limited import initialize_timing_runtime
 from ..models import Components
 from ..world_model.data import digest, file_hash, inside, load_manifest, load_trajectories, write_json
 from . import VERSION
-from .data import import_recordings, read, verify_dataset
+from .data import import_recordings, read, verify_dataset, FIELD_PROFILES
 
 
 _FROZEN_ARTIFACTS = (
@@ -51,6 +51,9 @@ def source_digest():
         'scripts/run_v6_7_h2_fixed_p.py',
         'scripts/run_v6_7_h2_pipeline.py',
         'scripts/run_v6_7_variable_density_pipeline.py',
+        'scripts/run_v6_7_shear_pipeline.py',
+        'scripts/run_v6_7_flow_comparison.py',
+        'scripts/run_v6_7_smoother_reuse.py',
         'integrations/openfoam13/Allwmake',
         'integrations/openfoam13/AdaptiveFixedP/AdaptiveFixedP.C',
         'integrations/openfoam13/AdaptiveFixedP/AdaptiveFixedP.H',
@@ -59,6 +62,10 @@ def source_digest():
         'integrations/openfoam13/AdaptiveFixedP/Make/options',
         'integrations/openfoam13/case/generate.py',
         'integrations/openfoam13/case/generate_variable_density.py',
+        'integrations/openfoam13/case/generate_shear_layer.py',
+        'integrations/openfoam13/case/generate_crossflow.py',
+        'integrations/openfoam13/case/generate_sloshing.py',
+        'integrations/openfoam13/case/flow_generator_common.py',
         'integrations/openfoam13/case/run_case.py',
         'integrations/openfoam13/case/Allrun',
         'integrations/openfoam13/case/Allclean',
@@ -78,7 +85,7 @@ def configuration(path):
     benchmark = settings.get('benchmark', {})
     if not isinstance(benchmark, dict):
         raise ValueError('benchmark must be an object')
-    if benchmark and (benchmark.get('experiment_kind') not in ('h2_combustion', 'variable_density_nonreacting')
+    if benchmark and (benchmark.get('experiment_kind') not in FIELD_PROFILES
                       or benchmark.get('role') not in ('primary', 'supplementary')):
         raise ValueError('explicit supported benchmark experiment_kind and role required')
     cfg = AdaptiveConfig.from_dict(settings['solver'])
@@ -178,6 +185,22 @@ def load_expert(out, cfg):
             or isinstance(updates, bool) or not isinstance(updates, int) or updates < 1):
         raise ValueError('this workflow needs H_S trained on recorded CFD with fixed P')
     trained = read(path.parent / 'training_manifest.json')
+    from ..level_smoothers import PerLevelSmoother
+    declared_architecture = read(Path(out) / 'configuration.json').get('training', {}).get(
+        'smoother_architecture', 'shared')
+    actual_architecture = 'per_level' if isinstance(model.smoother, PerLevelSmoother) else 'shared'
+    if (declared_architecture not in ('shared', 'per_level')
+            or any(value != declared_architecture for value in (
+                actual_architecture, trained.get('smoother_architecture', 'shared'),
+                model.metadata.get('smoother_architecture', 'shared'),
+                status.get('smoother_architecture', 'shared')))):
+        raise ValueError('checkpoint smoother architecture differs from this study')
+    if actual_architecture == 'per_level':
+        expected_levels = list(model.smoother.level_indices)
+        if any(value != expected_levels for value in (
+                trained.get('smoother_level_indices'), model.metadata.get('smoother_level_indices'),
+                status.get('smoother_level_indices'))):
+            raise ValueError('checkpoint per-level CNN coverage evidence differs')
     expected = replace(cfg, mode='research', branch='H_S', use_smoother=True,
                        use_transfer=False, spatial=False, gate_mode='open', use_learned_controller=False)
     actual = AdaptiveConfig.from_dict(trained['config'])
@@ -326,11 +349,13 @@ def main(argv=None):
     s.add_argument('--socket', required=True)
     s.add_argument('--mode', choices=['native', 'classical', 'hs'], required=True)
     s.add_argument('--record-dir'); s.add_argument('--evidence')
+    s.add_argument('--smoother-policy', help='predeclared policy from this run/reuse study')
     s.add_argument('--timeout', type=float, default=300.)
     s = subs.add_parser('coupled')
     s.add_argument('--run-dir', required=True); s.add_argument('--case', required=True)
     s.add_argument('--output', required=True); s.add_argument('--repeats', type=int, default=3)
     s.add_argument('--timeout', type=float, default=3600.)
+    s.add_argument('--smoother-policy', help='selected, refresh, reuse, heuristic, or fitted world policy')
     a = p.parse_args(argv)
     if a.command == 'prepare': result = prepare(a.config, a.input_ldu, a.run_dir)
     elif a.command == 'train': result = train(a.run_dir)
@@ -338,7 +363,8 @@ def main(argv=None):
     elif a.command == 'freeze': result = freeze(a.run_dir)
     elif a.command == 'coupled':
         from .fullrun import run_paired
-        result = run_paired(a.run_dir, a.case, a.output, repeats=a.repeats, timeout=a.timeout)
+        options = dict(smoother_policy=a.smoother_policy) if a.smoother_policy else {}
+        result = run_paired(a.run_dir, a.case, a.output, repeats=a.repeats, timeout=a.timeout, **options)
     else:
         from .service import Session, serve
         from .data import validate_case_contract, experiment_kind
@@ -355,7 +381,13 @@ def main(argv=None):
         if declared is not None and declared != experiment_kind(contract):
             raise ValueError('service case and configuration experiment kinds disagree')
         expert = load_expert(out, cfg) if a.mode == 'hs' else None
+        solver = None
+        if a.smoother_policy:
+            if a.mode != 'hs' or not a.run_dir:
+                raise ValueError('temporal smoother policy requires hs and a trained run-dir')
+            from ..smoother_reuse.study import policy_solver
+            solver = policy_solver(out, cfg, expert, a.smoother_policy, split=contract['split'])
         return serve(a.socket, Session(cfg, contract, mode=a.mode, expert=expert,
-                     recording=a.record_dir, evidence=a.evidence), timeout=a.timeout)
+                     recording=a.record_dir, evidence=a.evidence, solver=solver), timeout=a.timeout)
     print(__import__('json').dumps(result, indent=2, allow_nan=False))
     return result

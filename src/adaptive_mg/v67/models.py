@@ -58,19 +58,28 @@ DETECTOR_INPUTS=8
 
 @dataclass
 class Components:
-    smoother: NeuralSmootherNet
+    smoother: nn.Module
     transfer: TransferNet
     detector: TinyNet
     controller: TinyNet
     metadata: dict = field(default_factory=dict)
 
     @classmethod
-    def create(cls, hidden=16, seed=7):
+    def create(cls, hidden=16, seed=7, *, smoother_architecture='shared', smoother_levels=None):
+        if smoother_architecture not in ('shared', 'per_level'):
+            raise ValueError('smoother_architecture must be shared or per_level')
         torch.manual_seed(seed)
-        c=cls(NeuralSmootherNet(hidden=hidden,split_direction_gain=True),
+        from .level_smoothers import PerLevelSmoother
+        smoother = (PerLevelSmoother(smoother_levels, hidden=hidden)
+                    if smoother_architecture == 'per_level'
+                    else NeuralSmootherNet(hidden=hidden,split_direction_gain=True))
+        c=cls(smoother,
               TransferNet(hidden=hidden),TinyNet(DETECTOR_INPUTS,1),TinyNet(CONTROLLER_INPUTS,4))
         c.metadata={'contract':CONTRACT,'smoother_trained':False,'transfer_trained':False,
-                    'detector_trained':False,'controller_trained':False,'certificate':{'validated':False}}
+                    'detector_trained':False,'controller_trained':False,'certificate':{'validated':False},
+                    'smoother_architecture':smoother_architecture}
+        if smoother_architecture == 'per_level':
+            c.metadata['smoother_level_indices'] = list(smoother.level_indices)
         # An untrained spatial detector defaults off; no invented positive labels.
         with torch.no_grad(): c.detector.fc2.bias.fill_(-2.)
         return c.eval()

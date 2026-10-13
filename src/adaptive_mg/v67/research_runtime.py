@@ -37,6 +37,8 @@ def require_components_allowed(components, cfg, branch):
 
 
 def research_spec(module):
+    if hasattr(module, 'levelwise_spec'):
+        return dict(family='per_level_smoother', config=module.levelwise_spec())
     if hasattr(module, 'multistage_spec'):
         return dict(family='multistage_smoother', config=module.multistage_spec())
     if hasattr(module, 'research_transfer_spec'):
@@ -49,6 +51,9 @@ def research_spec(module):
 
 
 def restore_expert(spec):
+    if spec['family'] == 'per_level_smoother':
+        from .level_smoothers import PerLevelSmoother
+        return PerLevelSmoother(**spec['config'])
     if spec['family'] == 'multistage_smoother':
         from .multistage import make_multistage
         return make_multistage(**spec['config'])

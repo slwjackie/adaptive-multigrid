@@ -22,6 +22,7 @@ from ...transfer import galerkin_coarse_operator, matrix_feature_array
 from ..autograd_sparse import SparseTensor
 from ..banks import Stats, resolve_device, selected_level
 from ..models import Components
+from ..level_smoothers import PerLevelSmoother, smoother_for_level
 from ..unroll import TLevel, cycle
 from ..world_model.backend import hierarchy_signature, levels
 from ..world_model.data import digest, file_hash, write_json
@@ -69,9 +70,10 @@ def fixed_p_graph(a, reference, model, cfg, *, learned=True):
         if learned and cfg.use_smoother and selected_level(parent.index, cfg, 'smoother'):
             features = torch.tensor(matrix_feature_array(current, parent.shape),
                                     device=device, dtype=dtype).unsqueeze(0)
-            cascade = hasattr(model.smoother, 'stage_directions_and_gains')
-            directions, gains = (model.smoother.stage_directions_and_gains(features, parent.index)
-                                 if cascade else model.smoother.direction_and_gain(features))
+            smoother = smoother_for_level(model.smoother, parent.index)
+            cascade = hasattr(smoother, 'stage_directions_and_gains')
+            directions, gains = (smoother.stage_directions_and_gains(features, parent.index)
+                                 if cascade else smoother.direction_and_gain(features))
             level.is_residual_cascade = cascade
             level.dirs = directions.to('cpu', dtype=torch.float64)
             level.gains = gains.to('cpu', dtype=torch.float64) * cfg.mg.smoother_gain_multiplier
@@ -139,7 +141,8 @@ def _positive_integer(value, name, *, zero=False):
 
 def train_smoother(trajectories, cfg, output, *, updates=100, seed=20261010,
                    hidden=16, learning_rate=1e-3, cycles=2,
-                   classical_prefix_cycles=0, lambda_stability=.1, lambda_noharm=.1):
+                   classical_prefix_cycles=0, lambda_stability=.1, lambda_noharm=.1,
+                   smoother_architecture='shared'):
     """Return a genuinely updated H_S candidate and auditable training status.
 
     Inputs are validated ``(trajectory_metadata, list[Snapshot])`` pairs. Only
@@ -150,6 +153,8 @@ def train_smoother(trajectories, cfg, output, *, updates=100, seed=20261010,
     """
     for name, value in [('updates', updates), ('hidden', hidden), ('cycles', cycles)]:
         _positive_integer(value, name)
+    if smoother_architecture not in ('shared', 'per_level'):
+        raise ValueError('smoother_architecture must be shared or per_level')
     _positive_integer(classical_prefix_cycles, 'classical_prefix_cycles', zero=True)
     if not np.isfinite(learning_rate) or learning_rate <= 0:
         raise ValueError('learning_rate must be finite and positive')
@@ -165,6 +170,7 @@ def train_smoother(trajectories, cfg, output, *, updates=100, seed=20261010,
     if not trajectories:
         raise ValueError('nonempty TRAIN trajectories required')
     samples, trajectory_records, ids = [], [], set()
+    active_levels = set()
     for metadata, states in trajectories:
         if metadata.get('split') != 'train':
             raise ValueError('only TRAIN trajectories may optimize the smoother')
@@ -186,10 +192,13 @@ def train_smoother(trajectories, cfg, output, *, updates=100, seed=20261010,
                                                    get_strategy(cfg.mg.strategy_name), cfg.mg, Stats()))
         if not any(l.p is not None and selected_level(l.index, cfg, 'smoother') for l in levels(reference)):
             raise ValueError('training hierarchy has no active nonterminal smoother level')
+        selected = [l.index for l in levels(reference)
+                    if l.p is not None and selected_level(l.index, cfg, 'smoother')]
+        active_levels.update(selected)
         p_digest = hierarchy_signature(reference)
         record = dict(id=ident, case_group=metadata['case_group'], split='train',
                       fixed_p_digest=p_digest, initial_matrix_digest=states[0].matrix_digest,
-                      reference_builds=1, samples=[])
+                      reference_builds=1, smoother_levels=selected, samples=[])
         for state in states:
             r0 = state.b - state.a @ state.x0
             threshold = max(cfg.mg.absolute_tolerance, cfg.mg.tolerance *
@@ -210,13 +219,21 @@ def train_smoother(trajectories, cfg, output, *, updates=100, seed=20261010,
     if out.exists() and any(out.iterdir()):
         raise FileExistsError('training output must be a fresh directory')
     out.mkdir(parents=True, exist_ok=True)
-    model = Components.create(hidden=hidden, seed=seed)
+    model = Components.create(hidden=hidden, seed=seed,
+                              smoother_architecture=smoother_architecture,
+                              smoother_levels=sorted(active_levels))
     for name in ('smoother', 'transfer', 'detector', 'controller'):
         net = getattr(model, name)
         net.train(name == 'smoother')
         for parameter in net.parameters():
             parameter.requires_grad_(name == 'smoother')
     before = model.component_signatures()
+    level_updates = {str(i): 0 for i in sorted(active_levels)} if smoother_architecture == 'per_level' else {}
+    # Hash each independent CNN before training; an aggregate change is not
+    # evidence that every deployed coarse-level network was optimized.
+    from ...provenance import module_signature
+    level_signatures_before = {i: module_signature(model.smoother.for_level(int(i)))
+                               for i in level_updates}
     model.save(out / 'initial.pt', extra={'role': 'untrained_initialization'})
     # Move before optimizer creation: offline FP64 numerical operations stay CPU.
     device = resolve_device(cfg, cells=max(s.a.shape[0] for _, s, _, _ in samples))
@@ -241,6 +258,10 @@ def train_smoother(trajectories, cfg, output, *, updates=100, seed=20261010,
                     actual_exported_rhs=True, actual_exported_x0=True, random_rhs_generated=False,
                     interpolation_rebuilt_per_sample=False, learned_transfer=False,
                     initial_signatures=before, final_test_seen=False)
+    manifest.update(smoother_architecture=smoother_architecture,
+                    smoother_level_indices=sorted(active_levels),
+                    smoother_parameter_count=sum(p.numel() for p in model.smoother.parameters()),
+                    initial_level_signatures=level_signatures_before)
     fingerprint = digest(manifest)
     manifest['training_fingerprint'] = fingerprint
     write_json(out / 'training_manifest.json', manifest)
@@ -255,6 +276,16 @@ def train_smoother(trajectories, cfg, output, *, updates=100, seed=20261010,
         if not loss.requires_grad or not torch.isfinite(loss):
             raise FloatingPointError('inactive or nonfinite smoother objective')
         loss.backward()
+        level_gradients = {}
+        if isinstance(model.smoother, PerLevelSmoother):
+            for i in model.smoother.level_indices:
+                grads = [p.grad.detach().square().sum() for p in model.smoother.for_level(i).parameters()
+                         if p.grad is not None]
+                value = float(torch.stack(grads).sum().sqrt()) if grads else 0.
+                if not np.isfinite(value):
+                    raise FloatingPointError(f'nonfinite gradient for smoother level {i}')
+                level_gradients[str(i)] = value
+                level_updates[str(i)] += int(value > 0.)
         norm = torch.nn.utils.clip_grad_norm_(params, max_norm=2.)
         if not torch.isfinite(norm) or float(norm) <= 0:
             raise FloatingPointError('zero or nonfinite gradient; no trained checkpoint emitted')
@@ -266,12 +297,17 @@ def train_smoother(trajectories, cfg, output, *, updates=100, seed=20261010,
         records.append(dict(step=step, trajectory=ident, snapshot_index=state.index,
                             matrix_digest=state.matrix_digest, rhs_digest=entry['rhs_digest'],
                             exported_x0_digest=entry['x0_digest'], loss=float(loss.detach()),
-                            gradient_norm=float(norm), **details))
+                            gradient_norm=float(norm), gradient_norm_by_level=level_gradients, **details))
         write_json(out / 'training.json', records)
     model.eval()
     for net in model.modules():
         net.cpu()
     after = model.component_signatures()
+    level_signatures_after = {i: module_signature(model.smoother.for_level(int(i)))
+                              for i in level_signatures_before}
+    if any(level_updates[i] == 0 or level_signatures_before[i] == level_signatures_after[i]
+           for i in level_signatures_before):
+        raise RuntimeError('each per-level CNN needs a nonzero training update; no trained checkpoint emitted')
     if after['smoother'] == before['smoother']:
         raise RuntimeError('smoother weights did not change; no trained checkpoint emitted')
     if any(after[name] != before[name] for name in ('transfer', 'detector', 'controller')):
@@ -284,6 +320,9 @@ def train_smoother(trajectories, cfg, output, *, updates=100, seed=20261010,
                           training_operator_digests=sorted({s.matrix_digest for _, states in trajectories for s in states}),
                           training_source_kind='external_cfd', learned_transfer=False,
                           actual_exported_rhs=True, actual_exported_x0=True, final_test_seen=False)
+    model.metadata.update(smoother_architecture=smoother_architecture,
+                          smoother_level_indices=sorted(active_levels),
+                          optimizer_updates_by_level=level_updates)
     model.mark_policy_stale('fixed_P_H_S_candidate_requires_independent_timing_and_CFD_validation')
     model.save(out / 'candidate.pt', extra={'role': 'unselected_H_S_candidate', 'performance_certified': False})
     status = dict(status='complete', training_branch='H_S', optimizer_updates=len(records),
@@ -293,5 +332,11 @@ def train_smoother(trajectories, cfg, output, *, updates=100, seed=20261010,
                   training_seconds=perf_counter() - start, eligible_samples=len(samples),
                   trajectories=len(trajectory_records), final_test_seen=False, performance_certified=False,
                   cfd_validation_completed=False, world_model_trained=False)
+    status.update(smoother_architecture=smoother_architecture,
+                  smoother_level_indices=sorted(active_levels),
+                  smoother_parameter_count=manifest['smoother_parameter_count'],
+                  optimizer_updates_by_level=level_updates,
+                  initial_level_signatures=level_signatures_before,
+                  final_level_signatures=level_signatures_after)
     write_json(out / 'status.json', status)
     return model, status

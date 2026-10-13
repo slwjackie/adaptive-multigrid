@@ -181,13 +181,15 @@ def _features(level, stats):
 
 
 def generated_stencil(level, components, cfg, stats, device, dtype):
+    from .level_smoothers import smoother_for_level
     stats.smoother_nn_calls += 1
     stats.neural_setup_calls += 1
-    cascade = hasattr(components.smoother, 'stage_directions_and_gains')
+    smoother = smoother_for_level(components.smoother, level.index)
+    cascade = hasattr(smoother, 'stage_directions_and_gains')
     def generate(module, features):
         return (module.stage_directions_and_gains(features, level.index) if cascade
                 else module.direction_and_gain(features))
-    directions, gains = _inference(components.smoother, _features(level, stats),
+    directions, gains = _inference(smoother, _features(level, stats),
                                   device, dtype, generate, stats)
     directions = directions[0] if cascade else directions[0, :1]
     gains = (gains[0] if cascade else gains[0, :1]) * cfg.mg.smoother_gain_multiplier
@@ -356,7 +358,7 @@ def prepare_smoother_bank(base,components,cfg,stats,operator_cache=None):
             if selected_level(level.index,cfg,"smoother") and cfg.mg.smoother_gain_multiplier>0 and (cfg.replace_pre or cfg.replace_post):
                 if not hasattr(level,'_operator_digest'):
                     level._operator_digest=operator_digest(level.a)
-                key=(level._operator_digest,level.shape,level.index if hasattr(components.smoother,"multistage_spec") else None,generation_key)
+                key=(level._operator_digest,level.shape,level.index,generation_key)
                 if operator_cache is not None and key in operator_cache:
                     cached=operator_cache[key]
                     if isinstance(cached,GenerationFailure):cached.reject_cached(stats,'smoother')

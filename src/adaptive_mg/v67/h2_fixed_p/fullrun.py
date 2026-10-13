@@ -22,8 +22,9 @@ import numpy as np
 
 from ...provenance import hardware_environment
 from ..world_model.data import digest, file_hash, write_json
-from .data import read, validate_case_contract, experiment_kind, input_fingerprint, FIELD_PROFILES, VARIABLE_DENSITY_KIND
-from .evaluation import compare_coupled_runs, nonreacting_field_evidence
+from .data import (read, validate_case_contract, experiment_kind, input_fingerprint, FIELD_PROFILES,
+                   VARIABLE_DENSITY_KIND, CROSSFLOW_KIND, SLOSHING_KIND, NONREACTING_GAS_KINDS)
+from .evaluation import compare_coupled_runs, nonreacting_field_evidence, sloshing_field_evidence
 
 
 NUMBER = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?"
@@ -114,7 +115,7 @@ def parse_solver_log(text, contract, continuity_limit):
     if len(times) != count or not np.allclose(times, expected, rtol=1.e-8, atol=1.e-13):
         raise ValueError("CFD skipped/changed timesteps or did not reach declared end time")
     pattern = (r"H2FixedPPressureSeconds\s+(" + NUMBER + r")\s+index\s+(\d+)\s+time\s+(" + NUMBER +
-               r")\s+mode\s+(classical|hs)\s+residual\s+(" + NUMBER + r")\s+threshold\s+(" + NUMBER + r")")
+               r")\s+mode\s+(classical|hs|native_pcg|native_gamg)\s+residual\s+(" + NUMBER + r")\s+threshold\s+(" + NUMBER + r")")
     rows = [dict(seconds=float(s), index=int(i), time=float(t), mode=m, residual=float(r), threshold=float(th))
             for s, i, t, m, r, th in re.findall(pattern, text)]
     if not rows or len(rows) != text.count("H2FixedPPressureSeconds"):
@@ -155,24 +156,32 @@ def collect_fields(root, contract):
             path = folder / name
             values[name].append(read_internal_field(path, n, 3 if name == "U" else 1))
             hashes[str(path.relative_to(root))] = file_hash(path)
-        qpath = folder / "Qdot"
-        qdot = read_internal_field(qpath, n)
-        heat_release.append(float(np.max(qdot)))
-        absolute_heat_release.append(float(np.max(np.abs(qdot))))
-        hashes[str(qpath.relative_to(root))] = file_hash(qpath)
+        if kind != SLOSHING_KIND:
+            qpath = folder / "Qdot"
+            qdot = read_internal_field(qpath, n)
+            heat_release.append(float(np.max(qdot)))
+            absolute_heat_release.append(float(np.max(np.abs(qdot))))
+            hashes[str(qpath.relative_to(root))] = file_hash(qpath)
     result = dict(sample_times=[t for t, _ in samples],
                   fields={key: np.stack(value) for key, value in values.items()}, hashes=hashes,
-                  reaction_evidence=dict(finite_saved_Qdot=True, maximum_Qdot_by_time=heat_release,
+                  reaction_evidence=dict(finite_saved_Qdot=kind != SLOSHING_KIND, maximum_Qdot_by_time=heat_release,
                                          maximum_absolute_Qdot_by_time=absolute_heat_release,
                                          positive_heat_release_observed=any(v > 0 for v in heat_release),
-                                         zero_heat_release_observed=all(v == 0 for v in absolute_heat_release),
+                                         zero_heat_release_observed=bool(absolute_heat_release) and all(v == 0 for v in absolute_heat_release),
                                          experimentally_validated=False))
-    if kind == VARIABLE_DENSITY_KIND:
-        physical = nonreacting_field_evidence(result["fields"])
+    if kind in NONREACTING_GAS_KINDS:
+        species = ('H2', 'N2') if kind == CROSSFLOW_KIND else ('He', 'N2')
+        physical = nonreacting_field_evidence(result["fields"], species)
         physical["zero_heat_release_observed"] = result["reaction_evidence"]["zero_heat_release_observed"]
         physical["maximum_absolute_Qdot_by_time"] = absolute_heat_release
         physical["passed"] = physical["passed"] and physical["zero_heat_release_observed"]
         result["physics_evidence"] = physical
+    elif kind == SLOSHING_KIND:
+        initial_path = Path(root) / '0/alpha.lox'
+        initial_alpha = read_internal_field(initial_path, n)
+        hashes['0/alpha.lox'] = file_hash(initial_path)
+        result['physics_evidence'] = sloshing_field_evidence(result['fields'], contract, initial_alpha)
+        result['reaction_evidence']['scope'] = 'isothermal immiscible VOF has no heat-release field; absence is not a measured zero'
     return result
 
 
@@ -191,10 +200,14 @@ def _verify_prepared(root):
         raise ValueError("prepared case already contains positive-time outputs; use a fresh case")
     if any(path.is_symlink() for path in root.rglob("*")):
         raise ValueError("prepared case must contain local regular files, not symlinks")
-    initial = [f"0/{name}" for name in [*contract["species"], "T", "p", "U"]]
+    kind = experiment_kind(contract)
+    initial_names = ['alpha.lox', 'U', 'p', 'p_rgh'] if kind == SLOSHING_KIND else [*contract['species'], 'T', 'p', 'U']
+    if 'initial_fields' in contract and contract['initial_fields'] != initial_names:
+        raise ValueError('initial fields disagree with physical case profile')
+    initial = [f"0/{name}" for name in initial_names]
     mesh = [str(p.relative_to(root)) for p in (root / "constant/polyMesh").iterdir() if p.is_file()]
     checks = {"initial_conditions_sha256": initial, "mesh_sha256": mesh}
-    if experiment_kind(contract) == VARIABLE_DENSITY_KIND:
+    if kind in NONREACTING_GAS_KINDS:
         if contract.get("preparation_kind") != "native_thermophysical":
             raise ValueError("nonreacting case needs native thermophysical preparation")
         checks["thermophysical_sha256"] = contract["thermophysical_files"]
@@ -203,6 +216,16 @@ def _verify_prepared(root):
         if (not re.search(r"\bchemistry\s+off\s*;", chemistry)
                 or not re.search(r"\bcombustionModel\s+none\s*;", combustion)):
             raise ValueError("nonreacting case must disable chemistry and combustion")
+    elif kind == SLOSHING_KIND:
+        if contract.get('preparation_kind') != 'native_two_phase':
+            raise ValueError('sloshing case needs native two-phase preparation')
+        checks['thermophysical_sha256'] = contract['thermophysical_files']
+        solution = _clean((root / 'system/fvSolution').read_text())
+        for key, expected in (('pRefCell', contract['pressure_reference']['cell']),
+                              ('pRefValue', contract['pressure_reference']['value'])):
+            match = re.search(r'\b' + key + r'\s+(' + NUMBER + r')\s*;', solution)
+            if not match or float(match.group(1)) != expected:
+                raise ValueError('sloshing pressure reference changed: ' + key)
     else:
         checks.update(chemistry_sha256=contract["chemistry_files"],
                       converted_chemistry_sha256=["constant/reactions", "constant/thermo.compressibleGas"])
@@ -231,18 +254,61 @@ def _verify_prepared(root):
     return contract
 
 
+def _bridge_entries(text):
+    """Find direct entries of the sole AdaptiveFixedP dictionary.
+
+    Other solver dictionaries (e.g. sloshing pcorr) legitimately repeat controls
+    such as maxIter. Comments, quoted strings and nested dictionaries must not
+    change which controls belong to this bridge. Token offsets preserve every
+    byte outside the edited scalar values; this does not expand Foam directives.
+    """
+    tokens = re.finditer(r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"|[{};]|(?:(?!//|/\*)[^\s{};"])+', text, re.S)
+    stack, bridges = [], []
+    for token in tokens:
+        value = token.group()
+        if value.startswith(("//", "/*")):
+            continue
+        if value == "{":
+            if stack:
+                stack[-1]["pending"] = []  # The preceding token names this child dictionary.
+            stack.append(dict(entries=[], pending=[]))
+        elif value == "}":
+            if not stack:
+                raise ValueError("unbalanced fvSolution dictionaries")
+            frame = stack.pop()
+            solvers = [e for e in frame["entries"] if e[0].group() == "solver"]
+            if any(len(e) == 3 and e[1].group() == "AdaptiveFixedP" for e in solvers):
+                if len(solvers) != 1:
+                    raise ValueError("exactly one solver entry required in bridge dictionary")
+                bridges.append(frame["entries"])
+        elif stack:
+            stack[-1]["pending"].append(token)
+            if value == ";":
+                stack[-1]["entries"].append(stack[-1]["pending"])
+                stack[-1]["pending"] = []
+    if stack:
+        raise ValueError("unbalanced fvSolution dictionaries")
+    if len(bridges) != 1:
+        raise ValueError("exactly one AdaptiveFixedP solver dictionary required")
+    return bridges[0]
+
+
 def _rewrite_bridge(case, mode, socket_path, cfg):
     path = case / "system/fvSolution"
     text = path.read_text()
-    if "solver AdaptiveFixedP;" not in text:
-        raise ValueError("case pressure solver must be AdaptiveFixedP")
+    entries = _bridge_entries(text)
     substitutions = {"mode": mode, "socketPath": '"' + str(socket_path) + '"',
                      "adaptiveAtol": repr(cfg.mg.absolute_tolerance), "adaptiveRtol": repr(cfg.mg.tolerance),
                      "maxIter": str(cfg.mg.max_cycles)}
+    edits = []
     for key, value in substitutions.items():
-        text, count = re.subn(r"\b" + key + r"\s+[^;]+;", key + " " + value + ";", text)
-        if count != 1:
+        matches = [e for e in entries if e[0].group() == key]
+        if len(matches) != 1 or len(matches[0]) != 3:
             raise ValueError("exactly one bridge control required: " + key)
+        token = matches[0][1]
+        edits.append((token.start(), token.end(), value))
+    for start, end, value in sorted(edits, reverse=True):
+        text = text[:start] + value + text[end:]
     path.write_text(text)
 
 
@@ -273,11 +339,11 @@ def summarize_service_timing(stream):
             raise ValueError("invalid measured service phase: " + name)
         result[name] = float(sum(values))
     result["phase_scope"] = ("service includes admission and MG total; MG total includes setup, solve, "
-                             "feature, verification, recovery and orchestration. Nested totals must not be added.")
+                             "feature, verification, recovery, orchestration and the temporal controller when enabled. Nested totals must not be added.")
     return result
 
 
-def _one_run(out, prepared, contract, run_dir, cfg, settings, arm, timeout, hardware):
+def _one_run(out, prepared, contract, run_dir, cfg, settings, arm, timeout, hardware, *, smoother_policy=None):
     case = out / "case"
     shutil.copytree(prepared, case)
     mode = "classical" if arm == "classical" else "hs"
@@ -289,12 +355,16 @@ def _one_run(out, prepared, contract, run_dir, cfg, settings, arm, timeout, hard
                   initial_conditions_sha256=contract["initial_conditions_sha256"],
                   boundary_conditions_sha256=contract["boundary_conditions_sha256"],
                   fixed_p_sha256=None, dt_schedule=[], end_time=0., hardware=hardware,
-                  execution_threads=settings.get("torch_threads", 1), pressure_gauge="absolute",
+                  execution_threads=settings.get("torch_threads", 1), pressure_gauge=contract.get('pressure_gauge', 'absolute'),
                   stopping_criteria=dict(rtol=cfg.mg.tolerance, atol=cfg.mg.absolute_tolerance,
                                          max_cycles=cfg.mg.max_cycles, residual_reference="initial_raw_l2"),
                   continuity={"passed": False}, fields={}, evidence={}, timing={})
     input_key, input_hash = input_fingerprint(contract)
     status[input_key] = input_hash
+    if experiment_kind(contract) == SLOSHING_KIND:
+        status['physics_contract'] = contract
+    if smoother_policy is not None:
+        status["smoother_policy"] = smoother_policy if arm == "H_S" else "classical"
     process = bridge = None
     foam_wall = startup = 0.
     execution_wall = None
@@ -305,6 +375,8 @@ def _one_run(out, prepared, contract, run_dir, cfg, settings, arm, timeout, hard
         argv = [sys.executable, "-c", "from adaptive_mg.v67.h2_fixed_p.study import main; main()",
                 "serve", "--run-dir", str(run_dir), "--case-contract", str(case / "contract.json"),
                 "--socket", str(socket_path), "--mode", mode, "--evidence", str(evidence), "--timeout", str(timeout)]
+        if smoother_policy is not None and arm == "H_S":
+            argv.extend(["--smoother-policy", smoother_policy])
         env = dict(os.environ)
         source = str(Path(__file__).resolve().parents[3])
         env["PYTHONPATH"] = source + os.pathsep + env.get("PYTHONPATH", "")
@@ -338,10 +410,10 @@ def _one_run(out, prepared, contract, run_dir, cfg, settings, arm, timeout, hard
             parsed = parse_solver_log(log_path.read_text(), contract, settings["continuity_max_cumulative"])
             fields = collect_fields(case, contract)
             status["reaction_evidence"] = fields["reaction_evidence"]
-            if experiment_kind(contract) == VARIABLE_DENSITY_KIND:
+            if experiment_kind(contract) in (*NONREACTING_GAS_KINDS, SLOSHING_KIND):
                 status["physics_evidence"] = fields["physics_evidence"]
                 if not fields["physics_evidence"]["passed"]:
-                    raise ValueError("nonreacting variable-density physics checks failed: " + json.dumps(fields["physics_evidence"]))
+                    raise ValueError("nonreacting flow physics checks failed: " + json.dumps(fields["physics_evidence"]))
             elif not fields["reaction_evidence"]["positive_heat_release_observed"]:
                 raise ValueError("no positive saved heat release; cannot validate this as a reacting-flame benchmark")
             if any(not any(np.isclose(t, x, rtol=1.e-8, atol=1.e-13) for x in parsed["times"]) for t in fields["sample_times"]):
@@ -372,6 +444,9 @@ def _one_run(out, prepared, contract, run_dir, cfg, settings, arm, timeout, hard
                                       neural_apply_calls=int(uses), pressure_calls=len(stream),
                                       producer="this runner launched real foamRun and persistent pressure service")
             status["timing"].update(summarize_service_timing(stream))
+            status["timing"]["policy_seconds"] = sum(row.get("step", {}).get("stats", {}).get("policy_seconds", 0.) for row in stream)
+            status["timing"]["smoother_refreshes"] = sum(row.get("step", {}).get("stats", {}).get("smoother_refreshed", False) for row in stream)
+            status["timing"]["smoother_reuses"] = sum(row.get("step", {}).get("stats", {}).get("smoother_reused", False) for row in stream)
             status["timing"]["pressure_seconds"] = parsed["pressure_seconds"]
         except Exception as exc:
             status["success"] = False
@@ -392,7 +467,7 @@ def _one_run(out, prepared, contract, run_dir, cfg, settings, arm, timeout, hard
     return status
 
 
-def run_paired(run_dir, case, output, *, repeats=3, timeout=3600.):
+def run_paired(run_dir, case, output, *, repeats=3, timeout=3600., smoother_policy=None):
     """Run identical prepared CFD cases in independent C/H_S process pairs."""
     from .study import load_run, load_expert, check_freeze
 
@@ -415,6 +490,13 @@ def run_paired(run_dir, case, output, *, repeats=3, timeout=3600.):
     if out.exists():
         raise FileExistsError("new coupled output directory required")
     contract = _verify_prepared(prepared)
+    temporal_evidence = {}
+    if smoother_policy is not None:
+        from ..smoother_reuse.study import policy_solver
+        checked = policy_solver(run_dir, cfg, load_expert(run_dir, cfg), smoother_policy, split=contract["split"])
+        smoother_policy = checked.policy
+        temporal_evidence = dict(smoother_policy=smoother_policy,
+            temporal_training_sha256=file_hash(run_dir/"reuse/training.json"))
     if contract["split"] not in ("validation", "test"):
         raise ValueError("coupled evaluation requires an independent validation/test case")
     if contract["split"] == "test":
@@ -443,7 +525,8 @@ def run_paired(run_dir, case, output, *, repeats=3, timeout=3600.):
     write_json(out / "protocol.json", dict(case_contract=contract, tolerances=tolerances,
         continuity_limit=settings["continuity_max_cumulative"], hardware=hardware, repeats=repeats,
         run_manifest_sha256=file_hash(run_dir / "run_manifest.json"), configuration_digest=manifest["configuration_digest"],
-        source_digest=manifest["source_digest"], fixed_P=True, world_model_enabled=False))
+        source_digest=manifest["source_digest"], fixed_P=True,
+        world_model_enabled=bool(smoother_policy and smoother_policy.startswith("world")), **temporal_evidence))
     rng = np.random.default_rng(settings.get("seed", 20261010))
     first = int(rng.integers(0, 2))
     pairs = []
@@ -454,7 +537,8 @@ def run_paired(run_dir, case, output, *, repeats=3, timeout=3600.):
             destination = out / f"repeat_{repeat:03d}" / arm
             destination.mkdir(parents=True)
             try:
-                runs[arm] = _one_run(destination, prepared, contract, run_dir, cfg, settings, arm, timeout, hardware)
+                options = dict(smoother_policy=smoother_policy) if smoother_policy is not None else {}
+                runs[arm] = _one_run(destination, prepared, contract, run_dir, cfg, settings, arm, timeout, hardware, **options)
             except Exception as exc:
                 # Preparation/copy/bridge-dictionary errors also remain visible.
                 # This row explicitly does not attest that CFD was launched.
@@ -476,7 +560,8 @@ def run_paired(run_dir, case, output, *, repeats=3, timeout=3600.):
                   repeats=repeats, success=success, speed_claim_eligible=success, pairs=pairs,
                   full_cfd_speedup=float(np.median(wall["classical"]) / np.median(wall["H_S"])) if success else None,
                   pressure_speedup=float(np.median(pressure["classical"]) / np.median(pressure["H_S"])) if success else None,
-                  world_model_enabled=False, original_case_modified=False,
+                  world_model_enabled=bool(smoother_policy and smoother_policy.startswith("world")),
+                  original_case_modified=False, **temporal_evidence,
                   physical_claim="paired field agreement at saved times, not independent experimental physics validation",
                   provenance="locally launched online CFD runs; native compilation/runtime success must be established on target machine")
     write_json(out / "report.json", report)

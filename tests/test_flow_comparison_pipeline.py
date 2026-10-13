@@ -104,6 +104,55 @@ def test_missing_openfoam_never_generates_a_surrogate(tmp_path, monkeypatch):
     assert not (tmp_path/"run/families").exists()
 
 
+def test_collect_one_keeps_full_plan_for_resume_without_claiming_full_collection(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(runner, "preflight", lambda plan: None)
+    def collect(root, family, case, plan):
+        calls.append((family, case["name"]))
+        return root/"recording_fixture"
+    monkeypatch.setattr(runner, "collect_case", collect)
+    result = runner.main(["--output", str(tmp_path/"run"), "--with-h2",
+        "--stop-after", "collect", "--collect-one", "lox_he_sloshing", "tune_slosh"])
+    assert calls == [("lox_he_sloshing", "tune_slosh")]
+    assert result["status"] == "partial" and result["completed_through"] == "collect_one"
+    assert not result["hydrogen_combustion_validated"] and not result["world_model_benefit_established"]
+    pinned = runner.check_plan(tmp_path/"run", arguments(tmp_path, "--resume"))
+    assert len(pinned["families"]["lox_he_sloshing"]["cases"]) == 6
+    assert pinned["hydrogen"]["enabled"]
+    resumed = []
+    def advance(root, family, plan, stop):
+        resumed.append((family, stop))
+        return {"completed_through": stop}
+    monkeypatch.setattr(runner, "advance_family", advance)
+    runner.main(["--output", str(tmp_path/"run"), "--resume", "--stop-after", "collect"])
+    assert resumed == [(family, "collect") for family in pinned["families"]]
+
+
+@pytest.mark.parametrize("options", [
+    ["--collect-one", "lox_he_sloshing", "tune_slosh"],
+    ["--stop-after", "collect", "--collect-one", "lox_he_sloshing", "test_fill"],
+    ["--stop-after", "collect", "--collect-one", "lox_he_sloshing", "missing"],
+    ["--stop-after", "collect", "--families", "h2_crossflow", "--collect-one", "lox_he_sloshing", "tune_slosh"],
+])
+def test_collect_one_invalid_scope_rejected_before_creating_output(tmp_path, options):
+    with pytest.raises(SystemExit):
+        runner.main(["--output", str(tmp_path/"run"), *options])
+    assert not (tmp_path/"run").exists()
+
+
+def test_collect_one_failure_is_preserved_and_does_not_advance_other_cases(tmp_path, monkeypatch):
+    monkeypatch.setattr(runner, "preflight", lambda plan: None)
+    def fail(*args):
+        raise RuntimeError("native field checks failed")
+    monkeypatch.setattr(runner, "collect_case", fail)
+    with pytest.raises(RuntimeError, match="native field checks"):
+        runner.main(["--output", str(tmp_path/"run"), "--stop-after", "collect",
+                     "--collect-one", "lox_he_sloshing", "tune_slosh"])
+    result = runner.read(tmp_path/"run/status.json")
+    assert result["status"] == "failed" and result["results_preserved"]
+    assert not result["families"]
+
+
 def clone_fixture(tmp_path, monkeypatch):
     from adaptive_mg.v67.h2_fixed_p import study as base
     from adaptive_mg.v67.smoother_reuse import study as reuse

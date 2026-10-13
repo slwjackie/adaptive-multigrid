@@ -47,5 +47,20 @@
     "previous_full_suite": "top-level source_digest and pytest describe the pre-fix version",
     "actual_cfd_executed": false
   },
-  "scope": "Implementation, numerical unit/regression tests, and dictionary generation only; no CFD speed or physical fidelity claim"
+  "scope": "Implementation, numerical unit/regression tests, and dictionary generation only; no CFD speed or physical fidelity claim",
+  "sloshing_alpha_recheck": {
+    "source_digest": "cf1e6deafbc81dedeb60d961d27b981130173a816c9e894b9a2bb75ed8fc6495",
+    "command": "OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 python -m pytest tests/test_propulsion_flow_generators.py tests/test_new_flow_physics.py tests/test_flow_comparison_pipeline.py -ra",
+    "passed": 60,
+    "skipped": 0,
+    "failed": 0,
+    "alpha_linear_solver_tolerance_before": 1e-10,
+    "alpha_linear_solver_tolerance_after": 1e-12,
+    "alpha_bounds_acceptance_tolerance_unchanged": 1e-08,
+    "scope": "Generator controls, unchanged raw-field bound gate, single train/tune collection and full-plan resume; CFD dependencies mocked in pipeline tests",
+    "full_suite_rerun": false,
+    "actual_cfd_executed": false,
+    "overshoot_resolution_confirmed": false,
+    "next_step": "WSL tune_slosh single-case native collection, then full collection only if it passes"
+  }
 }

@@ -196,7 +196,10 @@ interpolationSchemes { default linear; }
 snGradSchemes { default orthogonal; }
 """)
     # v13 source now uses nCorrectors/nSubCycles in alpha solver controls;
-    # historical nAlphaCorr/nAlphaSubCycles are not used here.
+    # historical nAlphaCorr/nAlphaSubCycles are not used here. Tighten the
+    # implicit alpha predictor solve, not the field acceptance criterion.
+    # Its residual tolerance is not a bound on accumulated alpha overshoot;
+    # actual saved fields must still pass the unchanged 1e-8 bound check.
     solution = c.foam_header("fvSolution") + f"""solvers
 {{
     "alpha.lox.*"
@@ -207,7 +210,7 @@ snGradSchemes { default orthogonal; }
         MULES {{ nIter 10; tolerance 1e-3; }}
         solver smoothSolver;
         smoother symGaussSeidel;
-        tolerance 1e-10;
+        tolerance 1e-12;
         relTol 0;
     }}
     "pcorr.*" {{ solver PCG; preconditioner DIC; tolerance 1e-10; relTol 0; maxIter 600; }}

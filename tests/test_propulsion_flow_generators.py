@@ -81,6 +81,10 @@ def test_slosh_discrete_volume_hydrostatic_pressure_and_property_binding(tmp_pat
     assert 'p_rghFinal { $p_rgh; }' in (root/'system/fvSolution').read_text()
     assert 'pRefCell 960;' in (root/'system/fvSolution').read_text()
     assert 'nSubCycles 2;' in (root/'system/fvSolution').read_text()
+    alpha_controls = (root/'system/fvSolution').read_text().split('"alpha.lox.*"', 1)[1].split('"pcorr.*"', 1)[0]
+    native_alpha = (root/'system/fvSolution.native').read_text().split('"alpha.lox.*"', 1)[1].split('"pcorr.*"', 1)[0]
+    assert alpha_controls == native_alpha and 'tolerance 1e-12;' in alpha_controls
+    assert contract['physics_checks']['alpha_bounds_tolerance'] == 1e-8
     assert 'type fixedFluxPressure;' in (root/'0/p_rgh').read_text()
     basis = json.loads((root/'constant/property_basis.json').read_text())
     assert basis['version'] == '7.2.0' and basis['pressure_Pa'] == a.pressure

@@ -326,8 +326,15 @@ def collect_case(root, family, case, plan):
             result = shared.check_native_recording(recording, evidence, executed)
             fields = collect_fields(executed, contract)
             physics = collection_physics(fields, family)
+            # Keep failed field evidence too, without creating a successful
+            # recording profile that --resume could mistake for a pass.
+            checks_path = executed/"native_field_checks.json"
+            write(checks_path, dict(case_id=case["name"], family=family,
+                physics_evidence=physics, sample_times=fields["sample_times"],
+                field_files_sha256=fields["hashes"]))
             if physics.get("passed") is not True:
-                raise RuntimeError("native field checks failed: " + json.dumps(physics))
+                raise RuntimeError("native field checks failed for " + family + "/" + case["name"]
+                                   + "; see " + str(checks_path) + ": " + json.dumps(physics))
             if (executed/"dynamicCode").is_dir() and not (prepared/"dynamicCode").exists():
                 shutil.copytree(executed/"dynamicCode", prepared/"dynamicCode")
             write(profile, dict(case_id=case["name"], physics_evidence=physics,
@@ -753,6 +760,8 @@ def parser():
     p.add_argument("--repeats", type=int)
     p.add_argument("--timeout", type=float)
     p.add_argument("--stop-after", choices=STAGES, default="probe")
+    p.add_argument("--collect-one", nargs=2, metavar=("FAMILY", "CASE"),
+                   help="with --stop-after collect, check one train/tune case; resume without this option to collect all")
     p.add_argument("--dry-run", action="store_true", help="write the pinned plan only; no native tools required")
     p.add_argument("--resume", action="store_true", help="continue the same pinned plan; keep completed stages")
     p.add_argument("--include-legacy-control", action="store_true", help="also probe the original zero-composition training cohort")
@@ -774,6 +783,13 @@ def main(argv=None):
         p.error("positive repeats required")
     if args.timeout is not None and (not math.isfinite(args.timeout) or args.timeout <= 0):
         p.error("finite positive timeout required")
+    if args.collect_one and (args.stop_after != "collect" or args.dry_run):
+        p.error("--collect-one requires --stop-after collect and no --dry-run")
+    if args.collect_one:
+        family, name = args.collect_one
+        if family not in FAMILIES or not any(c["name"] == name and c["split"] in ("train", "tune")
+                                             for c in cases_for(family)):
+            p.error("--collect-one requires a declared train/tune case; no held-out case debugging")
     root = args.output
     if args.resume:
         plan = check_plan(root, args)
@@ -781,6 +797,8 @@ def main(argv=None):
         if root.exists():
             p.error("output exists; use --resume or a new directory")
         plan = build_plan(args, read(args.config))
+        if args.collect_one and args.collect_one[0] not in plan["families"]:
+            p.error("--collect-one family must be included in the plan")
         root.mkdir(parents=True)
         write(root/"plan.json", plan)
         for family, value in plan["families"].items():
@@ -790,8 +808,22 @@ def main(argv=None):
     summary = dict(status="running", completed_through=stop, output=str(root), families={},
                    world_model_benefit_established=False, hydrogen_combustion_validated=False)
     try:
+        if args.collect_one and args.collect_one[0] not in plan["families"]:
+            raise ValueError("--collect-one family must be included in the plan")
         if STAGES.index(stop) >= STAGES.index("collect"):
             preflight(plan)
+        if args.collect_one:
+            family, name = args.collect_one
+            case = next(c for c in plan["families"][family]["cases"] if c["name"] == name)
+            print("[collect one]", family, name, flush=True)
+            recording = collect_case(root, family, case, plan)
+            summary.update(status="partial", completed_through="collect_one",
+                           collected_case=dict(family=family, case=name, recording=str(recording)),
+                           scope="one train/tune case only; full collection and validation remain pending")
+            write(root/"summary.json", summary)
+            write(root/"status.json", summary)
+            print(json.dumps(summary, indent=2), flush=True)
+            return summary
         with_h2 = plan.get("hydrogen", {}).get("enabled", False)
         primary_stop = "validation" if with_h2 and stop == "test" else stop
         if stop != "plan":

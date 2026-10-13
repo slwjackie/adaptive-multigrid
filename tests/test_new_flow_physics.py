@@ -69,6 +69,21 @@ def test_slosh_checks_conserve_against_initial_not_first_saved_volume():
     assert result['interface_moves'] and not result['liquid_volume_conserved'] and not result['passed']
 
 
+@pytest.mark.parametrize('overshoot,accepted', [(5e-9, True), (1.5491555e-8, False)])
+def test_small_slosh_overshoot_retains_raw_fields_and_original_acceptance(overshoot, accepted):
+    fields, contract = slosh_fields(), slosh_contract()
+    alpha = fields['alpha.lox']
+    delta = 1 + overshoot - alpha[1, 0]
+    alpha[1, 0] += delta
+    alpha[1, 4] -= delta  # preserve volume and isolate the bound check
+    before = alpha.copy()
+    result = sloshing_field_evidence(fields, contract)
+    assert result['liquid_volume_conserved'] and result['interface_moves']
+    assert result['alpha_bounded'] is accepted and result['passed'] is accepted
+    assert result['alpha_maximum'] == 1 + overshoot
+    np.testing.assert_array_equal(alpha, before)
+
+
 @pytest.mark.parametrize('corruption', ['stationary', 'bounds', 'nonfinite', 'initial'])
 def test_sloshing_cannot_pass_bad_interface_or_fields(corruption):
     fields, contract = slosh_fields(), slosh_contract()

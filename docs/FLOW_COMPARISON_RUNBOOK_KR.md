@@ -123,6 +123,46 @@ python -u scripts/run_v6_7_flow_comparison.py \
 
 격자를 늘릴 때는 설정 파일의 시간 간격도 CFL·모세관 시간 제한에 맞게 조정한 새 계획을 만든다. `--n`만 변경해서 모든 기존 시간 간격을 그대로 사용할 수 있다고 가정하지 않는다.
 
+### `tune_slosh`의 작은 체적분율 초과 재검증
+
+WSL의 v3 수집에서 `alpha_maximum=1.000000015491555`로 기존 `alpha_bounds_tolerance=1e-8` 검사가 실패했다. 액체 체적 상대오차 최댓값은 약 `4.55e-9`였고, 계면 운동과 유한한 압력·속도 검사도 통과했다. 이는 작은 수치적 overshoot이며, 이 출력만으로 발산이나 원인을 단정하지 않는다. 기계 정밀도 수준의 반올림 오차라고 부르지도 않는다.
+
+우선 생성기의 alpha 선형 풀이 잔차 기준을 `1e-10 → 1e-12`로 강화했다. **체적분율 합격 기준 `1e-8`, 압력 허용오차, MULES 제어값은 유지한다.** alpha 잔차와 체적분율 최대오차는 같은 양이 아니므로 이 변경이 통과를 보장하지 않는다. alpha를 잘라내거나 이전 결과를 재분류하지 않는다. 강화된 alpha 풀이 비용도 이후 모든 solver arm의 전체 CFD 시간에 동일하게 포함된다.
+
+아래 명령은 새 v4 계획에 세 유동·H₂ 후속 검증을 모두 포함하되, 먼저 실패했던 train/tune 케이스 하나만 실제 native bridge로 수집한다. C++ 플러그인은 이전 `p_rgh` 대응 버전으로 이미 다시 빌드했다면 재빌드할 필요 없다.
+
+```bash
+cd /home/jackie/adaptive-multigrid-h2
+git pull --ff-only origin research/modulated-shear-temporal
+source /opt/openfoam13/etc/bashrc
+source .venv/bin/activate
+export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
+export LD_LIBRARY_PATH="$FOAM_USER_LIBBIN${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+set -o pipefail
+mkdir -p artifacts/merge_verify_logs_v4
+
+sha256sum --quiet -c FLOW_COMPARISON_SOURCE.sha256 &&
+sha256sum --quiet -c PACKAGE_MANIFEST.sha256 &&
+python -m pytest tests/test_propulsion_flow_generators.py tests/test_new_flow_physics.py tests/test_flow_comparison_pipeline.py -ra &&
+python -u scripts/run_v6_7_flow_comparison.py \
+  --output artifacts/three_flow_merge_check_v4 \
+  --families lox_he_sloshing shear_composition h2_crossflow \
+  --profile quick --n 31 --repeats 3 \
+  --independent-grus --with-h2 --h2-source-family h2_crossflow \
+  --stop-after collect --collect-one lox_he_sloshing tune_slosh \
+  2>&1 | tee artifacts/merge_verify_logs_v4/tune_slosh.log
+```
+
+단독 수집 성공 시 `status: partial`, `completed_through: collect_one`으로 표시한다. 전체 수집을 완료했다는 뜻이 아니다. 통과한 케이스의 원본 필드·서비스 증거를 재검사하여 다음 전체 수집에서 재사용한다.
+
+```bash
+python -u scripts/run_v6_7_flow_comparison.py \
+  --output artifacts/three_flow_merge_check_v4 --resume --stop-after collect \
+  2>&1 | tee artifacts/merge_verify_logs_v4/collect.log
+```
+
+다시 실패하면 전체 수집으로 넘어가지 않는다. `families/lox_he_sloshing/record_cases/tune_slosh/native_field_checks.json`에 실패한 수치와 필드 해시를 저장한다. `log.foamRun`의 alpha residual·극값·Courant 수·연속성 및 필요하면 시간 간격 민감도를 확인한다. 이 기록은 성공한 `physics_profile.json`을 만들지 않으며 실패한 디렉터리는 그대로 보존한다. v3는 이전 설정의 증거로 보존하고 새 코드로 resume하지 않는다. Python 회귀시험은 실제 WSL CFD 통과를 대신하지 않는다.
+
 ## 비반응 비교 → 실제 H₂ 반응유동 검증
 
 기존 `run_v6_7_shear_pipeline.py --with-h2`는 별도 H₂ 연구를 실행했으며 새 3종 비교에서 선택한 구조를 전달하지 않았다. 이제 `run_v6_7_flow_comparison.py --with-h2`가 다음 단계를 연결한다.

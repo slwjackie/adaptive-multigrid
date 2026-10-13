@@ -206,3 +206,151 @@ def test_validation_failure_blocks_test_and_freeze(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="validation failure"):
         runner.advance_family(tmp_path, "shear_composition", value, "test")
     assert not any(row[1].endswith("freeze") or row[2] == "test" for row in calls)
+
+
+def test_reacting_plan_is_opt_in_predeclared_and_pinned(tmp_path):
+    assert plan(tmp_path)["hydrogen"] == {"enabled": False}
+    value = plan(tmp_path, "--with-h2")
+    h2 = value["hydrogen"]
+    assert h2["source_family"] == "h2_crossflow"
+    assert h2["weights_transferred"] is False
+    assert {c["split"] for c in h2["cases"]} == {"train", "tune", "validation", "test"}
+    for options in (("--with-h2", "--families", "shear_composition"),
+                    ("--h2-source-family", "shear_composition"),
+                    ("--with-h2", "--h2-end-time", "0"),
+                    ("--with-h2", "--h2-delta-t", "nan")):
+        with pytest.raises(ValueError):
+            plan(tmp_path, *options)
+    runner.main(["--output", str(tmp_path/"run"), "--dry-run", "--with-h2"])
+    assert runner.check_plan(tmp_path/"run", arguments(tmp_path, "--resume"))["hydrogen"] == h2
+    with pytest.raises(ValueError, match="cannot change H2"):
+        runner.check_plan(tmp_path/"run", arguments(tmp_path, "--resume", "--h2-source-family", "shear_composition"))
+
+
+def test_resume_cannot_append_reacting_experiment_after_inspecting_results(tmp_path):
+    runner.main(["--output", str(tmp_path/"run"), "--dry-run"])
+    with pytest.raises(ValueError, match="cannot add H2"):
+        runner.check_plan(tmp_path/"run", arguments(tmp_path, "--resume", "--with-h2"))
+
+
+def test_hydrogen_inherits_actual_cnn_and_world_not_inert_physics(tmp_path):
+    value = plan(tmp_path, "--with-h2")
+    source = value["families"]["lox_he_sloshing"]["configs"]["per_level_l01"]
+    source["smoother_reuse"].update(hidden=64, world_memory="independent_roles", world_head="role_mlp")
+    target = runner.hydrogen_settings(source, value, world_selected=True)
+    assert target["training"]["smoother_architecture"] == "per_level"
+    assert target["solver"]["smoother_levels"] == [0, 1]
+    assert target["solver"]["mg"]["max_cycles"] == 600
+    assert target["smoother_reuse"]["hidden"] == 64
+    assert target["smoother_reuse"]["world_memory"] == "independent_roles"
+    assert target["physical_tolerances"] == value["hydrogen"]["base_config"]["physical_tolerances"]
+    assert set(target["physical_tolerances"]["fields"]) == {"T", "H2", "U", "p"}
+    assert target["benchmark"]["experiment_kind"] == "h2_combustion"
+    assert not runner.hydrogen_settings(source, value, world_selected=False)["smoother_reuse"]["fit_world"]
+    target["training"]["hidden"] = 99
+    assert source["training"]["hidden"] != 99
+
+
+def test_reacting_collection_requires_real_finite_positive_heat_release():
+    for evidence in ({}, dict(finite_saved_Qdot=True, positive_heat_release_observed=False),
+                     dict(finite_saved_Qdot=False, positive_heat_release_observed=True)):
+        assert not runner.collection_physics({"reaction_evidence": evidence}, runner.H2_FAMILY)["passed"]
+    assert runner.collection_physics({"reaction_evidence": dict(
+        finite_saved_Qdot=True, positive_heat_release_observed=True)}, runner.H2_FAMILY)["passed"]
+    assert runner.generator_for(runner.H2_FAMILY).name == "generate.py"
+    assert runner.generator_options(runner.H2_FAMILY, {"temperature": 325}) == ["--inlet-temperature", "325"]
+
+
+def transfer_fixture(tmp_path, monkeypatch):
+    from adaptive_mg.v67.smoother_reuse import study as reuse
+    value = plan(tmp_path, "--with-h2")
+    write_json(tmp_path/"plan.json", value)
+    base = tmp_path/"families/h2_crossflow"
+    source = base/"studies/per_level_l01"
+    write_json(base/"selection.json", dict(selection_split="tune", test_read=False,
+        world_study=None, selected_two_level_cnn="per_level_l01"))
+    write_json(source/"configuration.json", value["families"]["h2_crossflow"]["configs"]["per_level_l01"])
+    for name in ("expert/candidate.pt", "reuse/training.json"):
+        write_json(source/name, {"fixture": True})
+    write_json(source/"comparison_validation.json", dict(success=True, split="validation",
+        full_cfd_wall_clock_measured=True, coupled={"case": {"native": {"success": True}}}))
+    monkeypatch.setattr(reuse, "load", lambda out: (None, None, None, None, {}))
+    monkeypatch.setattr(reuse, "trained", lambda *a: {})
+    return value, source
+
+
+def test_transfer_pin_rejects_changed_source_and_never_reads_test(tmp_path, monkeypatch):
+    value, source = transfer_fixture(tmp_path, monkeypatch)
+    settings, pin = runner.pin_hydrogen_transfer(tmp_path, value)
+    assert pin["weights_transferred"] is False and pin["test_read_for_selection"] is False
+    assert settings["training"]["smoother_architecture"] == "per_level"
+    write_json(source/"comparison_test.json", {"do_not_read": True})
+    assert runner.pin_hydrogen_transfer(tmp_path, value)[1] == pin
+    write_json(source/"expert/candidate.pt", {"fixture": "changed"})
+    with pytest.raises(ValueError, match="frozen hydrogen transfer changed"):
+        runner.pin_hydrogen_transfer(tmp_path, value)
+
+
+def test_failed_source_physics_cannot_transfer(tmp_path, monkeypatch):
+    value, source = transfer_fixture(tmp_path, monkeypatch)
+    report = runner.read(source/"comparison_validation.json")
+    report["coupled"]["case"]["native"]["success"] = False
+    write_json(source/"comparison_validation.json", report)
+    with pytest.raises(ValueError, match="coupled physical validation"):
+        runner.pin_hydrogen_transfer(tmp_path, value)
+    assert not (tmp_path/"hydrogen_transfer.json").exists()
+
+
+@pytest.mark.parametrize("fail_h2", [False, True])
+def test_integrated_workflow_gates_all_tests_on_reacting_validation(tmp_path, monkeypatch, fail_h2):
+    calls = []
+    monkeypatch.setattr(runner, "preflight", lambda *a: None)
+    def primary(root, family, plan, stop):
+        calls.append((family, stop))
+        return {"completed_through": stop}
+    def hydrogen(root, plan, stop):
+        calls.append(("h2", stop))
+        if fail_h2:
+            raise RuntimeError("reacting validation failed")
+        return {"hydrogen_combustion_validated": True}
+    monkeypatch.setattr(runner, "advance_family", primary)
+    monkeypatch.setattr(runner, "advance_hydrogen", hydrogen)
+    args = ["--output", str(tmp_path/"run"), "--with-h2", "--stop-after", "test"]
+    if fail_h2:
+        with pytest.raises(RuntimeError, match="reacting validation failed"):
+            runner.main(args)
+        assert not any(stage == "test" for _, stage in calls)
+        assert not runner.read(tmp_path/"run/summary.json")["hydrogen_combustion_validated"]
+    else:
+        result = runner.main(args)
+        assert calls[:4] == [(f, "validation") for f in runner.FAMILIES[:3]] + [("h2", "validation")]
+        assert calls[-1] == ("h2", "test")
+        assert result["hydrogen_combustion_validated"]
+
+
+def test_hydrogen_freezes_both_studies_before_test(tmp_path, monkeypatch):
+    value, source = transfer_fixture(tmp_path, monkeypatch)
+    calls = []
+    monkeypatch.setattr(runner.importlib.util, "find_spec", lambda *a: object())
+    monkeypatch.setattr(runner.shutil, "which", lambda *a: "/mock/chemkinToFoam")
+    monkeypatch.setattr(runner, "collect_case", lambda *a: tmp_path/"recordings")
+    out = tmp_path/"families/hydrogen_reacting/studies/selected_method"
+    write_json(out/"reuse/collection.json", {"probe": {"world_model_candidate": False}})
+    monkeypatch.setattr(runner, "prepare_arm", lambda *a: out)
+    monkeypatch.setattr(runner, "fit_and_score", lambda *a: {"models_available": False})
+    def evaluate(root, family, study, split, plan):
+        calls.append(split)
+        if split == "test":
+            assert (out/"freeze.json").exists() and (out/"reuse/freeze.json").exists()
+        report = dict(success=True, full_cfd_wall_clock_measured=True)
+        write_json(out/("comparison_"+split+".json"), report)
+        return report
+    monkeypatch.setattr(runner, "evaluate_study", evaluate)
+    def freeze(plan, out, temporal, name, *args):
+        calls.append("freeze")
+        write_json(out/("reuse/freeze.json" if temporal else "freeze.json"), {})
+    monkeypatch.setattr(runner, "command", freeze)
+    result = runner.advance_hydrogen(tmp_path, value, "test")
+    assert calls == ["validation", "freeze", "freeze", "test"]
+    assert result["held_out_test_completed"] and result["hydrogen_combustion_validated"]
+    assert not result["world_model_benefit_established"] and not result["chemistry_time_separately_measured"]

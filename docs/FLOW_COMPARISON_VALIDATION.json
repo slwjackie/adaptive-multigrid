@@ -1,9 +1,9 @@
 {
   "schema": "three-flow-implementation-validation-v1",
-  "source_digest": "b0b0efdab78e995f5e4706f73052f534275e52e178be402f4ef8f32666732662",
+  "source_digest": "1f286b29b9f0bd8b34d047f5dfd13c361ebbf0d42c9b1c1fb80cf48de7e4fd81",
   "pytest": {
     "command": "OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 python -m pytest -ra",
-    "passed": 951,
+    "passed": 960,
     "skipped": 1,
     "failed": 0,
     "skipped_reason": "Cantera is not installed; optional legacy reacting-case generation test skipped"
@@ -25,5 +25,15 @@
   "native_cfd_execution": "not_executed_openfoam_unavailable",
   "world_model_benefit_established": false,
   "physical_validation_completed": false,
+  "reacting_workflow": {
+    "implemented": true,
+    "entrypoint": "scripts/run_v6_7_flow_comparison.py --with-h2",
+    "transfer_mode": "architecture_retrained_on_h2",
+    "weights_transferred": false,
+    "control_flow_and_provenance_tests": "passed_with_mocked_CFD_dependencies",
+    "actual_reacting_cfd_executed": false,
+    "separate_chemistry_timer_implemented": false,
+    "full_cfd_wall_time_includes_chemistry": true
+  },
   "scope": "Implementation, numerical unit/regression tests, and dictionary generation only; no CFD speed or physical fidelity claim"
 }

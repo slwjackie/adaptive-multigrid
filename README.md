@@ -12,6 +12,14 @@ All speed comparisons include online policy and recovery costs; selection uses
 tune data and test follows frozen validation. No CFD speedup is established by
 implementing these options. See the [Korean runbook](docs/FLOW_COMPARISON_RUNBOOK_KR.md).
 
+Declare `--with-h2` in the initial plan to add actual H2/air reacting validation.
+The predeclared source flow (default `h2_crossflow`) supplies its tune-selected
+architecture, not its weights: CNN and world model are trained afresh on H2
+train/tune data, with a separate reactive tradeoff gate. Paired full-CFD wall
+time includes chemistry; T/H2/U/p and continuity checks gate held-out testing.
+Each nonreacting flow likewise has independently trained weights; a shared GRU
+shares memory across prediction roles, not across flow families.
+
 ## Earlier CFD experiment: modulated shear, temporal smoother reuse, H2 validation
 
 The primary benchmark is a spatial He/N2 coflow shear layer with smooth inlet

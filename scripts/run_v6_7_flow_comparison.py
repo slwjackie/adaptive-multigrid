@@ -38,6 +38,7 @@ REUSE_DRIVER = REPO / "scripts/run_v6_7_smoother_reuse.py"
 STAGES = ("plan", "generate", "collect", "probe", "validation", "test")
 FAMILIES = ("shear_composition", "lox_he_sloshing", "h2_crossflow", "shear_control")
 WORLD_KEYS = ("hidden", "world_memory", "world_head", "world_head_hidden")
+H2_FAMILY = "hydrogen_reacting"
 read, run_logged = shared.read, shared.run_logged
 
 
@@ -83,12 +84,16 @@ def cases_for(family):
 
 
 def generator_for(family):
+    if family == H2_FAMILY:
+        return REPO / "integrations/openfoam13/case/generate.py"
     name = "generate_shear_layer.py" if family.startswith("shear_") else (
         "generate_crossflow.py" if family == "h2_crossflow" else "generate_sloshing.py")
     return REPO / "integrations/openfoam13/case" / name
 
 
 def generator_options(family, case):
+    if family == H2_FAMILY:
+        return ["--inlet-temperature", str(case["temperature"])]
     if family.startswith("shear_"):
         mapping = dict(light_mass_fraction="he", fuel_speed="lower", air_speed="upper",
                        frequency="frequency", frequency_ratio="ratio", phase="phase",
@@ -155,10 +160,29 @@ def build_plan(args, config):
         for settings in prepared[family]["configs"].values():
             settings["smoother_reuse"]["baseline_repeats"] = args.repeats or 3
             settings["smoother_reuse"]["measurement_repeats"] = args.repeats or 3
+    hydrogen = dict(enabled=bool(args.with_h2))
+    if args.with_h2:
+        source_family = args.h2_source_family or "h2_crossflow"
+        if source_family not in families:
+            raise ValueError("H2 source family must be included in --families")
+        end = 2e-4 if args.h2_end_time is None else args.h2_end_time
+        dt = 1e-6 if args.h2_delta_t is None else args.h2_delta_t
+        if (not all(math.isfinite(v) and v > 0 for v in (end, dt)) or end/dt < 2
+                or not math.isclose(end/dt, round(end/dt), rel_tol=0, abs_tol=1e-8)):
+            raise ValueError("H2 times must be positive, with an integer number of >=2 steps")
+        path = REPO/"configs/v6_7_h2_smoother_reuse.json"
+        hydrogen.update(source_family=source_family, end_time=end, delta_t=dt,
+            base_config=read(path), base_config_path=str(path), base_config_sha256=file_hash(path),
+            cases=[dict(case, group=case["name"]) for case in shear.H2_CASES],
+            transfer_mode="architecture_retrained_on_h2", weights_transferred=False,
+            selection="predeclared source family; its tune-selected structure, validation gated",
+            test_selection_forbidden=True)
+    elif any(getattr(args, key) is not None for key in ("h2_source_family", "h2_end_time", "h2_delta_t")):
+        raise ValueError("H2 options require --with-h2 in the initial plan")
     return dict(schema=config["schema"], source_digest=source_digest(), runner_sha256=file_hash(Path(__file__)),
         input_config_sha256=file_hash(args.config), input_config=str(args.config),
         profile=profile_name, n=n, repeats=args.repeats or 3, timeout=args.timeout or 14400,
-        families=prepared, smoother_arms=arms, world_variants=variants,
+        families=prepared, smoother_arms=arms, world_variants=variants, hydrogen=hydrogen,
         full_factorial=bool(args.full_factorial), independent_grus=bool(args.independent_grus),
         include_legacy_control=bool(args.include_legacy_control), selection=config["selection"], notes=config["notes"],
         test_selection_forbidden=True, synthetic_fallback=False,
@@ -185,6 +209,15 @@ def check_plan(root, args):
         raise ValueError("--resume cannot add independent GRUs")
     if args.include_legacy_control and not plan["include_legacy_control"]:
         raise ValueError("--resume cannot add a legacy control")
+    hydrogen = plan.get("hydrogen", {"enabled": False})
+    if args.with_h2 and not hydrogen["enabled"]:
+        raise ValueError("--resume cannot add H2 validation; declare --with-h2 in a new plan")
+    for key in ("source_family", "end_time", "delta_t"):
+        value = getattr(args, "h2_"+key)
+        if value is not None and value != hydrogen.get(key):
+            raise ValueError("--resume cannot change H2 " + key)
+    if hydrogen["enabled"] and file_hash(Path(hydrogen["base_config_path"])) != hydrogen["base_config_sha256"]:
+        raise ValueError("H2 base configuration changed")
     for family, values in plan["families"].items():
         for arm, settings in values["configs"].items():
             if read(root/"configurations"/(family+"_"+arm+".json")) != settings:
@@ -221,6 +254,15 @@ def generate_case(root, family, case, plan):
     return target
 
 
+def collection_physics(fields, family):
+    if family == H2_FAMILY:
+        evidence = deepcopy(fields.get("reaction_evidence", {}))
+        evidence["passed"] = (evidence.get("positive_heat_release_observed") is True
+                              and evidence.get("finite_saved_Qdot") is True)
+        return evidence
+    return fields.get("physics_evidence", {})
+
+
 def collect_case(root, family, case, plan):
     """Record once, retaining real field evidence and compiled boundary code."""
     from adaptive_mg.v67.h2_fixed_p.study import configuration
@@ -240,7 +282,7 @@ def collect_case(root, family, case, plan):
         saved = read(profile)
         if (fields["hashes"] != saved["field_files_sha256"] or
                 fields["sample_times"] != saved["sample_times"] or
-                fields.get("physics_evidence", {}).get("passed") is not True):
+                collection_physics(fields, family).get("passed") is not True):
             raise ValueError("saved native CFD field evidence changed")
         return recording
     if executed.exists() or recording.exists():
@@ -249,7 +291,8 @@ def collect_case(root, family, case, plan):
         run_logged([sys.executable, REPO/"integrations/openfoam13/case/run_case.py", "--case", prepared,
                     "--prepare-only"], base/"logs"/(case["name"]+"_prepare.log"), plan["timeout"])
     contract = _verify_prepared(prepared)
-    cfg_path = root/"configurations"/(family+"_shared_l01.json")
+    recording_arm = plan["families"][family].get("recording_arm", "shared_l01")
+    cfg_path = root/"configurations"/(family+"_"+recording_arm+".json")
     _, cfg = configuration(cfg_path)
     shutil.copytree(prepared, executed)
     bridge = process = None
@@ -282,14 +325,15 @@ def collect_case(root, family, case, plan):
                     raise RuntimeError("recording service failed: " + str(service_log))
             result = shared.check_native_recording(recording, evidence, executed)
             fields = collect_fields(executed, contract)
-            physics = fields.get("physics_evidence", {})
+            physics = collection_physics(fields, family)
             if physics.get("passed") is not True:
                 raise RuntimeError("native field checks failed: " + json.dumps(physics))
             if (executed/"dynamicCode").is_dir() and not (prepared/"dynamicCode").exists():
                 shutil.copytree(executed/"dynamicCode", prepared/"dynamicCode")
             write(profile, dict(case_id=case["name"], physics_evidence=physics,
                 sample_times=fields["sample_times"], field_files_sha256=fields["hashes"],
-                observables=flow_metrics(fields["fields"], contract, fields["sample_times"])))
+                observables={} if family == H2_FAMILY else
+                    flow_metrics(fields["fields"], contract, fields["sample_times"])))
             write(executed/"collection_status.json", dict(result, success=True, cfd_process_wall_seconds=seconds,
                 scope="native recording with I/O overhead; not solver benchmark timing"))
         finally:
@@ -608,6 +652,97 @@ def advance_family(root, family, plan, stop):
     return summary
 
 
+def hydrogen_settings(source, plan, *, world_selected):
+    """Transfer a method, not inert weights or inert physical tolerances."""
+    settings = deepcopy(plan["hydrogen"]["base_config"])
+    settings["solver"] = deepcopy(source["solver"])
+    settings["solver"]["mg"]["max_cycles"] = 600
+    settings["training"] = deepcopy(source["training"])
+    settings["smoother_reuse"] = deepcopy(source["smoother_reuse"])
+    settings["smoother_reuse"]["fit_world"] = bool(world_selected)
+    settings["benchmark"].update(role="supplementary", experiment_kind="h2_combustion",
+                                 flow_family="counterflow_hydrogen_validation")
+    return settings
+
+
+def pin_hydrogen_transfer(root, plan):
+    from adaptive_mg.v67.smoother_reuse import study as reuse
+    from adaptive_mg.v67.world_model.data import file_hash
+    family = plan["hydrogen"]["source_family"]
+    base = root/"families"/family
+    selection = read(base/"selection.json")
+    if selection.get("selection_split") != "tune" or selection.get("test_read") is not False:
+        raise ValueError("H2 transfer requires test-independent tune selection")
+    chosen = selection["world_study"] or selection["selected_two_level_cnn"]
+    source = base/("world_studies" if selection["world_study"] else "studies")/chosen
+    _, _, _, _, contract = reuse.load(source)
+    reuse.trained(source, contract)
+    report = read(source/"comparison_validation.json")
+    if (report.get("success") is not True or report.get("split") != "validation"
+            or report.get("full_cfd_wall_clock_measured") is not True or not report.get("coupled")
+            or not all(r.get("success") is True for c in report["coupled"].values() for r in c.values())):
+        raise ValueError("source method has not passed coupled physical validation")
+    settings = hydrogen_settings(read(source/"configuration.json"), plan,
+                                 world_selected=bool(selection["world_study"]))
+    files = [base/"selection.json", source/"configuration.json", source/"expert/candidate.pt",
+             source/"reuse/training.json", source/"comparison_validation.json"]
+    pin = dict(schema="reacting-method-transfer-v1", source_family=family, source_study=chosen,
+        source_files_sha256={str(p.relative_to(root)): file_hash(p) for p in files},
+        plan_sha256=file_hash(root/"plan.json"), configuration=settings,
+        transfer_mode="architecture_retrained_on_h2", weights_transferred=False,
+        source_selection_split="tune", test_read_for_selection=False,
+        source_world_selected=bool(selection["world_study"]),
+        world_model_benefit_established=False,
+        target_world_gate="H2 train/tune probe must independently show refresh/reuse tradeoff")
+    target = root/"hydrogen_transfer.json"
+    if target.exists() and read(target) != pin:
+        raise ValueError("frozen hydrogen transfer changed")
+    write(target, pin)
+    return settings, pin
+
+
+def advance_hydrogen(root, plan, stop):
+    """Fresh reactive learning, then paired real CFD; no test-driven redesign."""
+    if importlib.util.find_spec("cantera") is None or not shutil.which("chemkinToFoam"):
+        raise RuntimeError("H2 validation requires Cantera and OpenFOAM chemkinToFoam")
+    settings, pin = pin_hydrogen_transfer(root, plan)
+    family = H2_FAMILY
+    local = deepcopy(plan)
+    h2 = plan["hydrogen"]
+    local["families"][family] = dict(cases=h2["cases"], timing=h2, recording_arm="selected_method")
+    config = root/"configurations"/(family+"_selected_method.json")
+    if config.exists() and read(config) != settings:
+        raise ValueError("saved H2 configuration changed")
+    write(config, settings)
+    recordings = [collect_case(root, family, case, local) for case in h2["cases"]]
+    out = prepare_arm(root, family, dict(id="selected_method"), local, recordings)
+    tune = fit_and_score(out, local)
+    validation = evaluate_study(root, family, out, "validation", local)
+    result = dict(completed_through="validation", transfer=pin,
+        study=str(out.relative_to(root)), probe=read(out/"reuse/collection.json")["probe"],
+        models_available=tune["models_available"], validation=validation,
+        hydrogen_combustion_validated=True, held_out_test_completed=False,
+        world_model_benefit_established=False,
+        timing_scope="measured full CFD process wall time including chemistry, transport, pressure and I/O",
+        chemistry_time_separately_measured=False,
+        accuracy_scope="T, H2, U, p and continuity against reference CFD; positive finite Qdot required; not experimental validation")
+    if stop == "test":
+        from adaptive_mg.v67.world_model.data import file_hash
+        freeze_path = root/"families"/family/"transfer_freeze.json"
+        frozen = dict(transfer_sha256=file_hash(root/"hydrogen_transfer.json"),
+                      validation_sha256=file_hash(out/"comparison_validation.json"))
+        if freeze_path.exists() and read(freeze_path) != frozen:
+            raise ValueError("H2 transfer changed after test freeze")
+        for temporal, path in ((False, out/"freeze.json"), (True, out/"reuse/freeze.json")):
+            if not path.exists():
+                command(local, out, temporal, "freeze")
+        write(freeze_path, frozen)
+        result.update(test=evaluate_study(root, family, out, "test", local),
+                      completed_through="test", held_out_test_completed=True)
+    write(root/"families"/family/"summary.json", result)
+    return result
+
+
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--output", type=Path, required=True)
@@ -623,6 +758,11 @@ def parser():
     p.add_argument("--include-legacy-control", action="store_true", help="also probe the original zero-composition training cohort")
     p.add_argument("--independent-grus", action="store_true", help="add independent role memories of widths 16/32/64")
     p.add_argument("--full-factorial", action="store_true", help="sweep WM on both two-level CNNs and couple every declared policy")
+    p.add_argument("--with-h2", action="store_true", help="after nonreacting validation, retrain the selected structure on reacting H2")
+    p.add_argument("--h2-source-family", choices=FAMILIES,
+                   help="predeclare structure source, default h2_crossflow; never select a source from test results")
+    p.add_argument("--h2-end-time", type=float, help="reacting duration, default 2e-4 s (smoke validation, not developed flame)")
+    p.add_argument("--h2-delta-t", type=float, help="reacting time step, default 1e-6 s")
     return p
 
 
@@ -652,12 +792,26 @@ def main(argv=None):
     try:
         if STAGES.index(stop) >= STAGES.index("collect"):
             preflight(plan)
+        with_h2 = plan.get("hydrogen", {}).get("enabled", False)
+        primary_stop = "validation" if with_h2 and stop == "test" else stop
         if stop != "plan":
             for family in plan["families"]:
                 print("[flow comparison]", family, "through", stop, flush=True)
                 write(root/"status.json", dict(status="running", family=family, target_stage=stop))
-                summary["families"][family] = advance_family(root, family, plan, stop)
+                summary["families"][family] = advance_family(root, family, plan, primary_stop)
                 write(root/"summary.json", summary)
+        if with_h2 and stop in ("validation", "test"):
+            print("[reacting H2] transfer and validation", flush=True)
+            summary["hydrogen"] = advance_hydrogen(root, plan, "validation")
+            summary["hydrogen_combustion_validated"] = summary["hydrogen"]["hydrogen_combustion_validated"]
+            write(root/"summary.json", summary)
+            if stop == "test":
+                for family in plan["families"]:
+                    summary["families"][family] = advance_family(root, family, plan, "test")
+                    write(root/"summary.json", summary)
+                summary["hydrogen"] = advance_hydrogen(root, plan, "test")
+        elif with_h2:
+            summary["hydrogen"] = dict(status="pending", reason="requires all primary validation gates first")
         summary["status"] = "complete"
         write(root/"summary.json", summary)
         write(root/"status.json", summary)

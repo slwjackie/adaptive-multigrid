@@ -12,7 +12,9 @@
 
 LOX–He는 헬륨으로 가압된 산소 탱크의 **계면 유체역학** 적용 사례다. 산소 증기, 기체 혼합, 벽면 열전달, 증발·응축, 능동 가압계통에 의한 탱크 압력 변화는 포함하지 않는다. 밀폐 비압축성 계산의 압력 기준점은 선형계의 영공간을 없애기 위한 것으로, 실제 탱크의 가압 제어 모델이 아니다.
 
-세 경우 모두 고정 Cartesian 격자와 현재 행렬의 잔차 검증을 사용한다. `p_rgh`도 기준점 적용 후의 대칭 양정치 행렬만 받는다. 원래 H₂ 반응유동 파이프라인은 별도의 적용 사례로 유지한다.
+세 경우 모두 고정 Cartesian 격자와 현재 행렬의 잔차 검증을 사용한다. `p_rgh`도 기준점 적용 후의 대칭 양정치 행렬만 받는다. 원래 H₂ 반응유동 파이프라인은 유지하며, 아래 `--with-h2`로 새 비교 실험에 반응유동 검증을 연결할 수 있다.
+
+세 유동은 같은 CNN·World Model 구조 후보군을 사용하지만 **유동별로 별도 학습·튜닝**한다. 따라서 가중치가 다르며 선택되는 GRU 폭·출력부도 달라질 수 있다. 현재 비교는 유동별 갱신 정책의 효과를 보는 것이며, 하나의 공통 가중치가 모든 유동에 일반화함을 입증하지 않는다. ‘공유 GRU’는 한 모델 안의 예측 역할 간 기억 공유이며, 유동 간 가중치 공유가 아니다.
 
 ## 비교 방법
 
@@ -90,6 +92,40 @@ python -u scripts/run_v6_7_flow_comparison.py \
 
 새 유동의 mesh/time-step 수렴성, 슬로싱 고유진동수·감쇠, 제트 궤적·혼합률의 실험 대조는 별도로 검증해야 한다. 생성된 케이스와 Python 테스트는 OpenFOAM Foundation 13에서의 실제 빌드·실행 검증을 대체하지 않는다.
 
-이번 구현 검증: 전체 Python 회귀시험 951개 통과, Cantera 미설치로 기존 반응유동 생성 시험 1개 건너뜀. 독립 C++ wire 검사 및 27개 케이스 생성·계약 검증 통과. 상세 범위는 `FLOW_COMPARISON_VALIDATION.json`에 기록한다. OpenFOAM 플러그인 빌드·실제 CFD·속도 이득은 아직 검증하지 않았다.
+구현 검증의 최신 시험 수와 범위는 `FLOW_COMPARISON_VALIDATION.json`에 기록한다. 독립 C++ wire 검사 및 27개 비반응 케이스 생성·계약 검증을 통과했다. OpenFOAM 플러그인 빌드·실제 CFD·속도 이득은 아직 검증하지 않았다.
 
 격자를 늘릴 때는 설정 파일의 시간 간격도 CFL·모세관 시간 제한에 맞게 조정한 새 계획을 만든다. `--n`만 변경해서 모든 기존 시간 간격을 그대로 사용할 수 있다고 가정하지 않는다.
+
+## 비반응 비교 → 실제 H₂ 반응유동 검증
+
+기존 `run_v6_7_shear_pipeline.py --with-h2`는 별도 H₂ 연구를 실행했으며 새 3종 비교에서 선택한 구조를 전달하지 않았다. 이제 `run_v6_7_flow_comparison.py --with-h2`가 다음 단계를 연결한다.
+
+1. 세 비반응 유동에서 CNN·World Model 구조를 tune 데이터로 선택하고 validation에서 수렴·물리장 허용치를 확인한다.
+2. **실험 전에 지정한 source 유동**의 선택된 구조를 고정한다. 기본은 수소 연결 사례인 `h2_crossflow`이며 `--h2-source-family shear_composition` 또는 `lox_he_sloshing`으로 바꿀 수 있다. 서로 다른 유동의 절대 계산시간을 비교해 ‘최고 유동’을 고르거나 test 결과로 source를 바꾸지 않는다.
+3. 실제 H₂–공기 반응 대향류의 별도 train/tune 데이터로 CNN·World Model을 새로 학습한다. CNN 공유/level별 구조, 적용 level, GRU 크기·출력부·학습 설정은 source에서 이어받지만 가중치는 복사하지 않는다. 이는 **구조/방법 전이이며 무학습 가중치 전이가 아니다**. source에서 World Model이 학습되지 않았다면 target에서도 억지로 활성화하지 않는다. source에 모델이 있어도 H₂ 자체의 갱신·재사용 probe가 후보 조건을 통과해야 target World Model을 학습한다.
+4. Classical, 매번 갱신, H₂ tune에서 선택한 저렴한 규칙, 학습 가능했던 World Model을 실제 coupled CFD로 검증한다. `T, H2, U, p` 오차와 연속성, 유한한 양의 `Qdot`를 확인한다. 화학반응·수송·압력·I/O가 포함된 **전체 CFD 프로세스 벽시계 시간**을 측정하며 화학반응만의 시간을 별도로 계측한다고 주장하지 않는다.
+5. 모든 비반응·반응 validation을 통과한 후 모델을 freeze하고 held-out test를 평가한다. 느려진 결과도 남기며 속도 이득 입증 여부는 자동으로 참으로 바꾸지 않는다.
+
+최초 계획부터 옵션을 넣고 새 디렉터리에서 시작한다. 기존 소스로 만든 출력에 사후 추가하지 않는다. 아래 코드는 변경된 연구 브랜치를 로컬에 반영한 뒤 사용한다.
+
+```bash
+python -u scripts/run_v6_7_flow_comparison.py \
+  --output artifacts/three_flow_reacting_v1 --profile quick \
+  --with-h2 --h2-source-family h2_crossflow --stop-after probe
+
+# 이 단계부터 Cantera와 OpenFOAM chemkinToFoam도 필요
+python -u scripts/run_v6_7_flow_comparison.py \
+  --output artifacts/three_flow_reacting_v1 --resume --stop-after validation
+
+python -u scripts/run_v6_7_flow_comparison.py \
+  --output artifacts/three_flow_reacting_v1 --resume --stop-after test
+```
+
+`probe`까지는 비반응 실험만 실행하고 H₂는 pending으로 남긴다. `validation`부터 반응 단계가 실행된다. `--dry-run --with-h2`는 Cantera/OpenFOAM 없이 계획만 작성한다. H₂ 기본 시간은 `2e-4 s`, 시간 간격은 `1e-6 s`인 짧은 기능 확인용 설정이다. 충분히 발달한 화염·통계 수렴을 보장하지 않으므로 본 실험은 최초 계획의 `--h2-end-time`, `--h2-delta-t`와 격자·초기조건을 물리적으로 검토해야 한다.
+
+확인할 출력:
+
+- `hydrogen_transfer.json`: source 선택·설정·체크포인트·validation 해시, 무학습 전이가 아님을 명시.
+- `families/hydrogen_reacting/summary.json`: probe, 학습 여부, validation/test, 전체 CFD 시간 범위.
+- `families/hydrogen_reacting/studies/selected_method/comparison_validation.json` 및 `comparison_test.json`: replay와 native/coupled 측정 결과.
+- 최상위 `hydrogen_combustion_validated`: 실제 반응 validation의 수치·물리장 비교 통과 여부. 실험 대조, 터빈 검증 또는 World Model의 속도 향상 입증을 뜻하지 않는다. held-out test 완료 여부는 별도 기록한다.

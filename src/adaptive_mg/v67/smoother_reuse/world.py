@@ -16,26 +16,76 @@ from . import VERSION, ACTIONS
 from .policy import FEATURES
 
 
+ROLES = ("cost", "success", "next_observation")
+
+
+def architecture(hidden=16, *, memory="shared", head="linear", head_hidden=16):
+    """Validate an architecture without constructing or seeding a network.
+
+    ``shared``/``linear`` retains the original module names and weights, so
+    checkpoints written before architecture metadata was added still load.
+    Independent memory has the same *per-role* width, not the same parameter
+    budget; measured parameter counts and inference costs accompany each fit.
+    """
+    for name, value in (("hidden", hidden), ("head_hidden", head_hidden)):
+        if type(value) is not int or value < 1:
+            raise ValueError("positive integer world " + name + " required")
+    if memory not in ("shared", "independent_roles"):
+        raise ValueError("world memory must be shared or independent_roles")
+    if head not in ("linear", "role_mlp"):
+        raise ValueError("world head must be linear or role_mlp")
+    return dict(memory=memory, head=head, head_hidden=head_hidden)
+
+
 class Dynamics(nn.Module):
-    def __init__(self, hidden=16, recurrent=True):
+    def __init__(self, hidden=16, recurrent=True, *, memory="shared", head="linear", head_hidden=16):
         super().__init__()
+        self.architecture = architecture(hidden, memory=memory, head=head, head_hidden=head_hidden)
+        if type(recurrent) is not bool:
+            raise ValueError("world recurrent must be boolean")
         self.hidden, self.recurrent = hidden, recurrent
-        self.observe_net = nn.GRUCell(len(FEATURES)+2, hidden) if recurrent else nn.Sequential(
-            nn.Linear(len(FEATURES)+2, hidden), nn.Tanh())
-        self.head = nn.Linear(hidden, 2*(len(FEATURES)+2))
+        self.memory = memory
+        def encoder():
+            return nn.GRUCell(len(FEATURES)+2, hidden) if recurrent else nn.Sequential(
+                nn.Linear(len(FEATURES)+2, hidden), nn.Tanh())
+        if memory == "shared":
+            self.observe_net = encoder()
+        else:
+            self.observe_nets = nn.ModuleDict({role: encoder() for role in ROLES})
+        if memory == "shared" and head == "linear":
+            self.head = nn.Linear(hidden, 2*(len(FEATURES)+2))
+        else:
+            self.head = None
+            sizes = (2, 2, 2*len(FEATURES))
+            self.role_heads = nn.ModuleDict({role: (
+                nn.Sequential(nn.Linear(hidden, head_hidden), nn.Tanh(), nn.Linear(head_hidden, size))
+                if head == "role_mlp" else nn.Linear(hidden, size))
+                for role, size in zip(ROLES, sizes)})
 
     def observe(self, obs, previous_action, state=None):
         inputs = torch.cat((obs, previous_action), -1)
-        if self.recurrent:
-            return self.observe_net(inputs, state)
-        return self.observe_net(inputs)
+        if self.memory == "shared":
+            if self.recurrent:
+                return self.observe_net(inputs, state)
+            return self.observe_net(inputs)
+        # Keep state as one tensor so trajectory reset, truncated BPTT detach,
+        # and counterfactual rollout work identically for both architectures.
+        return torch.stack([
+            self.observe_nets[role](inputs, None if state is None else state[:, index])
+            if self.recurrent else self.observe_nets[role](inputs)
+            for index, role in enumerate(ROLES)], dim=1)
 
     def predict(self, state):
-        output = self.head(state).reshape(-1, 2, len(FEATURES)+2)
-        return output[..., 0], output[..., 1], output[..., 2:]
+        if self.head is not None:
+            output = self.head(state).reshape(-1, 2, len(FEATURES)+2)
+            return output[..., 0], output[..., 1], output[..., 2:]
+        output = [self.role_heads[role](state if self.memory == "shared" else state[:, index])
+                  for index, role in enumerate(ROLES)]
+        return output[0], output[1], output[2].reshape(-1, 2, len(FEATURES))
 
 
-def fit(episodes, *, hidden=16, epochs=30, seed=20261011, recurrent=True):
+def fit(episodes, *, hidden=16, epochs=30, seed=20261011, recurrent=True,
+        memory="shared", head="linear", head_hidden=16):
     if not episodes or any(e["split"] != "train" for e in episodes):
         raise ValueError("world fitting accepts training trajectories only")
     raw = np.concatenate([e["obs"] for e in episodes]).astype(np.float32)
@@ -44,7 +94,7 @@ def fit(episodes, *, hidden=16, epochs=30, seed=20261011, recurrent=True):
     xmean, xscale = raw.mean(0), np.maximum(raw.std(0), .05)
     ymean, yscale = float(costs.mean()), max(float(costs.std()), .1)
     torch.manual_seed(seed)
-    net = Dynamics(hidden, recurrent)
+    net = Dynamics(hidden, recurrent, memory=memory, head=head, head_hidden=head_hidden)
     opt = torch.optim.Adam(net.parameters(), lr=.002)
     losses = []
     for epoch in range(epochs):
@@ -83,6 +133,7 @@ def fit(episodes, *, hidden=16, epochs=30, seed=20261011, recurrent=True):
         raise ValueError("nonfinite world fit")
     return dict(schema=VERSION, actions=list(ACTIONS), features=list(FEATURES),
                 hidden=hidden, recurrent=recurrent, state_dict=net.state_dict(),
+                architecture=net.architecture, parameter_count=sum(p.numel() for p in net.parameters()),
                 xmean=xmean.tolist(), xscale=xscale.tolist(), ymean=ymean, yscale=yscale,
                 feature_min=raw.min(0).tolist(), feature_max=raw.max(0).tolist(),
                 epochs=epochs, losses=losses, seed=seed)
@@ -94,7 +145,7 @@ class Predictor:
                 or artifact.get("features") != list(FEATURES)):
             raise ValueError("incompatible stencil-reuse world model")
         self.artifact = artifact
-        self.net = Dynamics(artifact["hidden"], artifact["recurrent"])
+        self.net = Dynamics(artifact["hidden"], artifact["recurrent"], **artifact.get("architecture", {}))
         self.net.load_state_dict(artifact["state_dict"])
         self.net.eval()
         self.xmean = np.asarray(artifact["xmean"], np.float32)

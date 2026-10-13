@@ -39,6 +39,9 @@ std::string digest(const std::string& s){
 template<class Values> void array(std::ostream& out,const Values& v){
     out<<'[';for(std::size_t i=0;i<std::size_t(v.size());++i){if(i)out<<',';out<<v[i];}out<<']';
 }
+template<class Values> void scaledArray(std::ostream& out,const Values& v,double scale){
+    out<<'[';for(std::size_t i=0;i<std::size_t(v.size());++i){if(i)out<<',';out<<scale*v[i];}out<<']';
+}
 double norm(const Foam::scalarField& v){double n=0;for(Foam::label i=0;i<v.size();++i)n=std::hypot(n,double(v[i]));return n;}
 bool nested(Foam::label n){return n>=3 && ((n+1)&n)==0;}
 std::vector<double> coordinates(const Foam::vectorField& c,int dim,double eps){
@@ -87,8 +90,8 @@ Foam::solverPerformance Foam::AdaptiveFixedP::solve(scalarField& psi,
     const auto started=Clock::now();
     try {
         if(sizeof(scalar)!=sizeof(double))throw std::runtime_error("double-precision OpenFOAM build required");
-        if(Pstream::parRun()||cmpt!=0||fieldName_!="p")
-            throw std::runtime_error("AdaptiveFixedP supports only serial scalar pressure p");
+        if(Pstream::parRun()||cmpt!=0||(fieldName_!="p"&&fieldName_!="p_rgh"))
+            throw std::runtime_error("AdaptiveFixedP supports only serial scalar pressure p or anchored p_rgh");
         forAll(interfaces_,i)if(interfaces_.set(i))
             throw std::runtime_error("processor/cyclic/coupled interfaces are unsupported");
         if(!matrix_.symmetric())throw std::runtime_error("pressure matrix must use symmetric LDU storage");
@@ -191,22 +194,27 @@ Foam::solverPerformance Foam::AdaptiveFixedP::solve(scalarField& psi,
             if(!std::isfinite(nativeFinal)||nativeFinal>threshold)
                 throw std::runtime_error("native PCG reference did not meet common raw L2 threshold");
         }
+        // Canonicalize only the equation sign. Current-A SPD/anchor admission
+        // still runs in Python; native acceptance still uses original Amul.
+        const double equationScale=adaptiveFixedP::pressureEquationScale(fieldName_.c_str(),matrix_.diag());
         std::ostringstream out;out<<std::setprecision(17)
             <<"{\"schema\":\"h2-fixed-p-live-v1\",\"op\":"<<adaptiveFixedP::quote(mode=="native"?"record":"solve")
             <<",\"mode\":"<<adaptiveFixedP::quote(mode.c_str())
+            <<",\"pressure_field\":"<<adaptiveFixedP::quote(fieldName_.c_str())
             <<",\"producer\":\"OpenFOAM Foundation 13 AdaptiveFixedP\",\"source_kind\":\"external_cfd\""
             <<",\"boundary_finalized\":true,\"nullspace\":\"none\",\"coupled_interfaces\":0"
             <<",\"shape\":["<<nx<<','<<ny<<"],\"time\":"<<mesh.time().value()<<",\"index\":"<<state.index
             <<",\"mesh_id\":"<<adaptiveFixedP::quote(meshId)<<",\"boundary_id\":"<<adaptiveFixedP::quote(boundaryId)
             <<",\"atol\":"<<atol<<",\"rtol\":"<<rtol<<",\"max_cycles\":"<<maxIter_
             <<",\"native_initial_residual\":"<<initial<<",\"native_threshold\":"<<threshold;
-        out<<",\"diag\":";array(out,matrix_.diag());out<<",\"lower\":";array(out,matrix_.lower());
-        out<<",\"upper\":";array(out,matrix_.upper());out<<",\"lower_addr\":";array(out,matrix_.lduAddr().lowerAddr());
-        out<<",\"upper_addr\":";array(out,matrix_.lduAddr().upperAddr());out<<",\"b\":";array(out,source);
+        out<<",\"diag\":";scaledArray(out,matrix_.diag(),equationScale);out<<",\"lower\":";scaledArray(out,matrix_.lower(),equationScale);
+        out<<",\"upper\":";scaledArray(out,matrix_.upper(),equationScale);out<<",\"lower_addr\":";array(out,matrix_.lduAddr().lowerAddr());
+        out<<",\"upper_addr\":";array(out,matrix_.lduAddr().upperAddr());out<<",\"b\":";scaledArray(out,source,equationScale);
         out<<",\"x0\":";array(out,x0);out<<",\"structured_to_native\":";array(out,order);
         out<<",\"probe_vectors\":[";forAll(v0,i){if(i)out<<',';out<<'['<<v0[i]<<','<<v1[i]<<']';}out<<']';
-        out<<",\"probe_products\":[";forAll(v0,i){if(i)out<<',';out<<'['<<av0[i]<<','<<av1[i]<<']';}out<<']';
-        out<<",\"context\":{\"native_time_index\":"<<mesh.time().timeIndex()<<'}';
+        out<<",\"probe_products\":[";forAll(v0,i){if(i)out<<',';out<<'['<<equationScale*av0[i]<<','<<equationScale*av1[i]<<']';}out<<']';
+        out<<",\"context\":{\"native_time_index\":"<<mesh.time().timeIndex()
+            <<",\"native_to_spd_scale\":"<<equationScale<<'}';
         if(mode=="native"){
             out<<",\"x_native_reference\":";array(out,psi);
             out<<",\"reference_solver\":\"PCG/DIC\",\"reference_seconds\":"<<nativeSeconds

@@ -22,8 +22,9 @@ import numpy as np
 
 from ...provenance import hardware_environment
 from ..world_model.data import digest, file_hash, write_json
-from .data import read, validate_case_contract, experiment_kind, input_fingerprint, FIELD_PROFILES, VARIABLE_DENSITY_KIND
-from .evaluation import compare_coupled_runs, nonreacting_field_evidence
+from .data import (read, validate_case_contract, experiment_kind, input_fingerprint, FIELD_PROFILES,
+                   VARIABLE_DENSITY_KIND, CROSSFLOW_KIND, SLOSHING_KIND, NONREACTING_GAS_KINDS)
+from .evaluation import compare_coupled_runs, nonreacting_field_evidence, sloshing_field_evidence
 
 
 NUMBER = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?"
@@ -155,24 +156,32 @@ def collect_fields(root, contract):
             path = folder / name
             values[name].append(read_internal_field(path, n, 3 if name == "U" else 1))
             hashes[str(path.relative_to(root))] = file_hash(path)
-        qpath = folder / "Qdot"
-        qdot = read_internal_field(qpath, n)
-        heat_release.append(float(np.max(qdot)))
-        absolute_heat_release.append(float(np.max(np.abs(qdot))))
-        hashes[str(qpath.relative_to(root))] = file_hash(qpath)
+        if kind != SLOSHING_KIND:
+            qpath = folder / "Qdot"
+            qdot = read_internal_field(qpath, n)
+            heat_release.append(float(np.max(qdot)))
+            absolute_heat_release.append(float(np.max(np.abs(qdot))))
+            hashes[str(qpath.relative_to(root))] = file_hash(qpath)
     result = dict(sample_times=[t for t, _ in samples],
                   fields={key: np.stack(value) for key, value in values.items()}, hashes=hashes,
-                  reaction_evidence=dict(finite_saved_Qdot=True, maximum_Qdot_by_time=heat_release,
+                  reaction_evidence=dict(finite_saved_Qdot=kind != SLOSHING_KIND, maximum_Qdot_by_time=heat_release,
                                          maximum_absolute_Qdot_by_time=absolute_heat_release,
                                          positive_heat_release_observed=any(v > 0 for v in heat_release),
-                                         zero_heat_release_observed=all(v == 0 for v in absolute_heat_release),
+                                         zero_heat_release_observed=bool(absolute_heat_release) and all(v == 0 for v in absolute_heat_release),
                                          experimentally_validated=False))
-    if kind == VARIABLE_DENSITY_KIND:
-        physical = nonreacting_field_evidence(result["fields"])
+    if kind in NONREACTING_GAS_KINDS:
+        species = ('H2', 'N2') if kind == CROSSFLOW_KIND else ('He', 'N2')
+        physical = nonreacting_field_evidence(result["fields"], species)
         physical["zero_heat_release_observed"] = result["reaction_evidence"]["zero_heat_release_observed"]
         physical["maximum_absolute_Qdot_by_time"] = absolute_heat_release
         physical["passed"] = physical["passed"] and physical["zero_heat_release_observed"]
         result["physics_evidence"] = physical
+    elif kind == SLOSHING_KIND:
+        initial_path = Path(root) / '0/alpha.lox'
+        initial_alpha = read_internal_field(initial_path, n)
+        hashes['0/alpha.lox'] = file_hash(initial_path)
+        result['physics_evidence'] = sloshing_field_evidence(result['fields'], contract, initial_alpha)
+        result['reaction_evidence']['scope'] = 'isothermal immiscible VOF has no heat-release field; absence is not a measured zero'
     return result
 
 
@@ -191,10 +200,14 @@ def _verify_prepared(root):
         raise ValueError("prepared case already contains positive-time outputs; use a fresh case")
     if any(path.is_symlink() for path in root.rglob("*")):
         raise ValueError("prepared case must contain local regular files, not symlinks")
-    initial = [f"0/{name}" for name in [*contract["species"], "T", "p", "U"]]
+    kind = experiment_kind(contract)
+    initial_names = ['alpha.lox', 'U', 'p', 'p_rgh'] if kind == SLOSHING_KIND else [*contract['species'], 'T', 'p', 'U']
+    if 'initial_fields' in contract and contract['initial_fields'] != initial_names:
+        raise ValueError('initial fields disagree with physical case profile')
+    initial = [f"0/{name}" for name in initial_names]
     mesh = [str(p.relative_to(root)) for p in (root / "constant/polyMesh").iterdir() if p.is_file()]
     checks = {"initial_conditions_sha256": initial, "mesh_sha256": mesh}
-    if experiment_kind(contract) == VARIABLE_DENSITY_KIND:
+    if kind in NONREACTING_GAS_KINDS:
         if contract.get("preparation_kind") != "native_thermophysical":
             raise ValueError("nonreacting case needs native thermophysical preparation")
         checks["thermophysical_sha256"] = contract["thermophysical_files"]
@@ -203,6 +216,16 @@ def _verify_prepared(root):
         if (not re.search(r"\bchemistry\s+off\s*;", chemistry)
                 or not re.search(r"\bcombustionModel\s+none\s*;", combustion)):
             raise ValueError("nonreacting case must disable chemistry and combustion")
+    elif kind == SLOSHING_KIND:
+        if contract.get('preparation_kind') != 'native_two_phase':
+            raise ValueError('sloshing case needs native two-phase preparation')
+        checks['thermophysical_sha256'] = contract['thermophysical_files']
+        solution = _clean((root / 'system/fvSolution').read_text())
+        for key, expected in (('pRefCell', contract['pressure_reference']['cell']),
+                              ('pRefValue', contract['pressure_reference']['value'])):
+            match = re.search(r'\b' + key + r'\s+(' + NUMBER + r')\s*;', solution)
+            if not match or float(match.group(1)) != expected:
+                raise ValueError('sloshing pressure reference changed: ' + key)
     else:
         checks.update(chemistry_sha256=contract["chemistry_files"],
                       converted_chemistry_sha256=["constant/reactions", "constant/thermo.compressibleGas"])
@@ -289,12 +312,14 @@ def _one_run(out, prepared, contract, run_dir, cfg, settings, arm, timeout, hard
                   initial_conditions_sha256=contract["initial_conditions_sha256"],
                   boundary_conditions_sha256=contract["boundary_conditions_sha256"],
                   fixed_p_sha256=None, dt_schedule=[], end_time=0., hardware=hardware,
-                  execution_threads=settings.get("torch_threads", 1), pressure_gauge="absolute",
+                  execution_threads=settings.get("torch_threads", 1), pressure_gauge=contract.get('pressure_gauge', 'absolute'),
                   stopping_criteria=dict(rtol=cfg.mg.tolerance, atol=cfg.mg.absolute_tolerance,
                                          max_cycles=cfg.mg.max_cycles, residual_reference="initial_raw_l2"),
                   continuity={"passed": False}, fields={}, evidence={}, timing={})
     input_key, input_hash = input_fingerprint(contract)
     status[input_key] = input_hash
+    if experiment_kind(contract) == SLOSHING_KIND:
+        status['physics_contract'] = contract
     if smoother_policy is not None:
         status["smoother_policy"] = smoother_policy if arm == "H_S" else "classical"
     process = bridge = None
@@ -342,10 +367,10 @@ def _one_run(out, prepared, contract, run_dir, cfg, settings, arm, timeout, hard
             parsed = parse_solver_log(log_path.read_text(), contract, settings["continuity_max_cumulative"])
             fields = collect_fields(case, contract)
             status["reaction_evidence"] = fields["reaction_evidence"]
-            if experiment_kind(contract) == VARIABLE_DENSITY_KIND:
+            if experiment_kind(contract) in (*NONREACTING_GAS_KINDS, SLOSHING_KIND):
                 status["physics_evidence"] = fields["physics_evidence"]
                 if not fields["physics_evidence"]["passed"]:
-                    raise ValueError("nonreacting variable-density physics checks failed: " + json.dumps(fields["physics_evidence"]))
+                    raise ValueError("nonreacting flow physics checks failed: " + json.dumps(fields["physics_evidence"]))
             elif not fields["reaction_evidence"]["positive_heat_release_observed"]:
                 raise ValueError("no positive saved heat release; cannot validate this as a reacting-flame benchmark")
             if any(not any(np.isclose(t, x, rtol=1.e-8, atol=1.e-13) for x in parsed["times"]) for t in fields["sample_times"]):

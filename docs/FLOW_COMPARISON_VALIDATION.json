@@ -1,0 +1,29 @@
+{
+  "schema": "three-flow-implementation-validation-v1",
+  "source_digest": "b0b0efdab78e995f5e4706f73052f534275e52e178be402f4ef8f32666732662",
+  "pytest": {
+    "command": "OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 python -m pytest -ra",
+    "passed": 951,
+    "skipped": 1,
+    "failed": 0,
+    "skipped_reason": "Cantera is not installed; optional legacy reacting-case generation test skipped"
+  },
+  "native_stencil_build": "passed",
+  "standalone_cpp_wire_checks": "passed",
+  "unix_socket_integration": "not_executed_environment_socket_restriction",
+  "real_case_generation": {
+    "cases": 27,
+    "families": [
+      "shear_composition",
+      "lox_he_sloshing",
+      "h2_crossflow",
+      "shear_control"
+    ],
+    "contract_validation": "passed"
+  },
+  "openfoam13_plugin_build": "not_executed_openfoam_unavailable",
+  "native_cfd_execution": "not_executed_openfoam_unavailable",
+  "world_model_benefit_established": false,
+  "physical_validation_completed": false,
+  "scope": "Implementation, numerical unit/regression tests, and dictionary generation only; no CFD speed or physical fidelity claim"
+}

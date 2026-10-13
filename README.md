@@ -1,6 +1,18 @@
 # World-Model-Guided Adaptive Neural Smoothing
 
-## Current CFD experiment: modulated shear, temporal smoother reuse, H2 validation
+## Current comparison: three flows, multilevel CNNs and solver world models
+
+[`run_v6_7_flow_comparison.py`](scripts/run_v6_7_flow_comparison.py) compares
+composition-modulated He/N2 shear, idealized isothermal LOX/He sloshing and a
+nonreacting H2 slot jet in N2 crossflow. It records each physical cohort once,
+compares one-level shared, two-level shared and two-level independent CNNs,
+then sweeps GRU widths 16/32/64 and linear/role-specific MLP heads. Independent
+role memories and the full CNN-by-world-model comparison are optional.
+All speed comparisons include online policy and recovery costs; selection uses
+tune data and test follows frozen validation. No CFD speedup is established by
+implementing these options. See the [Korean runbook](docs/FLOW_COMPARISON_RUNBOOK_KR.md).
+
+## Earlier CFD experiment: modulated shear, temporal smoother reuse, H2 validation
 
 The primary benchmark is a spatial He/N2 coflow shear layer with smooth inlet
 velocity modulation. An unforced shear layer is its control; held-out cases

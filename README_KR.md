@@ -1,6 +1,14 @@
 # Adaptive Neural Multigrid v6.7
 
-현재 주제는 **변조형 He–N₂ 전단 혼합층을 주 실험으로 하고, 수소 반응유동까지
+새 통합 실험은 **조성 변조 He–N₂ 혼합층·LOX–He 슬로싱·H₂ 횡류 슬롯 제트**에서
+다중 level CNN과 시간 이력 기반 갱신 정책을 비교한다.
+`scripts/run_v6_7_flow_comparison.py`와
+[실행·해석 문서](docs/FLOW_COMPARISON_RUNBOOK_KR.md)를 사용한다.
+공유 CNN 1 level, 공유 CNN 2 level, 독립 CNN 2 level을 비교하고,
+GRU 16/32/64 및 역할별 출력부 실험을 별도로 수행한다.
+실제 CFD 수렴·물리 검증과 속도 이득은 실행 후 판단한다.
+
+이전 주제는 **변조형 He–N₂ 전단 혼합층을 주 실험으로 하고, 수소 반응유동까지
 검증하는 시간 이력 기반 Neural Multigrid**다. 실행은
 [혼합층·시간 이력 실험 안내](docs/SHEAR_TEMPORAL_RUNBOOK_KR.md)의
 `scripts/run_v6_7_shear_pipeline.py`에서 시작한다. `--with-h2`로 수소 검증을

@@ -15,6 +15,11 @@ int main(int argc,char** argv){
     assert(rejects("{\"success\":false,\"x_native\":[1,Infinity]}"));
     assert(!adaptiveFixedP::Decoder("{\"success\":false,\"error\":\"not ready\\nretry\"}").parse(2).success);
     assert(adaptiveFixedP::quote("x\n\"y") == "\"x\\u000a\\\"y\"");
+    assert(adaptiveFixedP::pressureEquationScale("p_rgh",std::vector<double>{-2,-4})==-1);
+    assert(adaptiveFixedP::pressureEquationScale("p_rgh",std::vector<double>{2,4})==1);
+    assert(adaptiveFixedP::pressureEquationScale("p_rgh",std::vector<double>{-2,4})==1);
+    assert(adaptiveFixedP::pressureEquationScale("p_rgh",std::vector<double>{0,-4})==1);
+    assert(adaptiveFixedP::pressureEquationScale("p",std::vector<double>{-2,-4})==1);
     if(argc>1){
         adaptiveFixedP::Connection c(argv[1],5);
         for(int i=0;i<2;++i){auto v=adaptiveFixedP::Decoder(c.request("{\"n\":2}")).parse(2);assert(v.success&&v.x[0]==1);}

@@ -23,10 +23,11 @@ import torch
 
 from ...hierarchy import classical_cycle
 from ...provenance import stable_norm
-from ..banks import Stats, hybrid_cycle
+from ..banks import Stats, hybrid_cycle, selected_level
 from ..config import AdaptiveConfig
 from ..hs_world.backend import HSSmoothingBackend, SmoothingBank
 from ..models import Components
+from ..level_smoothers import PerLevelSmoother
 from ..spatial import SpatialState
 from ..strong import StrongRules
 from ..world_model.backend import StepResult, hierarchy_signature, levels
@@ -88,7 +89,8 @@ class FixedPSolver:
             if not all(torch.isfinite(v).all().item() for v in expert.smoother.state_dict().values()):
                 raise ValueError('nonfinite H_S checkpoint')
             if (not cfg.use_smoother or not (cfg.replace_pre or cfg.replace_post)
-                    or cfg.mg.smoother_gain_multiplier <= 0 or cfg.mg.nn_levels == 0
+                    or cfg.mg.smoother_gain_multiplier <= 0
+                    or (cfg.smoother_levels is None and cfg.mg.nn_levels == 0)
                     or cfg.smoother_levels == ()):
                 raise ValueError('H_S experiment must enable actual neural smoothing')
         self.cfg = replace(cfg, mode='research' if expert is not None else 'classical',
@@ -158,6 +160,12 @@ class FixedPSolver:
         base, st = self.backend.build(s, self.bank, 'REBUILD_C' if initial else 'REUSE_C', selection, cfg)
         builds.append(st)
         self.bank = base  # Preserve P even if a subsequent neural setup fails.
+        if requested == 'H_S' and isinstance(self.backend.expert.smoother, PerLevelSmoother):
+            required = {l.index for l in levels(base.classical_root)
+                        if l.coarse is not None and selected_level(l.index, cfg, 'smoother')}
+            missing = required.difference(self.backend.expert.smoother.level_indices)
+            if missing:
+                raise ValueError(f'per-level smoother checkpoint missing requested levels: {sorted(missing)}')
         reused = refreshed = False
         if requested == 'H_S':
             try:

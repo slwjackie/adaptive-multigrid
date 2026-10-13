@@ -135,26 +135,30 @@ def test_live_session_uses_temporal_solver_and_verifies_native_residual(hs):
 def test_probe_accounts_for_delayed_payback_and_retains_failed_windows():
     def rows(cost):
         return [dict(total_seconds=cost, success=True, pressure_calls=4) for _ in range(3)]
-    ep = dict(available=[[True,True]]*6, probe_horizon=4,
+    ep = dict(available=[[True,True]]*24, probe_horizon=4,
               # Immediate refresh is ALWAYS more expensive in this fixture.
-              measurements=[{'0':rows(2.),'1':rows(1.)}]*6,
-              horizon_measurements=[{'0':rows(3.),'1':rows(5.)}]*3+ [{'0':rows(5.),'1':rows(3.)}]*3)
+              measurements=[{'0':rows(2.),'1':rows(1.)}]*24,
+              horizon_measurements=[{'0':rows(3.),'1':rows(5.)}]*12+ [{'0':rows(5.),'1':rows(3.)}]*12)
     report = study.tradeoff_report([ep],.05)
-    assert report['world_model_candidate'] and report['refresh_wins'] == report['reuse_wins'] == 3
+    assert report['world_model_candidate'] and report['refresh_wins'] == report['reuse_wins'] == 12
+    assert report['nonoverlapping_wins'] == dict(refresh_wins=3, reuse_wins=3)
     assert not report['world_model_benefit_established']
     ep = deepcopy(ep)
     ep['horizon_measurements'][0]['0'][0]['success'] = False
     assert not study.tradeoff_report([ep],.05)['world_model_candidate']
 
 
-@pytest.mark.parametrize('fit_world', [False, True])
-def test_real_numerical_collection_training_freeze_and_sealed_test(tmp_path, monkeypatch, fit_world):
+@pytest.mark.parametrize('fit_world,memory,head', [
+    (False, 'shared', 'linear'), (True, 'shared', 'linear'),
+    (True, 'shared', 'role_mlp'), (True, 'independent_roles', 'role_mlp')])
+def test_real_numerical_collection_training_freeze_and_sealed_test(tmp_path, monkeypatch, fit_world, memory, head):
     # Explicit test-only matrices; not recorded OpenFOAM or flame evidence.
     monkeypatch.setattr(base,'source_digest',lambda:'a'*64)
     config_path = tmp_path/'settings.json'
     cfg = settings()
     cfg['smoother_reuse'] = reuse_settings()
     cfg['smoother_reuse']['fit_world'] = fit_world
+    cfg['smoother_reuse'].update(world_memory=memory, world_head=head, world_head_hidden=3)
     write_json(config_path,cfg)
     inputs = [make_fixture_recording(tmp_path/split,split,offset) for split,offset in
               [('train',0),('tune',7),('validation',15),('test',30)]]
@@ -171,8 +175,17 @@ def test_real_numerical_collection_training_freeze_and_sealed_test(tmp_path, mon
     first = read(run/'reuse'/next(iter(collection['episodes'])))
     assert first['available'][0] == [True,False]
     assert first['horizon_measurements'][0]['0'][0]['pressure_calls'] == 2
+    rollout = first['horizon_measurements'][0]['0'][0]
+    assert len(rollout['calls']) == 2
+    assert rollout['total_seconds'] == pytest.approx(sum(r['total_seconds'] for r in rollout['calls']))
+    assert all({'cycles', 'fallback', 'nn_setup_seconds', 'neural_apply_seconds'} <= r.keys()
+               for r in rollout['calls'])
     trained = study.train(run)
     assert bool(trained['models']) is fit_world
+    if fit_world:
+        assert trained['model_details']['world']['architecture'] == dict(
+            memory=memory, head=head, head_hidden=3)
+        assert trained['model_details']['world']['parameter_count'] > 0
     assert not trained['world_model_benefit_established']
     with pytest.raises(FileNotFoundError):
         study.evaluate(run,'test',1)

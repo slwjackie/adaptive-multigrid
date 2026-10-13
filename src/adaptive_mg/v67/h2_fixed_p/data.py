@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import math
 from pathlib import Path
 
 from ...grid import validate_root_shape
@@ -19,29 +20,40 @@ def read(path):
 
 H2_KIND = 'h2_combustion'
 VARIABLE_DENSITY_KIND = 'variable_density_nonreacting'
+CROSSFLOW_KIND = 'h2_crossflow_nonreacting'
+SLOSHING_KIND = 'lox_he_sloshing'
+NONREACTING_GAS_KINDS = (VARIABLE_DENSITY_KIND, CROSSFLOW_KIND)
+CASE_SCHEMAS = {
+    'h2-fixed-p-case-v1': H2_KIND,
+    'variable-density-case-v1': VARIABLE_DENSITY_KIND,
+    'h2-crossflow-case-v1': CROSSFLOW_KIND,
+    'lox-he-sloshing-case-v1': SLOSHING_KIND,
+}
 FIELD_PROFILES = {
     H2_KIND: ('T', 'H2', 'U', 'p'),
     VARIABLE_DENSITY_KIND: ('T', 'He', 'N2', 'rho', 'U', 'p'),
+    CROSSFLOW_KIND: ('T', 'H2', 'N2', 'rho', 'U', 'p'),
+    SLOSHING_KIND: ('alpha.lox', 'U', 'p', 'p_rgh'),
 }
 
 
 def experiment_kind(value):
     """Select physics from a producer contract, preserving legacy H2 contracts."""
-    if value.get('schema') == 'variable-density-case-v1':
-        return VARIABLE_DENSITY_KIND
+    if value.get('schema') in CASE_SCHEMAS:
+        return CASE_SCHEMAS[value['schema']]
     return value.get('experiment_kind', H2_KIND)
 
 
 def input_fingerprint(value):
     """Return the explicitly named input digest; inert gases have no chemistry."""
-    key = 'thermophysical_sha256' if experiment_kind(value) == VARIABLE_DENSITY_KIND else 'chemistry_sha256'
+    key = 'chemistry_sha256' if experiment_kind(value) == H2_KIND else 'thermophysical_sha256'
     return key, value.get(key)
 
 
 def validate_case_contract(value):
     """Validate a producer declaration, not independently certify flame physics."""
-    if value.get('schema') not in ('h2-fixed-p-case-v1', 'variable-density-case-v1'):
-        raise ValueError('h2-fixed-p-case-v1 or variable-density-case-v1 case contract required')
+    if value.get('schema') not in CASE_SCHEMAS:
+        raise ValueError('supported generated CFD case contract required')
     for key in ('case_id', 'case_group'):
         pattern = r'[A-Za-z0-9_-]+' if key == 'case_id' else r'[A-Za-z0-9_.-]+'
         if not isinstance(value.get(key), str) or not re.fullmatch(pattern, value[key]):
@@ -59,20 +71,49 @@ def validate_case_contract(value):
     kind = experiment_kind(value)
     if value.get('experiment_kind', kind) != kind:
         raise ValueError('case schema and experiment kind disagree')
+    if kind != SLOSHING_KIND and value.get('pressure_field', 'p') != 'p':
+        raise ValueError('single-phase gas cases must solve scalar pressure p')
     if value['schema'] == 'h2-fixed-p-case-v1':
         if kind != H2_KIND:
             raise ValueError('case schema and experiment kind disagree')
         expected = dict(fuel='H2', oxidizer='air', dimension=2, fixed_grid=True)
         if any(physics.get(k) != v for k, v in expected.items()):
             raise ValueError('need an actual fixed-grid 2D H2-air CFD declaration')
-    else:
-        expected = dict(kind=VARIABLE_DENSITY_KIND, reacting=False, dimension=2, fixed_grid=True)
+    elif kind in NONREACTING_GAS_KINDS:
+        expected = dict(kind=kind, reacting=False, dimension=2, fixed_grid=True)
         if (any(physics.get(k) != v for k, v in expected.items())
                 or physics.get('reacting') is not False or physics.get('fixed_grid') is not True):
             raise ValueError('need an actual fixed-grid 2D variable-density nonreacting CFD declaration')
-        if (value.get('species') != ['He', 'N2'] or type(value.get('reaction_count')) is not int
+        species = ['H2', 'N2'] if kind == CROSSFLOW_KIND else ['He', 'N2']
+        if (value.get('species') != species or type(value.get('reaction_count')) is not int
                 or value['reaction_count'] != 0):
-            raise ValueError('nonreacting benchmark requires He/N2 and zero reactions')
+            raise ValueError('nonreacting benchmark requires ' + '/'.join(species) + ' and zero reactions')
+    else:
+        expected = dict(kind=SLOSHING_KIND, reacting=False, dimension=2, fixed_grid=True,
+                        isothermal=True, phase_change=False, gas_phase_approximation='pure_helium')
+        if (any(physics.get(k) != v for k, v in expected.items())
+                or any(physics.get(k) is not v for k, v in expected.items() if isinstance(v, bool))):
+            raise ValueError('sloshing requires the fixed-grid isothermal LOX/pure-He, no-phase-change declaration')
+        if value.get('phases') != ['lox', 'he'] or value.get('species') != []:
+            raise ValueError('sloshing requires lox/he phases and no reactive species')
+        if value.get('pressure_field') != 'p_rgh' or value.get('pressure_gauge') != 'reference_fixed':
+            raise ValueError('sealed sloshing requires reference-fixed p_rgh pressure')
+        reference = value.get('pressure_reference', {})
+        if (not isinstance(reference, dict) or type(reference.get('cell')) is not int or not 0 <= reference['cell'] < math.prod(shape)
+                or not isinstance(reference.get('value'), (int, float))
+                or isinstance(reference['value'], bool) or not math.isfinite(reference['value'])):
+            raise ValueError('explicit finite pressure reference cell/value required')
+        checks = value.get('physics_checks', {})
+        if not isinstance(checks, dict):
+            raise ValueError('predeclared sloshing physics thresholds required')
+        for name in ('alpha_bounds_tolerance', 'liquid_volume_relative_tolerance', 'interface_motion_threshold'):
+            limit = checks.get(name)
+            if isinstance(limit, bool) or not isinstance(limit, (int, float)) or not math.isfinite(limit) or not 0 < limit < .1:
+                raise ValueError('predeclared positive sloshing physics threshold required: ' + name)
+        fraction = value.get('initial_liquid_fraction')
+        if isinstance(fraction, bool) or not isinstance(fraction, (int, float)) or not 0 < fraction < 1:
+            raise ValueError('explicit initial discrete liquid volume fraction required')
+    if kind != H2_KIND:
         files = value.get('thermophysical_files')
         if (not isinstance(files, list) or not files
                 or any(not isinstance(p, str) or not p or Path(p).is_absolute() or '..' in Path(p).parts for p in files)):
@@ -125,8 +166,7 @@ split and no manufactured RHS is provided by this workflow.
     kind = next(iter(kinds))
     out.mkdir(parents=True, exist_ok=True)
     merged = dict(schema='world-sequence-v1', source_kind='external_cfd', experiment_kind=kind,
-                  physics=('producer-declared fixed-grid 2D He/N2 variable-density nonreacting CFD'
-                           if kind == VARIABLE_DENSITY_KIND else 'producer-declared fixed-grid 2D H2-air reacting CFD'),
+                  physics='producer-declared fixed-grid 2D CFD: ' + kind,
                   physics_verified=False, combustion_verified=False, trajectories=[], producers=[])
     ids, groups = set(), {}
     for i, (src, contract) in enumerate(sources):

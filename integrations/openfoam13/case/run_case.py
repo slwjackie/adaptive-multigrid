@@ -60,13 +60,23 @@ def main():
     root = Path(args.case).resolve()
     contract_path = root / "contract.json"
     contract = json.loads(contract_path.read_text())
-    nonreacting = contract.get("schema") == "variable-density-case-v1"
-    if contract.get("schema") not in ("h2-fixed-p-case-v1", "variable-density-case-v1"):
+    nonreacting = contract.get("schema") in ("variable-density-case-v1", "h2-crossflow-case-v1")
+    sloshing = contract.get("schema") == "lox-he-sloshing-case-v1"
+    native_properties = nonreacting or sloshing
+    if contract.get("schema") not in ("h2-fixed-p-case-v1", "variable-density-case-v1", "h2-crossflow-case-v1", "lox-he-sloshing-case-v1"):
         raise ValueError("Not a generated supported CFD case; refusing mutation")
     if nonreacting and (contract.get("preparation_kind") != "native_thermophysical"
                         or contract.get("physics", {}).get("reacting") is not False
                         or contract.get("reaction_count") != 0):
         raise ValueError("Invalid nonreacting native-thermophysical case contract")
+    if sloshing and (contract.get("preparation_kind") != "native_two_phase"
+                     or contract.get("physics", {}).get("reacting") is not False
+                     or contract.get("physics", {}).get("phase_change") is not False
+                     or contract.get("physics", {}).get("isothermal") is not True
+                     or contract.get("physics", {}).get("gas_phase_approximation") != "pure_helium"
+                     or contract.get("phases") != ["lox", "he"]
+                     or contract.get("pressure_field") != "p_rgh"):
+        raise ValueError("Invalid isothermal LOX-He mechanical sloshing contract")
     if args.clean:
         if not args.yes:
             raise ValueError("Cleaning generated outputs requires Allclean --yes")
@@ -81,32 +91,37 @@ def main():
                 path.unlink()
         contract["status"] = "generated_not_executed"
         contract.pop("mesh_sha256", None)
-        if nonreacting:
+        if native_properties:
             contract["foam_conversion_verified"] = False
             contract.pop("native_thermophysical_verified", None)
+            contract.pop("native_two_phase_verified", None)
         contract_path.write_text(json.dumps(contract, indent=2) + "\n")
         return
     if os.environ.get("WM_PROJECT_VERSION") != "13":
         raise RuntimeError("Source the OpenFOAM Foundation 13 environment first (WM_PROJECT_VERSION=13)")
     required = ["blockMesh", "checkMesh", "foamRun"]
-    if not nonreacting:
+    if not native_properties:
         required.append("chemkinToFoam")
     for executable in required:
         if not shutil.which(executable):
             raise RuntimeError(f"Missing OpenFOAM command: {executable}")
     if times(root):
         raise RuntimeError("Positive-time output already exists. Copy a fresh case or explicitly use Allclean --yes")
-    source_files = contract["thermophysical_files"] if nonreacting else contract["chemistry_files"]
-    source_hash = contract["thermophysical_sha256"] if nonreacting else contract["chemistry_sha256"]
+    source_files = contract["thermophysical_files"] if native_properties else contract["chemistry_files"]
+    source_hash = contract["thermophysical_sha256"] if native_properties else contract["chemistry_sha256"]
     if digest_files(root, source_files) != source_hash:
-        raise RuntimeError("Thermophysical input content changed after generation" if nonreacting
+        raise RuntimeError("Thermophysical input content changed after generation" if native_properties
                            else "Chemistry input content changed after generation")
-    fields = [f"0/{name}" for name in [*contract["species"], "T", "p", "U"]]
+    initial_names = contract.get("initial_fields", [*contract["species"], "T", "p", "U"])
+    expected = {"alpha.lox", "U", "p", "p_rgh"} if sloshing else set([*contract["species"], "T", "p", "U"])
+    if set(initial_names) != expected or len(initial_names) != len(expected):
+        raise RuntimeError("Initial-field profile does not match the declared physics")
+    fields = [f"0/{name}" for name in initial_names]
     if digest_files(root, fields) != contract["initial_conditions_sha256"]:
         raise RuntimeError("Initial fields changed after generation; regenerate the case")
-    if nonreacting:
-        for relative, pattern in (("constant/combustionProperties", r"\bcombustionModel\s+none\s*;"),
-                                  ("constant/chemistryProperties", r"\bchemistry\s+off\s*;")):
+    if native_properties:
+        for relative, pattern in (() if sloshing else (("constant/combustionProperties", r"\bcombustionModel\s+none\s*;"),
+                                  ("constant/chemistryProperties", r"\bchemistry\s+off\s*;"))):
             if not re.search(pattern, (root / relative).read_text()):
                 raise RuntimeError("Nonreacting case must explicitly disable chemistry and combustion")
         if any(not (root / relative).stat().st_size for relative in source_files):
@@ -114,7 +129,7 @@ def main():
         # Historical flag means preparation verified for both schemas; no
         # CHEMKIN conversion is performed for the native dictionary pathway.
         contract["foam_conversion_verified"] = True
-        contract["native_thermophysical_verified"] = True
+        contract["native_two_phase_verified" if sloshing else "native_thermophysical_verified"] = True
     else:
         command(root, ["chemkinToFoam", "-precision", "16", "chemkin/h2.inp", "chemkin/thermo.dat",
                        "chemkin/transport.foam", "constant/reactions", "constant/thermo.compressibleGas"], "log.chemkinToFoam")
@@ -134,7 +149,7 @@ def main():
     contract_path.write_text(json.dumps(contract, indent=2) + "\n")
     if args.prepare_only:
         print("OpenFOAM native thermophysical input and mesh checks passed; no CFD trajectory executed."
-              if nonreacting else "OpenFOAM chemistry conversion and mesh checks passed; no CFD trajectory executed.")
+              if native_properties else "OpenFOAM chemistry conversion and mesh checks passed; no CFD trajectory executed.")
         return
 
     solution = root / "system/fvSolution"
@@ -143,7 +158,10 @@ def main():
     if args.native_only:
         solution.write_text((root / "system/fvSolution.native").read_text())
         control.write_text(original_control.replace('libs ("libAdaptiveFixedP.so");', ""))
-    status = {"schema": "variable-density-cfd-execution-v1" if nonreacting else "h2-cfd-execution-v1",
+    status = {"schema": "lox-he-sloshing-cfd-execution-v1" if sloshing else "h2-crossflow-cfd-execution-v1"
+                        if contract.get("schema") == "h2-crossflow-case-v1" else
+                        "variable-density-cfd-execution-v1" if nonreacting else "h2-cfd-execution-v1",
+              "experiment_kind": contract.get("experiment_kind", contract.get("physics", {}).get("kind", "h2_combustion")),
               "case_id": contract["case_id"],
               "native_only_preflight": args.native_only,
               "timing_scope": "foamRun process wall time, including CFD setup/output; case preparation excluded",

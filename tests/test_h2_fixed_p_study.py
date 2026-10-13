@@ -163,6 +163,26 @@ def test_candidate_cannot_be_relabelled_for_a_different_imported_rhs(trained):
         W.load_expert(run, cfg)
 
 
+def test_shared_and_per_level_expert_artifacts_cannot_be_swapped(trained, tmp_path):
+    import shutil
+    other = tmp_path / 'per_level_study'
+    shutil.copytree(trained, other)
+    shutil.rmtree(other / 'expert')
+    settings = read(other / 'configuration.json')
+    settings['training']['smoother_architecture'] = 'per_level'
+    write_json(other / 'configuration.json', settings)
+    manifest = read(other / 'run_manifest.json')
+    manifest['configuration_digest'] = digest(settings)
+    write_json(other / 'run_manifest.json', manifest)
+    W.train(other)
+    loaded = W.load_expert(other, W.load_run(other)[2])
+    assert loaded.metadata['smoother_architecture'] == 'per_level'
+    shutil.rmtree(trained / 'expert')
+    shutil.copytree(other / 'expert', trained / 'expert')
+    with pytest.raises(ValueError, match='smoother architecture differs'):
+        W.load_expert(trained, W.load_run(trained)[2])
+
+
 def test_live_expert_provenance_is_streamed_without_spd_readmission(trained, monkeypatch):
     from adaptive_mg.v67.world_model import data as D
     import scipy.linalg

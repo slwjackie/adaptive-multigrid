@@ -21,7 +21,7 @@ from ..limited import initialize_timing_runtime
 from ..models import Components
 from ..world_model.data import digest, file_hash, inside, load_manifest, load_trajectories, write_json
 from . import VERSION
-from .data import import_recordings, read, verify_dataset
+from .data import import_recordings, read, verify_dataset, FIELD_PROFILES
 
 
 _FROZEN_ARTIFACTS = (
@@ -52,6 +52,7 @@ def source_digest():
         'scripts/run_v6_7_h2_pipeline.py',
         'scripts/run_v6_7_variable_density_pipeline.py',
         'scripts/run_v6_7_shear_pipeline.py',
+        'scripts/run_v6_7_flow_comparison.py',
         'scripts/run_v6_7_smoother_reuse.py',
         'integrations/openfoam13/Allwmake',
         'integrations/openfoam13/AdaptiveFixedP/AdaptiveFixedP.C',
@@ -62,6 +63,9 @@ def source_digest():
         'integrations/openfoam13/case/generate.py',
         'integrations/openfoam13/case/generate_variable_density.py',
         'integrations/openfoam13/case/generate_shear_layer.py',
+        'integrations/openfoam13/case/generate_crossflow.py',
+        'integrations/openfoam13/case/generate_sloshing.py',
+        'integrations/openfoam13/case/flow_generator_common.py',
         'integrations/openfoam13/case/run_case.py',
         'integrations/openfoam13/case/Allrun',
         'integrations/openfoam13/case/Allclean',
@@ -81,7 +85,7 @@ def configuration(path):
     benchmark = settings.get('benchmark', {})
     if not isinstance(benchmark, dict):
         raise ValueError('benchmark must be an object')
-    if benchmark and (benchmark.get('experiment_kind') not in ('h2_combustion', 'variable_density_nonreacting')
+    if benchmark and (benchmark.get('experiment_kind') not in FIELD_PROFILES
                       or benchmark.get('role') not in ('primary', 'supplementary')):
         raise ValueError('explicit supported benchmark experiment_kind and role required')
     cfg = AdaptiveConfig.from_dict(settings['solver'])
@@ -181,6 +185,22 @@ def load_expert(out, cfg):
             or isinstance(updates, bool) or not isinstance(updates, int) or updates < 1):
         raise ValueError('this workflow needs H_S trained on recorded CFD with fixed P')
     trained = read(path.parent / 'training_manifest.json')
+    from ..level_smoothers import PerLevelSmoother
+    declared_architecture = read(Path(out) / 'configuration.json').get('training', {}).get(
+        'smoother_architecture', 'shared')
+    actual_architecture = 'per_level' if isinstance(model.smoother, PerLevelSmoother) else 'shared'
+    if (declared_architecture not in ('shared', 'per_level')
+            or any(value != declared_architecture for value in (
+                actual_architecture, trained.get('smoother_architecture', 'shared'),
+                model.metadata.get('smoother_architecture', 'shared'),
+                status.get('smoother_architecture', 'shared')))):
+        raise ValueError('checkpoint smoother architecture differs from this study')
+    if actual_architecture == 'per_level':
+        expected_levels = list(model.smoother.level_indices)
+        if any(value != expected_levels for value in (
+                trained.get('smoother_level_indices'), model.metadata.get('smoother_level_indices'),
+                status.get('smoother_level_indices'))):
+            raise ValueError('checkpoint per-level CNN coverage evidence differs')
     expected = replace(cfg, mode='research', branch='H_S', use_smoother=True,
                        use_transfer=False, spatial=False, gate_mode='open', use_learned_controller=False)
     actual = AdaptiveConfig.from_dict(trained['config'])

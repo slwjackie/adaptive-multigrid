@@ -13,6 +13,7 @@ from .autograd_sparse import SparseTensor
 from .banks import selected_level,resolve_device,smoothing_schedule
 from .spatial import features_from_statistics,expand_mask
 from .native import block_statistics
+from .level_smoothers import smoother_for_level
 
 @dataclass
 class TLevel:
@@ -96,9 +97,10 @@ def make_graph(a,shape,components,cfg,*,learned=True,reference_root=None):
             level.interpolation_weights=torch.tensor(base,dtype=torch.float64)
         ac=level.p.transpose().product(at.product(level.p)).symmetrize()
         if use_s and cfg.use_smoother:
-            cascade=hasattr(components.smoother,'stage_directions_and_gains')
-            dirs,gains=(components.smoother.stage_directions_and_gains(feat,index) if cascade
-                        else components.smoother.direction_and_gain(feat))
+            smoother=smoother_for_level(components.smoother,index)
+            cascade=hasattr(smoother,'stage_directions_and_gains')
+            dirs,gains=(smoother.stage_directions_and_gains(feat,index) if cascade
+                        else smoother.direction_and_gain(feat))
             level.is_residual_cascade=cascade
             level.dirs=dirs.to('cpu',dtype=torch.float64);level.gains=gains.to('cpu',dtype=torch.float64)*cfg.mg.smoother_gain_multiplier
         level.coarse=build(ac,cs,index+1,reference.coarse if frozen else None)

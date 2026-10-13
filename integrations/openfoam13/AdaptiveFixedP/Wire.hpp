@@ -16,6 +16,15 @@
 #include <vector>
 
 namespace adaptiveFixedP {
+// Incompressible pressure Laplacians may use the negative-definite convention.
+// A common -1 applied to A, b and native Amul witnesses leaves x and raw L2
+// residual norms unchanged. This is sign canonicalization, never SPD admission.
+template<class Values> double pressureEquationScale(const std::string& field,const Values& diagonal) {
+    if(field!="p_rgh"||diagonal.size()==0)return 1.;
+    for(std::size_t i=0;i<std::size_t(diagonal.size());++i)
+        if(!std::isfinite(double(diagonal[i]))||!(diagonal[i]<0))return 1.;
+    return -1.;
+}
 inline std::string quote(const std::string& s) {
     static const char* hex="0123456789abcdef";
     std::string o="\"";

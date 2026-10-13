@@ -135,40 +135,8 @@ def compare(source, target, cfg, expert, settings, repeats):
 
 
 def probe_report(episodes, margin):
-    # Retain old all-window counts for comparison. The new candidacy decision
-    # uses complete, mutually nonoverlapping winning windows within each case.
-    raw = reuse.tradeoff_report(episodes, margin)
-    raw.pop("rule")
-    raw.pop("world_model_candidate")
-    wins = dict(refresh_wins=0, reuse_wins=0)
-    selected, failed_measurements = [], 0
-    for ep in episodes:
-        end = 0
-        horizon = ep["probe_horizon"]
-        for i, (available, measured) in enumerate(zip(ep["available"], ep["horizon_measurements"])):
-            failed_measurements += sum(not row["success"] for rows in measured.values() for row in rows)
-            if not all(available) or i < end:
-                continue
-            a, b = measured["0"], measured["1"]
-            if not all(r["success"] and r["pressure_calls"] == horizon for r in a + b):
-                continue
-            ac, bc = [r["total_seconds"] for r in a], [r["total_seconds"] for r in b]
-            if not all(v is not None and np.isfinite(v) and v > 0 for v in ac + bc):
-                raise ValueError("invalid probe timing")
-            action = ("reuse" if min(ac) > max(bc) * (1 + margin) else
-                      "refresh" if min(bc) > max(ac) * (1 + margin) else None)
-            if action is not None:
-                wins[action + "_wins"] += 1
-                selected.append(dict(trajectory=ep["trajectory"], start_position=i,
-                                     end_position_exclusive=i + horizon, action=action))
-                end = i + horizon
-    return dict(**raw, nonoverlapping_wins=wins, selected_windows=selected,
-                failed_rollout_measurements=failed_measurements,
-                world_model_candidate=all(n >= 3 for n in wins.values()) and failed_measurements == 0,
-                rule="at least three complete nonoverlapping repeated-cost wins per action, no failed rollouts",
-                count_scope="top-level wins/inconclusive/failed retain legacy all-window counts; "
-                            "candidacy uses nonoverlapping_wins; selection removes shared pressure calls, "
-                            "not temporal correlation")
+    # Share the full-horizon, nonoverlapping gate with the main study runner.
+    return reuse.tradeoff_report(episodes, margin)
 
 
 def collect_probe(source, target, cfg, expert, settings):

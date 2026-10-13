@@ -142,6 +142,16 @@ def build_plan(args, config):
         families.append("shear_control")
     if len(set(families)) != len(families):
         raise ValueError("duplicate families")
+    pressure_tolerances = config.get("pressure_tolerances", {})
+    if not isinstance(pressure_tolerances, dict) or set(pressure_tolerances) - set(FAMILIES):
+        raise ValueError("pressure_tolerances must map declared flow families to pressure stopping tolerances")
+    for family, limits in pressure_tolerances.items():
+        if not isinstance(limits, dict) or set(limits) - {"tolerance", "absolute_tolerance"}:
+            raise ValueError("pressure_tolerances admits only tolerance and absolute_tolerance")
+        for key, value in limits.items():
+            if (isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not math.isfinite(value) or value <= 0 or (key == "tolerance" and value >= 1)):
+                raise ValueError("invalid pressure_tolerances for " + family + ": " + key)
     arms = [dict(id="shared_l0", architecture="shared", levels=[0]),
             dict(id="shared_l01", architecture="shared", levels=[0, 1]),
             dict(id="per_level_l01", architecture="per_level", levels=[0, 1])]
@@ -158,6 +168,9 @@ def build_plan(args, config):
         prepared[family] = dict(cases=cases_for(family), timing=profile["families"][family],
             configs={arm["id"]: family_settings(config["base"], family, arm, profile) for arm in arms})
         for settings in prepared[family]["configs"].values():
+            # One declared threshold for native recording, all CNN arms,
+            # classical/reuse/WM policies and coupled native baselines.
+            settings["solver"]["mg"].update(pressure_tolerances.get(family, {}))
             settings["smoother_reuse"]["baseline_repeats"] = args.repeats or 3
             settings["smoother_reuse"]["measurement_repeats"] = args.repeats or 3
     hydrogen = dict(enabled=bool(args.with_h2))
@@ -662,7 +675,10 @@ def advance_family(root, family, plan, stop):
 def hydrogen_settings(source, plan, *, world_selected):
     """Transfer a method, not inert weights or inert physical tolerances."""
     settings = deepcopy(plan["hydrogen"]["base_config"])
+    target_stopping = {key: settings["solver"]["mg"][key]
+                       for key in ("tolerance", "absolute_tolerance", "residual_reference")}
     settings["solver"] = deepcopy(source["solver"])
+    settings["solver"]["mg"].update(target_stopping)
     settings["solver"]["mg"]["max_cycles"] = 600
     settings["training"] = deepcopy(source["training"])
     settings["smoother_reuse"] = deepcopy(source["smoother_reuse"])

@@ -221,7 +221,7 @@ snGradSchemes { default orthogonal; }
         socketPath "{args.socket_path}";
         nx {args.nx};
         ny {args.ny};
-        adaptiveAtol 1e-12;
+        adaptiveAtol 1e-13;
         adaptiveRtol 1e-8;
         tolerance 1e-10;
         relTol 0;

@@ -52,7 +52,8 @@ def test_design_controls_levels_budget_tolerance_and_world_factorial(tmp_path):
             write_json(path, settings)
             _, cfg = configuration(path)
             assert cfg.mg.max_cycles == 600
-            assert cfg.mg.tolerance == 1e-8 and cfg.mg.absolute_tolerance == 1e-12
+            assert cfg.mg.tolerance == 1e-8
+            assert cfg.mg.absolute_tolerance == (1e-13 if family == "lox_he_sloshing" else 1e-12)
             assert cfg.smoother_levels == ((0,) if arm == "shared_l0" else (0, 1))
     assert value["families"]["h2_crossflow"]["timing"]["delta_t"] == 2e-5
     with pytest.raises(ValueError, match="n="):
@@ -75,6 +76,42 @@ def test_all_declared_native_cases_generate_and_validate(tmp_path, family):
         contract = validate_case_contract(runner.read(output/"contract.json"))
         assert contract["split"] == case["split"]
         assert contract["physics"]["reacting"] is False
+
+
+def test_sloshing_pressure_criteria_reach_every_online_solver_mode(tmp_path):
+    from adaptive_mg.v67.h2_fixed_p.fullrun import _rewrite_bridge
+    from adaptive_mg.v67.h2_fixed_p.study import configuration
+    generator = runner.module("_slosh_pressure_controls", runner.generator_for("lox_he_sloshing"))
+    root = generator.generate(generator.parser().parse_args([
+        "--output", str(tmp_path/"case"), "--case-id", "check", "--case-group", "check", "--split", "train"]))
+    contract = runner.read(root/"contract.json")
+    assert contract["physics_checks"]["alpha_bounds_tolerance"] == 1e-8
+    assert "adaptiveAtol 1e-13;" in (root/"system/fvSolution").read_text()
+    designs = plan(tmp_path)["families"]["lox_he_sloshing"]["configs"]
+    for arm, settings in designs.items():
+        cfg_path = tmp_path/(arm+".json")
+        runner.write(cfg_path, settings)
+        _, cfg = configuration(cfg_path)
+        for mode in ("native", "native_pcg", "native_gamg", "classical", "hs"):
+            _rewrite_bridge(root, mode, "/tmp/slosh-pressure-check.sock", cfg)
+            text = (root/"system/fvSolution").read_text()
+            assert "adaptiveAtol 1e-13;" in text and "adaptiveRtol 1e-08;" in text
+            assert "maxIter 600;" in text
+
+
+@pytest.mark.parametrize("limits", [
+    {"unknown": {"absolute_tolerance": 1e-13}},
+    {"lox_he_sloshing": {"alpha_bounds_tolerance": 1e-6}},
+    {"lox_he_sloshing": {"absolute_tolerance": 0}},
+    {"lox_he_sloshing": {"absolute_tolerance": float("nan")}},
+    {"lox_he_sloshing": {"tolerance": 1}},
+])
+def test_family_pressure_tolerances_reject_invalid_stopping_controls(tmp_path, limits):
+    args = arguments(tmp_path)
+    config = runner.read(args.config)
+    config["pressure_tolerances"] = limits
+    with pytest.raises(ValueError, match="pressure_tolerances"):
+        runner.build_plan(args, config)
 
 
 def test_dry_run_requires_no_openfoam_and_resume_rejects_mutation(tmp_path, monkeypatch):
@@ -153,11 +190,11 @@ def test_collect_one_failure_is_preserved_and_does_not_advance_other_cases(tmp_p
     assert not result["families"]
 
 
-def clone_fixture(tmp_path, monkeypatch):
+def clone_fixture(tmp_path, monkeypatch, family="shear_composition"):
     from adaptive_mg.v67.h2_fixed_p import study as base
     from adaptive_mg.v67.smoother_reuse import study as reuse
     parent, target = tmp_path/"parent", tmp_path/"variant"
-    settings = plan(tmp_path)["families"]["shear_composition"]["configs"]["shared_l01"]
+    settings = plan(tmp_path)["families"][family]["configs"]["shared_l01"]
     manifest = dict(configuration_digest=digest(settings), dataset_sha256="same-real-recording", source_digest="source")
     contract = dict(configuration_digest=digest(settings), settings_digest=digest(settings["smoother_reuse"]),
                     dataset_sha256="same-real-recording", expert_sha256="expert", source_digest="source")
@@ -177,8 +214,9 @@ def clone_fixture(tmp_path, monkeypatch):
     return parent, target
 
 
-def test_world_clone_reuses_exact_labels_weights_and_pins_parent(tmp_path, monkeypatch):
-    parent, target = clone_fixture(tmp_path, monkeypatch)
+@pytest.mark.parametrize("family", ["shear_composition", "lox_he_sloshing"])
+def test_world_clone_reuses_exact_labels_weights_and_pins_parent(tmp_path, monkeypatch, family):
+    parent, target = clone_fixture(tmp_path, monkeypatch, family)
     variant = dict(hidden=32, world_memory="shared", world_head="role_mlp", world_head_hidden=16)
     runner.clone_world_study(parent, target, variant)
     assert (parent/"expert/candidate.pt").read_bytes() == (target/"expert/candidate.pt").read_bytes()
@@ -290,6 +328,10 @@ def test_hydrogen_inherits_actual_cnn_and_world_not_inert_physics(tmp_path):
     assert target["training"]["smoother_architecture"] == "per_level"
     assert target["solver"]["smoother_levels"] == [0, 1]
     assert target["solver"]["mg"]["max_cycles"] == 600
+    for key in ("tolerance", "absolute_tolerance", "residual_reference"):
+        assert target["solver"]["mg"][key] == value["hydrogen"]["base_config"]["solver"]["mg"][key]
+    assert source["solver"]["mg"]["absolute_tolerance"] == 1e-13
+    assert target["solver"]["mg"]["absolute_tolerance"] == 1e-12
     assert target["smoother_reuse"]["hidden"] == 64
     assert target["smoother_reuse"]["world_memory"] == "independent_roles"
     assert target["physical_tolerances"] == value["hydrogen"]["base_config"]["physical_tolerances"]

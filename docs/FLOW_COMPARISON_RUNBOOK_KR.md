@@ -24,7 +24,7 @@ LOX–He는 헬륨으로 가압된 산소 탱크의 **계면 유체역학** 적�
 4. World Model은 공유 GRU의 hidden 16/32/64와 기존 선형 출력/역할별 작은 비선형 MLP 출력을 비교한다. 역할별 독립 GRU도 별도 옵션으로 비교한다. 파라미터 수와 실제 정책 실행 비용을 함께 기록한다.
 5. 튜닝 자료로 선택하고 validation을 통과한 구성을 고정한 뒤 test를 연다. test에서 가장 빠른 구성을 다시 골라 최종 성능으로 보고하지 않는다.
 
-최대 반복 수는 600회이고 수렴하면 즉시 종료한다. 모든 정책은 같은 상대·절대 잔차 기준을 사용한다. CNN 가중치는 온라인에서 재학습하지 않는다. 갱신은 현재 행렬에서 smoother 연산자를 다시 생성하는 것이며, P는 고정한다. 현재 World Model의 한 행동은 선택된 level들의 smoother를 함께 갱신/재사용한다. level마다 다른 갱신 행동을 선택하는 정책은 후속 연구 범위다.
+최대 반복 수는 600회이고 수렴하면 즉시 종료한다. 같은 유동 안의 모든 정책은 같은 상대·절대 잔차 기준을 사용한다. 기본 압력 상대 허용오차는 `1e-8`이며, 절대 허용오차는 슬로싱 `1e-13`, 혼합층·횡류 제트 `1e-12`다. `configs/v6_7_flow_comparison.json`의 `pressure_tolerances`가 해당 유동의 공통 base 설정에 우선하며 생성된 계획에 고정된다. CNN 가중치는 온라인에서 재학습하지 않는다. 갱신은 현재 행렬에서 smoother 연산자를 다시 생성하는 것이며, P는 고정한다. 현재 World Model의 한 행동은 선택된 level들의 smoother를 함께 갱신/재사용한다. level마다 다른 갱신 행동을 선택하는 정책은 후속 연구 범위다.
 
 ## 비용과 결과 해석
 
@@ -162,6 +162,43 @@ python -u scripts/run_v6_7_flow_comparison.py \
 ```
 
 다시 실패하면 전체 수집으로 넘어가지 않는다. `families/lox_he_sloshing/record_cases/tune_slosh/native_field_checks.json`에 실패한 수치와 필드 해시를 저장한다. `log.foamRun`의 alpha residual·극값·Courant 수·연속성 및 필요하면 시간 간격 민감도를 확인한다. 이 기록은 성공한 `physics_profile.json`을 만들지 않으며 실패한 디렉터리는 그대로 보존한다. v3는 이전 설정의 증거로 보존하고 새 코드로 resume하지 않는다. Python 회귀시험은 실제 WSL CFD 통과를 대신하지 않는다.
+
+### 압력 정밀도 진단 통과 후 본 실험 재개 (v5)
+
+사용자가 제공한 WSL 실행 결과에서 alpha 선형 풀이만 강화한 v4는 같은 상한 초과로 실패했다. 이후 압력 절대 허용오차만 `1e-12 → 1e-13`으로 강화한 `slosh_pressure_diagnostics_v1/run`의 `tune_slosh` 수집이 `partial / collect_one`으로 정상 완료됐다. 이것은 해당 케이스의 저장된 필드·압력 기록 검사를 통과했다는 증거다. 모든 시간 단계의 alpha 상한, 다른 케이스의 통과, mesh/time-step 수렴, Classical·NN·World Model의 속도 이득까지 입증한 것은 아니다. 압력 정확도 민감성은 확인됐지만 국소 유량 오차 누적이라는 메커니즘은 추가 검증이 필요하다.
+
+이를 반영해 슬로싱의 모든 CNN arm과 그 안의 Classical·재사용·World Model·native PCG/GAMG 비교에 공통 압력 절대 허용오차 `1e-13`을 사용한다. alpha 검사 기준 `1e-8`과 alpha 선형 풀이 기준 `1e-12`는 유지한다. 수소 후속 검증은 구조를 전달받되, 압력 정지 기준은 H₂ base config의 값을 유지한다. 따라서 슬로싱을 전이 source로 지정해도 슬로싱 전용 압력 허용오차가 H₂로 복사되지 않는다.
+
+기존 진단 계획은 슬로싱만 포함하고 `--with-h2`가 없다. 새 소스·설정을 반영한 본 실험은 아래 v5로 시작하며 이전 결과와 설정 해시는 보존한다. 이번 변경은 Python·설정 파일이므로 `p_rgh`를 지원하는 C++ 플러그인을 이미 빌드했다면 재빌드는 필요 없다.
+
+```bash
+cd /home/jackie/adaptive-multigrid-h2 &&
+git switch research/modulated-shear-temporal &&
+git pull --ff-only origin research/modulated-shear-temporal &&
+source /opt/openfoam13/etc/bashrc &&
+source .venv/bin/activate &&
+export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 &&
+export LD_LIBRARY_PATH="$FOAM_USER_LIBBIN${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" &&
+set -o pipefail &&
+mkdir -p artifacts/merge_verify_logs_v5 &&
+sha256sum --quiet -c FLOW_COMPARISON_SOURCE.sha256 &&
+sha256sum --quiet -c PACKAGE_MANIFEST.sha256 &&
+python -u scripts/run_v6_7_flow_comparison.py \
+  --output artifacts/three_flow_merge_check_v5 \
+  --families lox_he_sloshing shear_composition h2_crossflow \
+  --profile quick --n 31 --repeats 3 \
+  --independent-grus --with-h2 --h2-source-family h2_crossflow \
+  --stop-after collect \
+  2>&1 | tee artifacts/merge_verify_logs_v5/collect.log
+```
+
+`status: complete`, `completed_through: collect`를 확인한 뒤 probe를 실행한다. 이후 validation/test도 같은 v5 계획에서 진행한다. 각 단계가 실패하면 그 뒤 단계로 넘어가지 않는다.
+
+```bash
+python -u scripts/run_v6_7_flow_comparison.py \
+  --output artifacts/three_flow_merge_check_v5 --resume --stop-after probe \
+  2>&1 | tee artifacts/merge_verify_logs_v5/probe.log
+```
 
 ## 비반응 비교 → 실제 H₂ 반응유동 검증
 

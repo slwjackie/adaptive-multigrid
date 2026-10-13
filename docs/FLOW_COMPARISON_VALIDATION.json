@@ -62,5 +62,34 @@
     "actual_cfd_executed": false,
     "overshoot_resolution_confirmed": false,
     "next_step": "WSL tune_slosh single-case native collection, then full collection only if it passes"
+  },
+  "sloshing_pressure_precision": {
+    "source_digest": "2528b7687d794690a179517f26eaef1ef84e5809de1046277b55879d53d74da8",
+    "command": "OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 python -m pytest tests/test_flow_comparison_pipeline.py tests/test_propulsion_flow_generators.py tests/test_new_flow_physics.py -ra",
+    "passed": 67,
+    "skipped": 0,
+    "failed": 0,
+    "pressure_absolute_tolerance": 1e-13,
+    "pressure_relative_tolerance": 1e-08,
+    "alpha_bounds_acceptance_tolerance_unchanged": 1e-08,
+    "scope": "Per-flow pressure tolerances shared by all study arms and all native/coupled bridge modes; WM clone preserves solver settings; reacting transfer preserves target pressure criteria",
+    "user_reported_native_diagnostic": {
+      "case": "lox_he_sloshing/tune_slosh",
+      "shape": [
+        31,
+        31
+      ],
+      "profile": "quick",
+      "pressure_absolute_tolerance": 1e-13,
+      "status": "partial",
+      "completed_through": "collect_one",
+      "source": "User-provided WSL console output; complete field statistics not supplied",
+      "all_time_step_alpha_bounds_verified": false,
+      "all_sloshing_cases_validated": false
+    },
+    "full_suite_rerun": false,
+    "actual_cfd_executed_by_assistant": false,
+    "root_cause_mechanism_established": false,
+    "next_step": "New v5 full three-flow native collection; continue probe/validation/test only through their existing gates"
   }
 }

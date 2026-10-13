@@ -111,6 +111,11 @@
       "world_head_hidden": 16
     }
   },
+  "pressure_tolerances": {
+    "lox_he_sloshing": {
+      "absolute_tolerance": 1e-13
+    }
+  },
   "default_families": [
     "shear_composition",
     "lox_he_sloshing",

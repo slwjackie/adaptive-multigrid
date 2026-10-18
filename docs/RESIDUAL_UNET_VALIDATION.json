@@ -1,0 +1,90 @@
+{
+  "version": "residual-unet-transfer-validation-v1",
+  "base_commit": "84785a00f9fa3fec4c0534b942775bf0105abf59",
+  "source_digest": "cef63c7365269f7f21b4c6a4596f5c0dc507bab31c4ecc06db324547a61bbfee",
+  "config_sha256": "1bc60c0e529e735bccfc83872f3b498354bdeeafa8a18bbe15412690d241b34b",
+  "environment": {
+    "python": "3.12.14",
+    "torch": "2.14.1+cu130",
+    "device": "cpu",
+    "numerical_dtype": "float64",
+    "generation_dtype": "float32"
+  },
+  "tests": {
+    "new_tests": 47,
+    "full_suite_passed": 705,
+    "full_suite_skipped_before_native_build": 7,
+    "previously_skipped_native_tests_passed_after_build": 7,
+    "unique_tests_passed": 712,
+    "failures": 0
+  },
+  "smoke": {
+    "train_operators": 14,
+    "validation_operators": 14,
+    "direct_updates": 8,
+    "teacher_updates": 8,
+    "direct_skipped": 0,
+    "teacher_skipped": 0,
+    "train_all_resume_from_completed_direct_verified": true,
+    "teacher_gate_adopted": false,
+    "teacher_residual_improvement_vs": {
+      "strong_C": 1.0049193800166007,
+      "direct_CNN": 0.9854852466616537
+    },
+    "required_improvement": 1.0526315789473684,
+    "distillation_status": "skipped",
+    "distilled_checkpoint_created": false,
+    "positive_kd_path_verified_by_real_optimizer_unit_test": true,
+    "final_ood_consumed": false
+  },
+  "measured_direct_vs_strong": {
+    "cold": {
+      "1": {
+        "successes": 14,
+        "total": 14,
+        "geometric_speedup": 0.5173567894024279,
+        "ci95": [
+          0.46541494644762876,
+          0.5823328312726216
+        ]
+      }
+    },
+    "warm": {
+      "1": {
+        "successes": 14,
+        "total": 14,
+        "geometric_speedup": 0.6967427726924706,
+        "ci95": [
+          0.6325867018777867,
+          0.770026577296249
+        ]
+      }
+    },
+    "multiple": {
+      "1": {
+        "successes": 14,
+        "total": 14,
+        "geometric_speedup": 0.49049150732085955,
+        "ci95": [
+          0.4480685283012886,
+          0.5342515897545869
+        ]
+      },
+      "4": {
+        "successes": 14,
+        "total": 14,
+        "geometric_speedup": 0.6612228101208966,
+        "ci95": [
+          0.6056607981399347,
+          0.7298044866698689
+        ]
+      }
+    }
+  },
+  "limitations": [
+    "8-update synthetic smoke is implementation verification, not teacher capacity or research performance evidence.",
+    "Teacher rejected and no distilled performance measured.",
+    "No full research training, shear CFD or final/OOD evaluation was run.",
+    "No speedup or production acceptance claimed."
+  ]
+}

@@ -147,6 +147,37 @@ def distillation_loss(student, teacher, branch):
     return torch.stack(terms).mean()
 
 
+def cycle_action_distillation_loss(student, teacher, student_model, teacher_model, cfg,
+                                   *, probes=2, seed=1):
+    """Match the residual-to-correction action of a complete raw V-cycle.
+
+    Fixed random error probes produce r=Ae on the common fine operator. This
+    trains the effect of every learned P level without matching a coarse basis.
+    Teacher targets are detached; the deployed student remains A-only and runs
+    no teacher, probe generation, or dense inverse. This is an auxiliary loss,
+    not a replacement for residual contraction or a convergence guarantee.
+    """
+    if isinstance(probes, bool) or not isinstance(probes, int) or probes < 1:
+        raise ValueError('KD probes must be a positive integer')
+    if student.shape != teacher.shape:
+        raise ValueError('Cycle-action KD requires a common fine grid')
+    if (student.raw_scipy != teacher.raw_scipy).nnz:
+        raise ValueError('Cycle-action KD requires the same fine operator')
+    rng = torch.Generator(device='cpu').manual_seed(int(seed))
+    errors = torch.randn(student.a.shape[0], probes, generator=rng, dtype=torch.float64)
+    residuals = student.a.apply(errors).detach()
+    residuals = residuals / torch.linalg.vector_norm(residuals, dim=0).clamp_min(1e-100)
+    with torch.no_grad():
+        target = cycle(teacher, torch.zeros_like(residuals), residuals,
+                       teacher_model, cfg, 0).detach()
+    predicted = cycle(student, torch.zeros_like(residuals), residuals,
+                      student_model, cfg, 0)
+    difference = predicted - target
+    numerator = (difference * student.a.apply(difference)).sum(0).clamp_min(0.)
+    denominator = (target * student.a.apply(target)).sum(0).clamp_min(1e-100)
+    return (numerator / denominator).mean()
+
+
 def noharm_penalty(history, reference, tolerance, epsilon=0.05):
     """One-sided excess penalty, not constant baseline subtraction or a proof."""
     if not np.isfinite(epsilon+tolerance) or epsilon < 0 or tolerance <= 0:
@@ -186,8 +217,11 @@ def full_cycle_objective(example, model, cfg, *, prefix=2, tail=1, teacher=None,
                          lambda_kd=0., lambda_mg=1., lambda_stability=.1,
                          lambda_complexity=.01, lambda_compute=.02, compute_ratio=1.,lambda_feasibility=1.,
                          lambda_noharm=0., noharm_epsilon=.05, lambda_coarse=0.,
-                         coarse_probes=2, loss_seed=1):
+                         coarse_probes=2, loss_seed=1,
+                         distillation_mode='weights', kd_probes=2):
     if prefix<1 or tail<0:raise ValueError('At least one full learned V-cycle is required')
+    if distillation_mode not in ('weights', 'cycle_action'):
+        raise ValueError('Unknown distillation mode')
     if not np.isfinite(lambda_noharm+lambda_coarse) or min(lambda_noharm,lambda_coarse)<0:
         raise ValueError('new loss weights must be finite and nonnegative')
     learned=make_graph(example.a,(example.n,example.n),model,cfg,learned=True)
@@ -230,7 +264,14 @@ def full_cycle_objective(example, model, cfg, *, prefix=2, tail=1, teacher=None,
             target=make_graph(example.a,(example.n,example.n),teacher,cfg,learned=True)
             teacher_feasibility,_=transfer_feasibility(target,teacher,cfg,classical)
         if teacher_feasibility['feasible']:
-            kd=distillation_loss(learned,target,cfg.branch);kd_status='applied'
+            if distillation_mode == 'cycle_action':
+                if feasibility['feasible']:
+                    kd=cycle_action_distillation_loss(learned,target,model,teacher,cfg,
+                                                     probes=kd_probes,seed=loss_seed)
+                    kd_status='applied'
+                else:kd_status='student_proposal_infeasible_on_training_operator'
+            else:
+                kd=distillation_loss(learned,target,cfg.branch);kd_status='applied'
         else:kd_status='teacher_proposal_infeasible_on_training_operator'
     # Architecture FLOPs/work calibration is constant for a fixed branch.
     # Sparse P soft occupancy is the differentiable work term; no clock gradient.
@@ -239,6 +280,7 @@ def full_cycle_objective(example, model, cfg, *, prefix=2, tail=1, teacher=None,
     return loss,dict(multicycle=mg,kd=kd,stability=stability,complexity_proxy=complexity,
         compute_proxy=compute,feasibility_repair=repair,proposal_feasibility=feasibility,kd_status=kd_status,
         noharm=noharm,reference_history=reference_history,coarse_complement=coarse,
+        distillation_mode=distillation_mode,
         task_branch='learned_prefix' if feasibility['feasible'] else 'classical_fallback',
         history=h,actions=(['H']*prefix+['C']*tail if feasibility['feasible'] else ['C']*(prefix+tail))),x
 
@@ -362,7 +404,9 @@ def train_expert(initial, examples, cfg, rules, settings, out, *, branch, teache
                 compute_ratio=calibration['cycle_ratio'],lambda_noharm=float(settings.get('lambda_noharm',0.)),
                 noharm_epsilon=float(settings.get('noharm_epsilon',.05)),
                 lambda_coarse=float(settings.get('lambda_coarse',0.)),
-                coarse_probes=int(settings.get('coarse_probes',2)),loss_seed=int(settings['seed'])+step)
+                coarse_probes=int(settings.get('coarse_probes',2)),loss_seed=int(settings['seed'])+step,
+                distillation_mode=settings.get('distillation_mode','weights'),
+                kd_probes=int(settings.get('kd_probes',2)))
             if not loss.requires_grad or not torch.isfinite(loss):raise FloatingPointError('nonfinite or inactive objective')
             loss.backward();norm=torch.nn.utils.clip_grad_norm_(parameters,float(settings.get('gradient_clip',2.)))
             if not torch.isfinite(norm):raise FloatingPointError('nonfinite gradient')

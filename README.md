@@ -78,6 +78,14 @@ classical parent. Smoke is never an untouched final-test certificate.
 
 ## Legacy workflows
 
+An isolated **residual U-net P teacher → compact CNN student** experiment is
+available via `scripts/run_v6_7_unet_transfer_study.py`. It compares the same
+small CNN trained directly and with full-V-cycle action distillation, admits KD
+only after measured teacher contraction gains, and evaluates setup-inclusive
+student time against frozen strong classical MG. Attention is not used.
+See [the Korean runbook](docs/RESIDUAL_UNET_TRANSFER_KR.md) for the smoke and
+research commands, sparse constraints, teacher gate and independent final/OOD protocol.
+
 See [README_KR.md](README_KR.md) for setup, the six-stage resumable training pipeline, diagnostics, precision contracts, and the exact scope of stability/performance claims.
 
 ```bash

@@ -1,7 +1,7 @@
 name: Neural MG thesis validation
 on:
   push:
-    branches: [main, fix/three-pillars-20260922]
+    branches: [main, fix/three-pillars-20260922, residual-u-net-teacher]
   pull_request:
     branches: [main]
 permissions:

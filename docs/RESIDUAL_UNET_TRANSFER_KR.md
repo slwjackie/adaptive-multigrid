@@ -1,0 +1,137 @@
+# Residual U-net teacher → 작은 CNN student로 P 학습
+
+이 브랜치는 **희소 prolongation을 생성하는 NN**을 비교하는 독립 연구 경로다.
+Teacher가 validation에서 실제 수렴 개선을 보인 경우에만 증류한다.
+최종 목표는 student의 생성·Galerkin 구성까지 포함한 총 풀이 시간이 strong
+classical보다 짧아지는 것이다. 구현이나 smoke 통과가 속도 향상 증거는 아니다.
+
+## 모델과 수치 연산
+
+| 항목 | Direct / distilled student | Teacher |
+| --- | --- | --- |
+| 입력 | A의 10채널 특징 | 동일 |
+| 구조 | 기존 TransferNet의 residual5 CNN, hidden 8 | Residual U-net, depth 2 |
+| 기본 폭 | 8 | 본 연구 16 → 32 → 64, smoke 4 → 8 → 16 |
+| 출력 | fine 점별 coarse 후보 16개의 delta | 동일 |
+| 사용 시점 | 새 A에 대한 P 생성 후 캐시 | 학습과 명시적 offline 평가만 |
+| Attention | 없음 | 없음 |
+
+Teacher의 각 블록은 `shortcut(x) + Conv(GELU(Conv(x)))`이며 채널이 바뀌면
+shortcut에 1×1 convolution을 사용한다. Encoder에서는 stride-2 convolution으로
+축소하고 decoder에서는 skip 특징맵의 정확한 크기로 bilinear resize한 뒤 채널을
+연결한다. 따라서 7/15/31처럼 홀수 크기나 semi-coarsening의 직사각형을 처리한다.
+U-net 내부의 축소·복원은 **P 가중치를 생성하기 위한 특징 처리**다.
+수치 MG의 restriction/prolongation은 아래의 희소행렬 연산으로 수행한다.
+
+각 numerical level에서 frozen classical parent의 P를 기준으로 사용한다.
+NN 입력은 실제 learned hierarchy의 A_l이고, 출력 delta는 공통 projection을 거친다.
+
+\[
+P_l=P_{C^*,l}+\Delta P_\theta(A_l),\quad
+R_l=P_l^T,\quad A_{l+1}=P_l^T A_lP_l.
+\]
+
+Parent에 존재하는 연결만 허용하고, parent 행합과 coarse-node injection을
+보존한다. 경계의 행합을 무조건 1로 만들지 않는다. Teacher/direct/KD 모두 같은
+support·projection·complexity cap을 쓴다. Zero-initialized head는 정확히 classical
+hierarchy에서 시작한다. Default는 기존 support-preserving softmax delta이며,
+새 run의 `parameterization: affine`으로 동일 제약의 affine delta도 선택 가능하다.
+P와 coarse A의 nonzero 수, hierarchy complexity 제한은 실제 sparse 값으로 검사한다.
+
+## 학습과 teacher 판정
+
+Classical portfolio의 별도 calibration-fit/tune 자료로 strong C*(A)를 고정한다.
+이후 normalized-A digest가 겹치지 않는 train/validation 자료를 새로 생성한다.
+Smoke는 16-plan controlled bank, 본 연구는 EM/schedule을 포함한 88-plan bank다.
+기존 shear/H_S 주 실험과 과거 checkpoint를 수정하지 않는다.
+
+1. `direct`: 작은 CNN을 실제 V-cycle residual loss로 학습한다.
+2. `teacher`: residual U-net을 같은 numerical constraints와 residual loss로 학습한다.
+3. `teacher-check`: 동일 validation A/RHS/초기값에서 3회 **raw numerical V-cycle**
+   후 진짜 residual 비율을 비교한다. 이 경로는 fallback으로 teacher를 대체하지 않는다.
+   별도 safeguarded solve에서 실제 tolerance와 teacher 사용 여부도 확인한다.
+4. Teacher의 residual 비율이 **direct CNN과 strong C 모두 대비 기하평균 5% 이상
+   감소**하고, 최소 사례 수·feasibility·새 실패 없음·실제 neural 사용 조건을 만족해야
+   `teacher_gate.json`의 `adopted`가 true다. Teacher 추론 시간은 이 판정의 기준이 아니다.
+5. `distill`: gate가 false면 사유만 기록하고 checkpoint를 만들지 않는다. True면
+   direct와 **동일한 초기 가중치·작은 CNN 구조·train 순서·총 update 수**로 학습한다.
+   앞부분은 MG loss + KD, 뒷부분은 task-only fine-tuning이다.
+
+본 연구 direct/KD는 각 1,120 updates(앞 840 KD, 뒤 280 task-only), teacher는 2,240
+updates다. Smoke는 각각 8 updates이며 teacher capacity나 최종 성능을 판단할 수 없다.
+Student가 teacher와 같은 긴 범위의 의존성을 표현할 수 있다는 보장도 없다.
+
+MG loss는 3-cycle의 가중 log residual에 stability·feasibility·no-harm·sparse-cost
+항을 더한다. Teacher와 student의 실제 P, Galerkin A와 coarse solve를 통해 미분한다.
+KD는 P 원소 MSE 대신 deterministic random error probe에서 만든 r=Ae에 대해
+전체 V-cycle의 보정값을 맞춘다.
+
+\[
+\mathcal L_{KD}=\mathbb E_r
+\frac{\|V_S(0,r)-\operatorname{stopgrad}(V_T(0,r))\|_A^2}
+{\|V_T(0,r)\|_A^2}.
+\]
+
+Teacher 출력은 detach하며 probes/KD/teacher는 배포 시 실행하지 않는다.
+이 loss는 유한 probe에 대한 보조 목적함수이며 수렴 보증이나 spectral-radius 계산이 아니다.
+기존 연구 경로의 기본 `weights` KD는 유지되고 이 새 연구에서만 `cycle_action`을 선택한다.
+
+## 설치와 smoke 실행
+
+저장소에서 실행한다. 기존 작업 변경분은 보존하고 이 브랜치를 checkout한다.
+
+```bash
+git fetch origin
+git switch residual-u-net-teacher
+git pull --ff-only origin residual-u-net-teacher
+python3 -m pip install -e '.[dev]'
+export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1
+RUN="artifacts/unet_transfer_smoke_$(date +%Y%m%d_%H%M%S)"
+python3 scripts/run_v6_7_unet_transfer_study.py calibrate --config configs/v6_7_unet_transfer_smoke.json --run-dir "$RUN"
+python3 scripts/run_v6_7_unet_transfer_study.py train --run-dir "$RUN"
+python3 scripts/run_v6_7_unet_transfer_study.py teacher-check --run-dir "$RUN"
+python3 scripts/run_v6_7_unet_transfer_study.py distill --run-dir "$RUN"
+python3 scripts/run_v6_7_unet_transfer_study.py benchmark --run-dir "$RUN" --repeats 3 --warmups 1 --rhs-counts 1 4 --regimes cold warm multiple
+```
+
+Teacher가 거부되어도 마지막 benchmark는 direct CNN과 strong C를 비교한다.
+Teacher가 통과한 경우에는 증류가 완료되어야 benchmark가 가능하다.
+`train --stage direct` / `train --stage teacher`로 개별 실행할 수 있다.
+중단한 단계에는 `--resume`을 사용한다. 소스·설정·환경·가중치·판정 근거가 달라지면
+새 RUN을 만들어야 한다. Teacher gate 이후에는 같은 RUN에서 전문가를 다시 학습하지 않는다.
+
+## 본 연구와 최종 평가
+
+새 RUN에서 위 calibrate의 config를 `configs/v6_7_unet_transfer_research.json`으로
+바꾼 뒤 같은 train → teacher-check → distill → benchmark 순서로 실행한다.
+Benchmark는 `--repeats 5 --warmups 1 --rhs-counts 1 4 16 64 --regimes cold warm multiple`
+을 권장한다. Offline 학습 시간은 따로 기록하며 online 시간에 합산하지 않는다.
+Online cold/multiple 시간에는 A-only selector, student P 생성, sparse assembly,
+Galerkin/coarse factorization, 실제 solve와 fallback 비용이 포함된다.
+
+독립 final/OOD는 모든 설정과 checkpoint를 고정한 다음 한 번만 소비한다.
+
+```bash
+python3 scripts/run_v6_7_unet_transfer_study.py freeze --run-dir "$RUN" --repeats 5 --warmups 1 --rhs-counts 1 4 16 64 --regimes cold warm multiple
+python3 scripts/run_v6_7_unet_transfer_study.py final --run-dir "$RUN"
+```
+
+Smoke run에서는 freeze/final이 허용되지 않는다. Final을 보고 teacher/gate/모델을
+다시 선택할 수 없다. Student 성능 판단은 named workload와 공통 성공 cohort에 한정된다.
+
+## 확인할 결과
+
+- `checkpoints/{direct,teacher,distilled}/training.json`: 실제 loss, feasibility, KD 적용,
+  skipped update, 학습 시간. Distilled는 gate 통과 시에만 존재한다.
+- `teacher_raw_contractions.json`: fallback 없는 동일 cycle residual 곡선.
+- `teacher_validation/raw_results.json`: teacher/direct/strong C의 실제 tolerance 검증.
+- `teacher_gate.json`, `distillation_decision.json`: 판정 근거와 checkpoint/evidence hash.
+- `benchmarks/validation/comparison.json` 및 `comparison.csv`: 시간, cycle, 실패,
+  solution/energy error, 실제 neural 사용, setup/fill 비용.
+- `deployment_decisions.json`: cold/multiple 각각 strong C 대비 1.03× 이상,
+  CI 하한 >1, 새 실패 없음, 실제 neural 사용, accuracy 진단을 모두 충족하는지.
+  Warm-only 개선은 이 판정을 통과시키지 않는다. 증류의 추가 가치는 direct CNN 대비
+  속도비도 함께 보고 판단한다. 어떤 경우에도 자동 production 승격이나 수렴 인증은 없다.
+
+Validation의 선택 결과와 independent final/OOD 결과를 구분해야 한다.
+실험이 느리거나 teacher gate가 거부되는 결과도 그대로 기록한다.

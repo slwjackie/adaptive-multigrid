@@ -11,8 +11,7 @@ kernel로 풀며, 작은 action-conditioned recurrent world model이 hierarchy �
 **이 패키지는 수소 화염장을 생성하거나 Navier–Stokes/chemistry를 적분하지 않는다.**
 실제 OpenFOAM 설치, 원본 H2 pressure-matrix 시퀀스, OpenFOAM runtime solver plugin은
 이 구현에 포함되지 않았다. `source_kind=synthetic_elliptic`의 demo를 combustion CFD로
-부르면 안 된다. 외부 LDU recorder/importer 및 Python sequential-solver API를 제공한다.
-실제 CFD 측의 boundary-finalized export/호출, 물리 정확도와 전체 CFD 시간 검증은 별도다.
+부르면 안 된다. 외부 CFD 연결 기능은 제거했으며, 합성 타원형 선형계용 sequential-solver API만 유지한다.
 
 ## 1. World model의 의미
 
@@ -73,8 +72,7 @@ Outer Krylov, 정답을 이용한 보정, 미래 operator oracle는 없다.
 
 ```
 src/adaptive_mg/v67/world_model/
-    data.py       # 순서/물리 case 분리, snapshot hash, SPD admission, finalized LDU import
-    adapter.py    # Python-side finalized-LDU recorder, native 순서로 해 벡터 복원
+    data.py       # 순서/물리 case 분리, snapshot hash, SPD admission
     backend.py    # 실제 hierarchy reuse/update/rebuild, 기존 MG numerical kernels, recovery
     learning.py   # GRU dynamics ensemble, training, empirical calibration, short planning
     study.py      # data -> collect -> train -> validation -> freeze -> test
@@ -196,76 +194,12 @@ fallback, decision_reason, 실제 learned transfer flag. Calibration margin/ense
 경험적 불확실성 정보일 뿐 no-harm/속도 보장이 아니다. Policy가 모두 C를 고르면 Neural
 가속 성공이 아니다. 본인이 검사한 validation을 보며 바꾸면 새 independent test가 필요하다.
 
-## 8. OpenFOAM/CFD 데이터 입력 계약
+## 8. 현재 데이터 범위
 
-현재 제공된 것은 **Python 측 recorder/importer와 sequential solve API**다. OpenFOAM의
-fvSolution에 없는 `WorldMG` 이름만 써서 호출할 수 있는 C++ plugin은 제공하지 않는다.
+이 브랜치는 합성 타원형 선형계만 사용한다. 외부 CFD finalized-LDU recorder/importer,
+native 순서 변환, `--input-ldu` 실행 옵션은 제거했다. Sloshing·전단 혼합층 유동 해석기는 없다.
+`WorldMGSolver.step(snapshot)`은 합성 coefficient sequence의 현재 선형계를 푸는 API이며,
+독립 trajectory를 시작할 때 `reset()`한다. 이는 유동장의 시간 적분기가 아니다.
 
-OpenFOAM native wrapper에서 FINALIZED scalar system을 넘겨야 한다. Foundation v13
-`fvScalarMatrix::solveSegregated()`는 boundary diagonal과 source를 더한 뒤 ldu solver를
-호출한다. 그 단계보다 앞의 내부 diag/source만 저장하면 실제 pressure system과 다를 수 있다.
-Pressure-reference/nullspace, cyclic/processor coupling까지 처리해야 하므로, 초기 지원은
-**anchored SPD, serial, coupled interface 0개, explicit structured2D cell mapping**으로 제한한다.
-Pure Neumann, nonsymmetric/transonic, MPI, unstructured3D는 조용히 변환하지 않고 거부한다.
-
-Python-side recorder:
-
-```python
-from adaptive_mg.v67.world_model.adapter import FinalizedLduRecorder
-recorder = FinalizedLduRecorder("pressure_exports", producer="solver/version/commit", physics="H2-air case description")
-# 각 solve에서 native wrapper가 공급한 FINALIZED 배열로 record()를 호출한다.
-# 전체 인자와 저장 schema는 adapter.py 및 tests/test_sequence_world_model.py 참고.
-```
-
-NPZ 필수 배열:
-`diag`, `lower_addr`, `upper_addr`, `lower`, `upper`, `b`, `x0`, `probe_vectors`,
-`probe_products`, `structured_to_native`. `A[lower_addr,upper_addr]=upper`, 반대가 lower다.
-`probe_products`는 외부 코드의 실제 matrix application에서 계산한 두 개 이상의 독립 witness다.
-Exporter가 스스로 동일 CSR로 계산한 값을 넣으면 boundary 누락을 검증하지 못한다.
-
-`structured_to_native[i]`는 structured x-major 위치 i에 해당하는 native cell index다.
-Permutation이 수학적으로 유효한지 검사하지만 실제 mesh가 그 tensor-product ordering을
-따르는지는 native wrapper가 책임져야 한다. Test에서 Nx×Ny reshape만 해서 임의 mesh를
-지원한다고 주장하면 안 된다. `mesh_id`와 `boundary_id`는 좌표/경계/reference 변경을 반영한
-안정적인 digest여야 한다. 각 pressure solve의 index는 엄격히 증가, 물리 time은 비감소다.
-같은 time의 PIMPLE correctors도 다른 index로 저장한다.
-
-Manifest는 `ldu_sequence.json`이고 schema는 `finalized-ldu-sequence-v1`이다.
-Trajectory마다 `case_group`, `split`을 지정한다. 같은 물리 case의 time 구간을 train/test로
-임의 분할해서 누출시키지 않는다. 단일 case 하나만으로 독립 case 일반화를 주장할 수 없다.
-
-```bash
-RUN="artifacts/world_cfd_$(date +%Y%m%d_%H%M%S)"
-python scripts/run_v6_7_world_study.py prepare --run-dir "$RUN" \
-  --config configs/v6_7_world_model_research.json \
-  --source-run "$SOURCE_RUN" \
-  --expert-checkpoint "$SOURCE_RUN/experts/H_P/candidate.pt" \
-  --input-ldu pressure_exports
-```
-
-이후 collect/train/evaluate 절차는 동일하다. Synthetic에서 학습한 artifact를 외부 CFD에
-그대로 적용하려 하면 domain guard가 C로 돌린다. CFD sequence로 별도 학습·보정한다.
-
-## 9. 실제 runtime 결합 API
-
-`WorldMGSolver.step(snapshot)`은 미래 A 없이 현재 system의 x와 기록을 돌려준다.
-한 CFD case는 한 solver instance를 사용하며, 독립 case 전환 때 `reset()`한다.
-Native order로 돌려놓을 때 `solution_to_native(x, permutation)`을 사용한다.
-반환 `success=False`를 OpenFOAM이 성공처럼 처리하면 안 된다. 원 CFD의 reference solver로
-복귀하거나 timestep 처리를 실패로 중단해야 한다. 이 native 호출/에러 처리 wiring은 아직
-제공하지 않았으므로 실시간 reactingFoam 가속이 구현됐다고 주장하지 않는다.
-
-실제 H2 논문 검증에는 pressure time뿐 아니라 전체 CFD 시간, mass conservation, 온도/종/열방출
-변화, timestep/PIMPLE 수, 동일 이산화/chemistry/허용오차 검증이 추가로 필요하다.
-
-## 근거와 novelty 범위
-
-- Demidov (2021), *Partial Reuse AMG Setup Cost Amortization Strategy for the Solution of Non-Steady State Problems*:
-  https://arxiv.org/abs/2108.02054 — P 재사용과 current coarse matrices/smoother rebuild의 고전 기준.
-- OpenFOAM Foundation v13 `fvScalarMatrix.C`:
-  https://cpp.openfoam.org/v13/fvScalarMatrix_8C_source.html — finalized boundary/source 위치.
-
-GRU, partial reuse, ensemble, model-based planning 자체가 새로운 발명이라는 주장은 없다.
-이 구현의 검증할 가설은 action-conditioned solver dynamics가 **강한 비신경망 reuse 정책**보다
-실제 time-varying CFD 압력계의 전체 sequence 비용을 줄이는가이다. 현재 구현·합성 테스트는
-그 가설의 성능 우월성 또는 hydrogen combustion 응용 성공을 입증하지 않는다.
+과거 `WORLD_MODEL_VALIDATION.json`은 변경 전 검증 이력이며, 당시의 외부 인터페이스
+테스트 결과는 현재 제공 기능을 뜻하지 않는다. 소스가 바뀌었으므로 새 run을 생성해야 한다.

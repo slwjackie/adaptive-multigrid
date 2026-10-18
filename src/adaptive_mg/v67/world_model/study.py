@@ -14,7 +14,7 @@ from ..models import Components
 from ..strong import StrongRules,load_strong_rules
 from ..three_pillars import _source_digest
 from . import VERSION
-from .data import (generate,import_finalized_ldu,load_manifest,load_trajectories,
+from .data import (generate,load_manifest,load_trajectories,
                    write_json,file_hash,digest)
 from .backend import ACTIONS,SequenceBackend
 from .learning import (FEATURES,feedback,observation,fit_world,calibrate,save_model,
@@ -36,7 +36,7 @@ def default_settings(smoke=True):
                     transfer_levels='all',record_trace=False).to_dict())
 
 
-def prepare(output,config=None,*,source_run=None,expert_checkpoint=None,input_ldu=None):
+def prepare(output,config=None,*,source_run=None,expert_checkpoint=None):
     out=Path(output).resolve()
     if out.exists() and any(out.iterdir()):raise FileExistsError('new world-study directory required')
     settings=read(config) if config else default_settings()
@@ -59,8 +59,7 @@ def prepare(output,config=None,*,source_run=None,expert_checkpoint=None,input_ld
         if expert.metadata.get('training_branch')!=settings['expert_branch']:raise ValueError('expert branch mismatch')
         if not expert.metadata.get('optimizer_updates',0)>0:raise ValueError('supply a genuinely trained expert')
         expert.save(out/'expert.pt');expert_hash=file_hash(out/'expert.pt')
-    if input_ldu:import_finalized_ldu(input_ldu,out/'data')
-    else:generate(out/'data',seed=settings['seed'],counts=settings['counts'],steps=settings['steps'],sizes=settings['sizes'])
+    generate(out/'data',seed=settings['seed'],counts=settings['counts'],steps=settings['steps'],sizes=settings['sizes'])
     manifest=load_manifest(out/'data')
     header=dict(version=VERSION,source_digest=_source_digest(),settings_digest=digest(settings),rules_digest=rules.digest(),
         expert_sha256=expert_hash,data_sha256=file_hash(out/'data/sequence_manifest.json'),hardware=hardware_environment(refresh=True),
@@ -160,9 +159,9 @@ def heuristic(name,obs,available,t):
 
 
 class WorldMGSolver:
-    """Public sequential solve interface, suitable for a verified in-process adapter.
+    """Public sequential solve interface for synthetic elliptic systems.
 
-    Pressure matrix snapshots only; no call advances chemistry/Navier-Stokes.
+    Synthetic matrix snapshots only; no call advances a physical flow state.
     A stream must call reset at independent case boundaries.
     """
     def __init__(self,backend,settings,artifact=None,baseline='world'):
@@ -343,11 +342,11 @@ def main(argv=None):
         p=sub.add_parser(name);p.add_argument('--run-dir',required=True)
         if name=='prepare':
             p.add_argument('--config',default='configs/v6_7_world_model_smoke.json');p.add_argument('--source-run')
-            p.add_argument('--expert-checkpoint');p.add_argument('--input-ldu')
+            p.add_argument('--expert-checkpoint')
         if name in ('collect','evaluate'):p.add_argument('--resume',action='store_true')
         if name=='evaluate':p.add_argument('--split',choices=('validation','test'),default='validation');p.add_argument('--repeats',type=int,default=3)
     a=parser.parse_args(argv)
-    if a.command=='prepare':result=prepare(a.run_dir,a.config,source_run=a.source_run,expert_checkpoint=a.expert_checkpoint,input_ldu=a.input_ldu)
+    if a.command=='prepare':result=prepare(a.run_dir,a.config,source_run=a.source_run,expert_checkpoint=a.expert_checkpoint)
     elif a.command=='collect':collect(a.run_dir,resume=a.resume);return
     elif a.command=='train':train(a.run_dir);print('World model fitted. Independent sequence validation is still required.');return
     elif a.command=='freeze':freeze(a.run_dir);print('Frozen. Synthetic test is NOT hydrogen combustion validation.');return

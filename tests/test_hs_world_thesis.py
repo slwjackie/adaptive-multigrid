@@ -251,24 +251,3 @@ def test_optional_strong_audit_uses_only_declared_calibration_data(tmp_path,monk
     assert set(seen)=={'selector_train','selector_tune'}
     assert (out/'selector_rules.json').read_bytes()==before
     assert (out/'strong_audit_rules.json').exists()
-
-
-def test_gamg_comparator_rejects_synthetic_and_mismatched_rhs(tmp_path,monkeypatch):
-    from adaptive_mg.v67.hs_world import cfd_compare as mod
-    from adaptive_mg.v67.world_model.data import write_json
-    header={'source_kind':'synthetic_elliptic'}
-    monkeypatch.setattr(mod,'load',lambda out:(tmp_path,{},header,None))
-    with pytest.raises(ValueError,match='synthetic'):mod.compare(tmp_path,'missing.json')
-    header.update(source_kind='external_cfd',data_sha256='data')
-    sys=dict(step=0,matrix_digest='A',rhs_digest='b',x0_digest='x0',threshold=1e-8,final_true_residual=1e-9,success=True)
-    hw=dict(machine='x',cpu_model='y',affinity_count=1,torch_threads=1)
-    report=dict(hardware=hw,rows=[dict(trajectory='case',runs={'World_HS':[dict(success=True,total_seconds=1.,rows=[sys])]})])
-    write_json(tmp_path/'temporal/validation/report.json',report)
-    ref=dict(schema='openfoam-gamg-sequence-v1',solver='GAMG',data_sha256='data',time_scope=mod.SCOPE,hardware=hw,
-        execution_threads=1,openfoam_version='unit-test-fixture',configuration_sha256='config',
-        trajectories=[dict(trajectory='case',runs=[dict(total_seconds=2.,systems=[dict(sys,rhs_digest='WRONG')])])])
-    path=tmp_path/'gamg.json';write_json(path,ref)
-    with pytest.raises(ValueError,match='mismatch'):mod.compare(tmp_path,path)
-    ref['trajectories'][0]['runs'][0]['systems'][0]['rhs_digest']='b';write_json(path,ref)
-    out=mod.compare(tmp_path,path)
-    assert out['geometric_speedup']==2. and not out['full_cfd_wall_clock_measured']

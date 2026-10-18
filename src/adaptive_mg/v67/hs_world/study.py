@@ -166,7 +166,7 @@ def main(argv=None):
     from . import temporal
     parser=argparse.ArgumentParser(description=__doc__);sub=parser.add_subparsers(dest='command',required=True)
     for cmd in ('calibrate','train','benchmark','select','strong-audit','world-prepare','collect','world-train',
-                'world-validate','freeze','test','gamg-compare'):
+                'world-validate','freeze','test'):
         p=sub.add_parser(cmd);p.add_argument('--run-dir',required=True)
         if cmd in ('calibrate','train','benchmark','strong-audit','collect','world-validate','test'):
             p.add_argument('--resume',action='store_true')
@@ -179,22 +179,16 @@ def main(argv=None):
             p.add_argument('--rhs-counts',type=int,nargs='+',default=[1,4,16,64])
             p.add_argument('--regimes',nargs='+',choices=REGIMES,default=['warm_multiple','multiple'])
         if cmd=='test':p.add_argument('--component',choices=['sequence','static'],default='sequence')
-        if cmd=='world-prepare':p.add_argument('--input-ldu')
         if cmd=='world-validate':p.add_argument('--repeats',type=int,default=3)
-        if cmd=='gamg-compare':
-            p.add_argument('--reference',required=True);p.add_argument('--split',choices=['validation','test'],default='validation')
     a=parser.parse_args(argv);out=a.run_dir
     if a.command=='calibrate':return calibrate(a.config,out,resume=a.resume)
     if a.command=='train':return train(out,a.variants,resume=a.resume)
     if a.command=='strong-audit':return strong_audit(out,resume=a.resume)
     if a.command=='select':return select(out,tag=a.tag,name=a.variant)
-    if a.command=='world-prepare':return temporal.prepare(out,input_ldu=a.input_ldu)
+    if a.command=='world-prepare':return temporal.prepare(out)
     if a.command=='collect':return temporal.collect(out,resume=a.resume)
     if a.command=='world-train':return temporal.train(out)
     if a.command=='freeze':return temporal.freeze(out)
-    if a.command=='gamg-compare':
-        from .cfd_compare import compare
-        return compare(out,a.reference,split=a.split)
     if a.command=='world-validate':return temporal.evaluate(out,split='validation',repeats=a.repeats,resume=a.resume)
     if a.command=='test' and a.component=='sequence':return temporal.evaluate(out,split='test',repeats=a.repeats,resume=a.resume)
     kw=dict(repeats=a.repeats,warmups=a.warmups,rhs_counts=a.rhs_counts,regimes=a.regimes,resume=a.resume)

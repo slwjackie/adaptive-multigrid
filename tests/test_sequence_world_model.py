@@ -167,20 +167,6 @@ def test_online_rejects_time_reversal_and_does_not_require_future():
     solver.reset();solver.step(make(0));assert solver.t==1
 
 
-def test_external_LDU_import_witness_permutation_and_boundary_contract(tmp_path):
-    src=tmp_path/'input';src.mkdir();s=make();coo=sp.triu(s.a,k=1).tocoo();rng=np.random.default_rng(5)
-    probes=rng.normal(size=(49,2));p=src/'a.npz'
-    np.savez(p,diag=s.a.diagonal(),lower_addr=coo.row,upper_addr=coo.col,upper=coo.data,lower=coo.data,
-             b=s.b,x0=s.x0,probe_vectors=probes,probe_products=s.a@probes,structured_to_native=np.arange(49))
-    entries=[dict(path='a.npz',sha256=D.file_hash(p),boundary_finalized=True,nullspace='none',coupled_interfaces=0,
-          layout='structured_2d_xmajor',shape=[7,7],time=i*.01,index=i,mesh_id='grid',boundary_id='anchored') for i in range(2)]
-    m=dict(schema='finalized-ldu-sequence-v1',physics='user-declared reacting CFD',trajectories=[dict(id='case',case_group='case',split='train',snapshots=entries)])
-    D.write_json(src/'ldu_sequence.json',m);D.import_finalized_ldu(src,tmp_path/'output')
-    _,ss=D.load_trajectories(tmp_path/'output','train')[0];np.testing.assert_array_equal(ss[0].a.toarray(),s.a.toarray())
-    assert not D.load_manifest(tmp_path/'output')['combustion_verified']
-    m['trajectories'][0]['snapshots'][0]['boundary_finalized']=False;D.write_json(src/'ldu_sequence.json',m)
-    with pytest.raises(ValueError,match='boundary'):D.import_finalized_ldu(src,tmp_path/'rejected')
-
 
 def test_complete_sequence_workflow_leakage_free_and_single_test_use(tmp_path):
     settings=W.default_settings();settings.update(counts=[2,2,1,1],steps=3,sizes=[7],epochs=2,ensemble=2,hidden=8)
@@ -220,21 +206,17 @@ def test_collection_counterfactuals_share_previous_bank_but_not_future_online_in
             for row in records:assert row['total_seconds']>=row['setup_seconds']
 
 
-def test_recorder_explicit_external_contract_and_solution_mapping(tmp_path):
-    from adaptive_mg.v67.world_model.adapter import FinalizedLduRecorder,solution_to_native
-    s=make();coo=sp.triu(s.a,k=1).tocoo();probes=np.random.default_rng(10).normal(size=(49,2))
-    recorder=FinalizedLduRecorder(tmp_path/'native',producer='unit-test fake finalized LDU',physics='synthetic test, NOT combustion')
-    kw=dict(trajectory='c1',case_group='g1',split='train',shape=(7,7),mesh_id='grid',boundary_id='fixed',
-        diag=s.a.diagonal(),lower_addr=coo.row,upper_addr=coo.col,lower=coo.data,upper=coo.data,b=s.b,x0=s.x0,
-        probe_vectors=probes,probe_products=s.a@probes,structured_to_native=np.arange(49),
-        boundary_finalized=True,nullspace='none',coupled_interfaces=0)
-    for t in range(2):recorder.record(index=t,time=t*.1,**kw)
-    D.import_finalized_ldu(tmp_path/'native',tmp_path/'imported')
-    assert len(D.load_trajectories(tmp_path/'imported','train')[0][1])==2
-    with pytest.raises(ValueError,match='nonmonotone'):recorder.record(index=1,time=.1,**kw)
-    order=np.array([2,0,1]);np.testing.assert_array_equal(solution_to_native([10,20,30],order),[20,30,10])
-
 
 def test_nonfinite_prediction_abstains():
     p=(np.full((2,4),np.nan),np.ones((2,4)),np.ones((2,4)))
     assert choose(p,np.ones(4,bool),{})[0]==0
+
+
+def test_sequence_data_rejects_external_application_provenance(tmp_path):
+    from dataclasses import replace
+    with pytest.raises(ValueError, match='only synthetic_elliptic'):
+        replace(make(), source_kind='external_cfd').validate()
+    D.write_json(tmp_path/'sequence_manifest.json', dict(
+        schema='world-sequence-v1', source_kind='external_cfd', trajectories=[]))
+    with pytest.raises(ValueError, match='only synthetic_elliptic'):
+        D.load_manifest(tmp_path)

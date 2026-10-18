@@ -5,6 +5,66 @@ Teacher가 validation에서 실제 수렴 개선을 보인 경우에만 증류�
 최종 목표는 student의 생성·Galerkin 구성까지 포함한 총 풀이 시간이 고정 classical
 MG보다 짧아지는 것이다. 구현이나 smoke 통과가 속도 향상 증거는 아니다.
 
+## Application 범위와 학습 데이터
+
+Sloshing·전단 혼합층·Navier–Stokes 시간 적분기는 이 브랜치에 없다.
+외부 CFD finalized-LDU recorder/importer, native 순서 변환, GAMG 결과 비교와
+해당 CLI 옵션도 제거했다. 합성 PDE용 H_S/world-model solver 실험은 유지한다.
+기존 validation JSON은 과거 검증 이력이며 삭제된 기능의 현재 제공을 뜻하지 않는다.
+
+현재 U-net 경로는 `research_data.py`의 합성 자료를 사용한다. PDE는
+
+\[
+-\nabla\cdot(K(x,y)\nabla u)=f\quad\text{in }(0,1)^2,
+\qquad u|_{\partial\Omega}=0.
+\]
+
+정사각형 격자의 각 cell을 두 삼각형으로 나눈 **P1 유한요소법**으로 stiffness
+matrix A를 조립하고 Dirichlet 경계 자유도를 제거한다. n은 방향별 내부 자유도 수이며
+A의 크기는 n²×n²다. 양의 확산 tensor를 사용하므로 이 문제군의 A는 SPD다.
+
+| 계수장 family | 의미 |
+| --- | --- |
+| near_isotropic | 거의 등방성인 일정 계수 |
+| aligned_anisotropy | 격자 방향으로 정렬된 이방성 |
+| rotated_anisotropy | 격자와 비스듬한 이방성 |
+| local_patch | 국소 고대비 사각형 영역 |
+| checkerboard | 체커보드 고대비 영역 |
+| channel | 대각선 띠 모양의 고전도 영역; 유체 채널 해석이 아님 |
+| variable_coefficient | 공간적으로 매끄럽게 변하는 양의 계수 |
+
+기본 이방성 tensor는 Q(θ) diag(1, ε) Q(θ)^T다. 난수 seed로 이방성 강도,
+각도, 대비, 패치 위치·폭, 패턴 규모 등을 정하고 A에 양의 전체 scale도 곱한다.
+
+각 A에 대해 sin(πx)sin(πy)에 난수 계수의 사인 모드 4개를 더한 벡터 u_*를 만든다.
+그 후 **b=A u_***로 우변을 생성한다. 따라서 u_*는 만들어진 **이산 선형계의 정확해**다.
+연속 PDE의 f를 해석적으로 적분한 load vector라고 해석하면 안 된다.
+유동 해석이나 별도 고정밀 PDE solve로 정답 snapshot을 수집하는 방식이 아니다.
+Research 설정의 `rhs_variants=4`는 A마다 이 기본 우변과 추가 사인 모드 조합 3개를
+사용하게 한다. 추가 해 벡터는 각각 사인 모드 5개를 더하며 역시 b=A u_*로 생성한다.
+학습 반복에서 우변을 순환 선택하므로 A 개수가 4배 늘어나는 것은 아니다.
+
+NN 입력은 A에서 추출한 10채널: 중앙값으로 정규화한 대각 성분의 로그 1채널과
+각 행의 절대 대각 성분으로 나눈 국소 3×3 stencil 9채널이다. b나 u_*는 NN 입력이 아니다.
+NN 출력으로 제약을 만족하는 희소 P를 만들고 R=P^T, A_c=P^TAP로 실제 MG를 구성한다.
+현재 설정은 0 초기값에서 3회 V-cycle 후 각 cycle의 정규화 잔차 로그를 가중합한다.
+여기에 안정성·복잡도·제약·classical 대비 악화 억제 항을 더해 역전파한다.
+u_*는 해 오차 진단에 사용할 수 있으며, 주 학습 목표는 u_*를 회귀하는 MSE가 아니다.
+EM으로 만든 P는 동일 제약의 **기준 P**이지 지도학습용 최적 P 정답 label이 아니다.
+Teacher가 gate를 통과하면 student에는 별도로 teacher V-cycle 보정 동작을 맞추는 KD loss가 붙는다.
+
+`configs/v6_7_unet_transfer_research.json` 기준:
+
+| 분할 | 격자 | family당/격자당 A | A 개수 |
+| --- | --- | --- | --- |
+| train | 15², 31², 63² | 8 | 168 |
+| validation | 15², 31², 63² | 2 | 42 |
+
+`prepare`가 `dataset_plan.json`과 `development_manifest.json`에 계수·seed·hash를
+기록하고 같은 정의로 A/b/u_*를 재구성한다. Train/validation 및 final/OOD 분리는
+정규화한 operator digest와 독립 seed로 검사한다. Final/OOD는 freeze 후 별도로 생성한다.
+위 수치는 연구 **설정**이며 연구 규모 학습을 완료했다는 뜻은 아니다.
+
 ## 모델과 수치 연산
 
 | 항목 | Direct / distilled student | Teacher |
@@ -65,7 +125,7 @@ A가 다르면 이 고정 알고리즘으로 계산한 P도 달라진다. NN의 
 생성한 frozen classical hierarchy의 P이며, teacher/direct/KD 모두 동일하다.
 기존 strong 기준 데이터·체크포인트·gate를 이 v2 run에 재사용할 수 없다.
 
-기존 shear/H_S 등 별도 실험이 사용하는 legacy strong 모듈은 호환성을 위해 남아 있다.
+기존 H_S/world-model 등 별도 solver 실험이 사용하는 legacy strong 모듈은 호환성을 위해 남아 있다.
 이 U-net 연구의 import·prepare·학습·평가·fallback 경로에서는 해당 모듈을 사용하지
 않으며, strong baseline arm·selector rules·calibration 설정/명령도 제공하지 않는다.
 

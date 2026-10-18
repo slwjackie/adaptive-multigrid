@@ -240,49 +240,12 @@ Temporal test 기본값은 **새 physical trajectories**이며 자동으로 미�
 Smoke의 test는 smoke의 작은 synthetic holdout이며 실제 연구 final을 소비하지 않는다.
 이번 구현 검증에서만 작은 별도 test 계획을 실행한다. 실제 research final/OOD는 실행하지 않았다.
 
-## 10. 실제 OpenFOAM/GAMG 연결 범위
+## 10. 현재 데이터 범위
 
-기존 finalized-LDU recorder/importer를 사용한다. Serial scalar SPD, nested structured2D,
-경계/reference 반영 완료, nullspace 없음, native matvec witness와 cell 순서가 필요하다.
-임의의3D/unstructured/MPI pressure matrix를 지원한다고 주장하지 않는다.
+외부 CFD finalized-LDU 입력 및 GAMG 비교 기능은 이 브랜치에서 제거했다.
+`world-prepare --run-dir "$RUN"`은 합성 coefficient sequence만 생성한다.
+`WorldSolver`와 `solver_from_run`은 합성 선형계의 순차 풀이용으로 유지한다.
+Sloshing·전단 혼합층·연소를 시간 적분하는 유동 해석기는 없다.
 
-```bash
-python scripts/run_v6_7_hs_world_study.py world-prepare \
-  --run-dir "$RUN" --input-ldu pressure_exports
-```
-
-`pressure_exports`는 finalized-LDU 형식이지 일반 OpenFOAM case 폴더가 아니다.
-하나의 physical case는 시간 순서가 보존된 완전한 하나의 trajectory로 넣는다.
-그 case를 train/tune/test로 나누지 않는다. Static calibration/H_S 데이터와의 동일 A도 거부한다.
-
-Native GAMG를 직접 실행하는 plugin은 없다. 외부에서 실제 GAMG를 측정했을 때만:
-
-```bash
-python scripts/run_v6_7_hs_world_study.py gamg-compare \
-  --run-dir "$RUN" --split validation --reference gamg_sequence_results.json
-```
-
-Reference schema는 `openfoam-gamg-sequence-v1`: solver='GAMG', OpenFOAM 버전,
-설정해시, imported data_sha256, hardware(machine/cpu_model/affinity_count), execution_threads=1,
-time_scope='linear_sequence_setup_solve_recovery', trajectories[].runs[].total_seconds,
-systems[]의 step/matrix_digest/rhs_digest/x0_digest/threshold/final_true_residual/success가 필요하다.
-Hashes는 본 study의 structured CSR 및 RHS 순서 기준으로 맞춰야 한다.
-비교기는 일치하지 않는 데이터·초기값·정지조건·시간범위를 거부한다.
-
-이는 외부 측정 evidence 비교이며 OpenFOAM 플러그인 실행 증거가 아니다. 연소 관련 pressure
-system을 풀어도 CFD 전체 시간, 온도/화학종/질량보존까지 검증한 것은 아니다.
-`in Hydrogen Combustion CFD`라는 제목 확장은 실제 해당 데이터/연동/물리 검증 완료 범위에 맞춘다.
-
-Python integration은 freeze 후 아래처럼 시작한다.
-
-```python
-from adaptive_mg.v67.hs_world.temporal import solver_from_run
-solver = solver_from_run(run_dir, mode="World_HS")
-x, diagnostics = solver.step(current_verified_snapshot)
-# 서로 다른 물리 case를 시작할 때:
-solver.reset()
-```
-
-정적 benchmark는 기존 PreparedStrongMG의 safeguard를 사용하고, temporal benchmark는
-현재 A에 대한 sequence safeguard를 사용한다. 둘은 MG kernel을 공유하지만 시간 정책·복구
-시점은 같지 않을 수 있다. Static 속도비와 sequence 속도비를 곱하지 않고 각각 직접 측정한다.
+과거 `HS_WORLD_VALIDATION.json`은 변경 전 검증 이력이다. 삭제된 인터페이스에 관한
+테스트 결과는 현재 기능을 뜻하지 않으며, 변경된 소스에서는 새 run을 생성해야 한다.

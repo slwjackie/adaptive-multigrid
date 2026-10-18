@@ -1,6 +1,13 @@
-# World-Model-Guided Adaptive Neural Smoothing
+# Residual U-net transfer teacher study
 
-## Primary thesis workflow: C_tuned + H_S + solver world model
+This branch focuses on learning sparse prolongation from synthetic 2D elliptic
+systems, using a residual U-net teacher and compact CNN student. The fixed reference
+is `line_alt + energy minimization + full coarsening` (EM 5, pre/post 2/2).
+See [the current Korean runbook](docs/RESIDUAL_UNET_TRANSFER_KR.md) for the training
+PDE, data generation, commands and evaluation protocol. Sloshing, shear mixing
+layers, Navier–Stokes time integration and external CFD bridges are not included.
+
+## Legacy H_S workflow: C_tuned + H_S + solver world model
 
 Use [`run_v6_7_hs_world_study.py`](scripts/run_v6_7_hs_world_study.py), with the
 [complete Korean runbook](docs/HS_WORLD_THESIS_RUNBOOK_KR.md). One global classical
@@ -15,9 +22,9 @@ learned smoothing is regenerated, not silently reused with stale coefficients.
 The world model abstains to a tune-selected classical reuse policy.
 
 H_P/H_SP are retained below for historical ablations, but are not trained or
-called by the new primary workflow. Synthetic tests are not hydrogen CFD. An
-external finalized-LDU bridge and optional supplied-GAMG evidence comparison are
-provided; no automatic OpenFOAM runtime plugin or combustion solver is claimed.
+called by this legacy workflow. These are synthetic elliptic solver studies.
+Application interfaces (external CFD LDU import/export and supplied GAMG comparison)
+have been removed from this branch; no sloshing or shear-layer flow solver is included.
 
 
 

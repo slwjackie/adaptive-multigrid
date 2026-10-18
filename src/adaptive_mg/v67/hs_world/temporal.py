@@ -6,7 +6,7 @@ from pathlib import Path
 from time import perf_counter
 import numpy as np
 
-from ..world_model.data import (generate, import_finalized_ldu, load_manifest, load_trajectories,
+from ..world_model.data import (generate, load_manifest, load_trajectories,
                                 file_hash, write_json, digest)
 from ..research_data import _digests
 from .tuning import read, assert_open, VERSION as THESIS_VERSION
@@ -15,17 +15,15 @@ from .learning import (VERSION, observation, feedback, fit_world, Predictor, cho
                        calibrate, save_model, load_model)
 
 
-def prepare(output,*,input_ldu=None):
+def prepare(output):
     from .study import selected
     out,settings,cfg,rules,expert,selection=selected(output);assert_open(out)
     target=out/'temporal'
     if target.exists() and any(target.iterdir()):raise FileExistsError('temporal data already prepared')
     w=dict(settings['world']);target.mkdir(parents=True,exist_ok=True)
-    if input_ldu:import_finalized_ldu(input_ldu,target/'data')
-    else:generate(target/'data',seed=w['seed'],counts=w['counts'],steps=w['steps'],sizes=w['sizes'])
+    generate(target/'data',seed=w['seed'],counts=w['counts'],steps=w['steps'],sizes=w['sizes'])
     m=load_manifest(target/'data');groups=[t['case_group'] for t in m['trajectories']]
-    # Whole independent cases are the statistical unit. No slicing one CFD run
-    # into apparently independent trajectories. Merge consecutive chunks first.
+    # Whole independent coefficient trajectories are the statistical unit.
     if len(groups)!=len(set(groups)):raise ValueError('one complete trajectory per independent physical case required')
     excluded=_digests(read(out/'calibration_manifest.json'))|_digests(read(out/'static_data_manifest.json'))
     temporal={v['normalized_matrix_digest'] for t in m['trajectories'] for v in t['snapshots']}
@@ -178,7 +176,7 @@ class WorldSolver:
         if self.predictor:self.predictor.update(ACTIONS.index(result.actual_action),result)
         self.bank=result.bank;self.previous=s;self.last=result;self.t+=1
         end=perf_counter();row=result.record()
-        # Actual solver data for optional external GAMG matching.
+        # Actual solver data retained for reproducible sequence diagnostics.
         row.update(total_seconds=end-start,policy_and_orchestration_seconds=max(0.,end-start-result.total_seconds),
             decision_reason=reason,decision=detail,step=s.index,time=s.time,source_kind=s.source_kind,
             matrix_digest=s.matrix_digest,rhs_digest=digest(s.b.tolist()),x0_digest=digest(s.x0.tolist()),
@@ -354,9 +352,9 @@ def check_freeze(output):
 
 
 def solver_from_run(output, *, mode='World_HS', require_frozen=True):
-    """Construct a stateful single-stream Python bridge. This does not invoke
-    OpenFOAM; the caller must supply verified current snapshots and reset at
-    physical-case boundaries. Finalized-LDU adapters remain in world_model.
+    """Construct a stateful solver for synthetic elliptic snapshots.
+
+    Reset at independent coefficient-trajectory boundaries.
     """
     out,w,h,backend=load(output)
     if require_frozen:check_freeze(out)

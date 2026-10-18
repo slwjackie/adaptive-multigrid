@@ -1,4 +1,4 @@
-"""Immutable ordered pressure-system snapshots with explicit data provenance."""
+"""Immutable ordered synthetic elliptic-system snapshots with explicit data provenance."""
 from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -59,8 +59,8 @@ class Snapshot:
             raise ValueError('nonfinite RHS/x0')
         if not np.isfinite(self.time) or self.index < 0 or not self.mesh_id or not self.boundary_id:
             raise ValueError('missing time/mesh/boundary contract')
-        if self.source_kind not in ('synthetic_elliptic', 'external_cfd'):
-            raise ValueError('explicit source_kind required')
+        if self.source_kind != 'synthetic_elliptic':
+            raise ValueError('only synthetic_elliptic snapshots are supported')
         if spd_check:
             if self.a.shape[0] <= 1024:
                 la.cholesky(self.a.toarray(), lower=True, check_finite=True)
@@ -115,6 +115,7 @@ def load_snapshot(path):
 def load_manifest(root):
     root=Path(root);m=json.loads((root/'sequence_manifest.json').read_text())
     if m.get('schema')!='world-sequence-v1':raise ValueError('unknown sequence schema')
+    if m.get('source_kind')!='synthetic_elliptic':raise ValueError('only synthetic_elliptic datasets are supported')
     groups={};ids=set();operators={}
     for tr in m['trajectories']:
         if tr['split'] not in SPLITS or tr['id'] in ids:raise ValueError('bad split/duplicate trajectory')
@@ -183,52 +184,3 @@ def generate(root, *, seed=20261010, counts=(6,3,3,3), steps=6, sizes=(7,15)):
             if key in seen and seen[key]!=tr['id']:raise ValueError('duplicate operator across trajectories')
             seen[key]=tr['id']
     write_json(root/'sequence_manifest.json',m);return m
-
-
-def import_finalized_ldu(input_root, output_root):
-    """Import serial finalized LDU snapshots plus matrix-vector witnesses.
-
-    Not an fvMatrix text parser: diag/b MUST already include boundary and
-    pressure-reference contributions. Coupled/MPI interfaces are rejected.
-    External metadata declares provenance; this does not validate combustion.
-    """
-    src=Path(input_root);out=Path(output_root)
-    if out.exists() and any(out.iterdir()):raise FileExistsError('new output required')
-    manifest=json.loads((src/'ldu_sequence.json').read_text())
-    if manifest.get('schema')!='finalized-ldu-sequence-v1':raise ValueError('bad LDU schema')
-    out.mkdir(parents=True,exist_ok=True);trs=[];seen={}
-    for tr in manifest['trajectories']:
-        import re
-        if not re.fullmatch(r'[A-Za-z0-9_-]+',tr['id']):raise ValueError('invalid trajectory id')
-        entries=[]
-        for k,e in enumerate(tr['snapshots']):
-            if not e.get('boundary_finalized') or e.get('nullspace')!='none' or e.get('coupled_interfaces')!=0:
-                raise ValueError('need anchored, boundary-finalized serial system without coupled interfaces')
-            if e.get('layout')!='structured_2d_xmajor':raise ValueError('unstructured/3D support not implemented')
-            raw=inside(src,e['path'])
-            if file_hash(raw)!=e['sha256']:raise ValueError('LDU input hash mismatch')
-            with np.load(raw,allow_pickle=False) as d:
-                n=len(d['diag']);lo=d['lower_addr'];up=d['upper_addr']
-                if lo.dtype.kind not in 'iu' or up.dtype.kind not in 'iu' or lo.shape!=up.shape or np.any(lo<0) or np.any(up>=n) or np.any(lo>=up):
-                    raise ValueError('invalid LDU addressing')
-                a=sp.coo_matrix((np.r_[d['diag'],d['upper'],d['lower']],
-                      (np.r_[np.arange(n),lo,up],np.r_[np.arange(n),up,lo])),shape=(n,n)).tocsr()
-                v=d['probe_vectors'];av=d['probe_products']
-                if v.ndim!=2 or v.shape[0]!=n or v.shape[1]<2 or av.shape!=v.shape or not np.isfinite(v).all() or not np.isfinite(av).all():
-                    raise ValueError('two independent native matrix-vector witnesses required')
-                if np.linalg.matrix_rank(v)<2 or not np.allclose(a@v,av,rtol=1e-10,atol=1e-12):
-                    raise ValueError('CSR disagrees with native finalized matrix application')
-                order=d['structured_to_native']
-                if order.dtype.kind not in 'iu' or not np.array_equal(np.sort(order),np.arange(n)):
-                    raise ValueError('explicit cell permutation required')
-                s=snapshot(a[order][:,order],d['b'][order],x0=d['x0'][order],shape=e['shape'],time=e['time'],index=e['index'],
-                     mesh_id=e['mesh_id'],boundary_id=e['boundary_id'],source_kind='external_cfd',context=e.get('context',{}))
-            path=f'{tr["id"]}/{k:05d}.npz';ent=save_snapshot(out/path,s);ent['path']=path;entries.append(ent)
-            key=s.normalized_matrix_digest
-            if key in seen and seen[key]!=tr['split']:raise ValueError('duplicate matrix crosses splits')
-            seen[key]=tr['split']
-        trs.append(dict(id=tr['id'],case_group=tr['case_group'],split=tr['split'],snapshots=entries))
-    value=dict(schema='world-sequence-v1',source_kind='external_cfd',physics=manifest.get('physics','unspecified'),
-         producer=manifest.get('producer'),source_manifest_sha256=file_hash(src/'ldu_sequence.json'),
-         combustion_verified=False,trajectories=trs)
-    write_json(out/'sequence_manifest.json',value);load_manifest(out);return value

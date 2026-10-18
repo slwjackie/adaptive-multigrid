@@ -52,6 +52,8 @@ def test_rhs_blind_changes_hint_and_cache_key_but_runs_actual_batch(monkeypatch)
 
 
 def test_offline_reference_reuses_actual_classical_bank_and_keeps_search_cost(monkeypatch, tmp_path):
+    import adaptive_mg.v67.strong_evaluation as strong_evaluation
+
     e, cfg, rules = _fixture()
     called = {}
     def bank_run(examples, provenance, arms, out, research, supplied_rules, **kwargs):
@@ -63,7 +65,7 @@ def test_offline_reference_reuses_actual_classical_bank_and_keeps_search_cost(mo
             offline_oracle=[dict(case_id=e.name, selected_arm='oracle::jacobi_bilinear_full',
                 selected_strategy='jacobi_bilinear_full', successful_median_seconds=.25,
                 search_total_including_warmups_seconds=8.75)])
-    monkeypatch.setattr(evaluation, 'run_strong_benchmark', bank_run)
+    monkeypatch.setattr(strong_evaluation, 'run_strong_benchmark', bank_run)
     result = evaluation.evaluate_classical_reference([e], cfg, rules, tmp_path / 'bank', research=tmp_path / 'old', repeats=5)
     assert set(called['arms']) == {'fixed_C', 'strong_C'}
     assert all(arm['model'] is None for arm in called['arms'].values())

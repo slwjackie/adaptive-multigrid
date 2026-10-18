@@ -1,8 +1,49 @@
 {
-  "version": "residual-unet-transfer-validation-v1",
-  "base_commit": "84785a00f9fa3fec4c0534b942775bf0105abf59",
-  "source_digest": "cef63c7365269f7f21b4c6a4596f5c0dc507bab31c4ecc06db324547a61bbfee",
-  "config_sha256": "1bc60c0e529e735bccfc83872f3b498354bdeeafa8a18bbe15412690d241b34b",
+  "version": "residual-unet-fixed-em-validation-v2",
+  "base_commit": "107ae425a346b34f884b704123722cde0ec1a014",
+  "source_digest": "4327a3bf8a639bd72ccc14efccc28b4d85c17348ad37fcc32e2f570e90262f4c",
+  "config_sha256": "185cbd711dbddf50fdfb8aa7812ffad491cbf0e68177f967a15c62d9417e2ad9",
+  "baseline": {
+    "kind": "fixed_classical",
+    "version": "fixed-classical-em-v1",
+    "mg": {
+      "absolute_tolerance": 1e-12,
+      "chebyshev_degree": 2,
+      "chebyshev_lower_fraction": 0.15,
+      "coarsest_n": 3,
+      "device": "cpu",
+      "divergence_factor": 1000000000000.0,
+      "em_fixed_iterations": true,
+      "em_iterations": 5,
+      "em_rtol": 1e-08,
+      "jacobi_omega": 0.72,
+      "max_cycles": 150,
+      "max_nn_cycles": 6,
+      "native_min_cells": 2048,
+      "native_parallel_min": 32768,
+      "native_threads": 1,
+      "near_tolerance_factor": 10.0,
+      "nn_levels": 1,
+      "operator_blend": 0.75,
+      "operator_candidate_topk": 8,
+      "operator_drop_tolerance": 0.0001,
+      "operator_omega": 0.7,
+      "operator_sweeps": 3,
+      "post_steps": 2,
+      "pre_steps": 2,
+      "reserve_classical_cycles": 1,
+      "residual_reference": "initial",
+      "safety_growth": 1.0,
+      "safety_rtol_slack": 1e-12,
+      "smoother_gain_multiplier": 1.0,
+      "stagnation_patience": 2,
+      "stagnation_rho": 0.98,
+      "stencil_backend": "csr",
+      "strategy_name": "line_alt_energymin_full__em5__v22",
+      "tolerance": 1e-08
+    }
+  },
+  "baseline_digest": "10f2d7b9bd9a9a68917520b61fb402becdb8b1f9c85b5b0f448e45dec89984db",
   "environment": {
     "python": "3.12.14",
     "torch": "2.14.1+cu130",
@@ -11,12 +52,11 @@
     "generation_dtype": "float32"
   },
   "tests": {
-    "new_tests": 47,
-    "full_suite_passed": 705,
-    "full_suite_skipped_before_native_build": 7,
-    "previously_skipped_native_tests_passed_after_build": 7,
-    "unique_tests_passed": 712,
-    "failures": 0
+    "full_suite_passed": 744,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "new_tests": 32
   },
   "smoke": {
     "train_operators": 14,
@@ -25,27 +65,27 @@
     "teacher_updates": 8,
     "direct_skipped": 0,
     "teacher_skipped": 0,
-    "train_all_resume_from_completed_direct_verified": true,
     "teacher_gate_adopted": false,
     "teacher_residual_improvement_vs": {
-      "strong_C": 1.0049193800166007,
-      "direct_CNN": 0.9854852466616537
+      "fixed_C": 0.9992127006877115,
+      "direct_CNN": 1.0014572584187598
     },
     "required_improvement": 1.0526315789473684,
     "distillation_status": "skipped",
     "distilled_checkpoint_created": false,
+    "raw_gate_fallback_allowed": false,
     "positive_kd_path_verified_by_real_optimizer_unit_test": true,
     "final_ood_consumed": false
   },
-  "measured_direct_vs_strong": {
+  "measured_direct_vs_fixed": {
     "cold": {
       "1": {
         "successes": 14,
         "total": 14,
-        "geometric_speedup": 0.5173567894024279,
+        "geometric_speedup": 0.6000511593360062,
         "ci95": [
-          0.46541494644762876,
-          0.5823328312726216
+          0.5575905794811787,
+          0.6546243515683544
         ]
       }
     },
@@ -53,10 +93,10 @@
       "1": {
         "successes": 14,
         "total": 14,
-        "geometric_speedup": 0.6967427726924706,
+        "geometric_speedup": 0.7028215953489542,
         "ci95": [
-          0.6325867018777867,
-          0.770026577296249
+          0.5993730318209235,
+          0.8112842870931279
         ]
       }
     },
@@ -64,27 +104,28 @@
       "1": {
         "successes": 14,
         "total": 14,
-        "geometric_speedup": 0.49049150732085955,
+        "geometric_speedup": 0.5696587042537229,
         "ci95": [
-          0.4480685283012886,
-          0.5342515897545869
+          0.5279342008204368,
+          0.6157986274623204
         ]
       },
       "4": {
         "successes": 14,
         "total": 14,
-        "geometric_speedup": 0.6612228101208966,
+        "geometric_speedup": 0.6963068924289735,
         "ci95": [
-          0.6056607981399347,
-          0.7298044866698689
+          0.6353933127041729,
+          0.7567028258572088
         ]
       }
     }
   },
   "limitations": [
-    "8-update synthetic smoke is implementation verification, not teacher capacity or research performance evidence.",
-    "Teacher rejected and no distilled performance measured.",
+    "8-update synthetic smoke verifies implementation; it is not full teacher training or performance evidence.",
+    "Smoke timing was collected during local regression work, not an isolated performance campaign.",
+    "Teacher rejected; no distilled performance measured. No speedup or production acceptance claimed.",
     "No full research training, shear CFD or final/OOD evaluation was run.",
-    "No speedup or production acceptance claimed."
+    "Legacy strong-selector modules remain for unrelated workflows; the U-net study imports and executes none."
   ]
 }

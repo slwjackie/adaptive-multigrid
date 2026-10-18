@@ -82,7 +82,9 @@ An isolated **residual U-net P teacher → compact CNN student** experiment is
 available via `scripts/run_v6_7_unet_transfer_study.py`. It compares the same
 small CNN trained directly and with full-V-cycle action distillation, admits KD
 only after measured teacher contraction gains, and evaluates setup-inclusive
-student time against frozen strong classical MG. Attention is not used.
+student time against fixed `line_alt + energy minimization + full coarsening` MG
+(EM budget 5, pre/post 2/2). This path uses `prepare`, has no classical selector,
+and includes EM setup and CNN inference in cold/multiple timings. Attention is not used.
 See [the Korean runbook](docs/RESIDUAL_UNET_TRANSFER_KR.md) for the smoke and
 research commands, sparse constraints, teacher gate and independent final/OOD protocol.
 

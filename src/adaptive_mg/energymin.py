@@ -32,10 +32,37 @@ def row_sum_basis(base, fixed_rows):
     return sp.csr_matrix((np.concatenate(vv),(np.concatenate(rr),np.concatenate(cc))),shape=(base.nnz,int(dofs.sum())))
 
 
-def energy_weights(a,pattern,*,maxiter=10,rtol=1e-8):
+def _fixed_budget_cg(action, rhs, maxiter):
+    """Projected CG with no tolerance-based early exit.
+
+    A machine-zero gradient is an explicit exception: continuing CG would
+    divide by zero or amplify roundoff. The returned count is never padded.
+    Nonpositive curvature/nonfinite arithmetic is a failure, not convergence.
+    """
+    q=np.zeros_like(rhs);residual=rhs.copy();direction=residual.copy()
+    rr=float(residual@residual)
+    floor=np.finfo(np.float64).eps*np.linalg.norm(rhs)
+    for iteration in range(1,maxiter+1):
+        ad=action(direction);curvature=float(direction@ad)
+        if not np.isfinite(curvature) or curvature<=0:
+            raise ValueError('EM projected CG encountered nonpositive curvature')
+        alpha=rr/curvature
+        q+=alpha*direction;residual-=alpha*ad
+        next_rr=float(residual@residual)
+        if not np.isfinite(q).all() or not np.isfinite(next_rr):
+            raise ValueError('EM projected CG failed')
+        if np.sqrt(next_rr)<=floor:
+            return q,iteration,'stationary_at_machine_precision'
+        direction=residual+(next_rr/rr)*direction
+        rr=next_rr
+    return q,maxiter,'fixed_budget_exhausted'
+
+
+def energy_weights(a,pattern,*,maxiter=10,rtol=1e-8,fixed_iterations=False):
     from .transfer import scipy_prolongation_from_weights,coarse_fine_indices,weights_from_sparse_matrix
     if isinstance(maxiter,bool) or not isinstance(maxiter,int) or maxiter<1 or not np.isfinite(rtol) or not 0<rtol<1:
         raise ValueError('invalid EM controls')
+    if not isinstance(fixed_iterations,bool):raise ValueError('fixed_iterations must be boolean')
     start=perf_counter();a=a.tocsr().astype(np.float64)
     if not np.isfinite(a.data).all() or np.any(a.diagonal()<=0) or sla.norm(a-a.T)>1e-10*max(sla.norm(a),1e-300):
         raise ValueError('EM requires finite symmetric positive-diagonal A')
@@ -48,16 +75,21 @@ def energy_weights(a,pattern,*,maxiter=10,rtol=1e-8):
     rhs=-np.asarray(z.T@gather(a@p0)).ravel()
     if z.shape[1] and np.linalg.norm(rhs)>0:
         def action(q):return np.asarray(z.T@gather(a@make(z@q))).ravel()
-        operator=sla.LinearOperator((z.shape[1],)*2,matvec=action,dtype=np.float64)
-        def count(_):
-            nonlocal iterations
-            iterations+=1
-        key='rtol' if 'rtol' in signature(sla.cg).parameters else 'tol'
-        q,info=sla.cg(operator,rhs,maxiter=maxiter,atol=0.,callback=count,**{key:rtol})
-        if info<0 or not np.isfinite(q).all():raise ValueError('EM projected CG failed')
+        if fixed_iterations:
+            q,iterations,stop_reason=_fixed_budget_cg(action,rhs,maxiter)
+        else:
+            operator=sla.LinearOperator((z.shape[1],)*2,matvec=action,dtype=np.float64)
+            def count(_):
+                nonlocal iterations
+                iterations+=1
+            key='rtol' if 'rtol' in signature(sla.cg).parameters else 'tol'
+            q,info=sla.cg(operator,rhs,maxiter=maxiter,atol=0.,callback=count,**{key:rtol})
+            if info<0 or not np.isfinite(q).all():raise ValueError('EM projected CG failed')
+            stop_reason='relative_tolerance' if info==0 else 'iteration_budget_exhausted'
         result=make(p0.data+z@q)
         stationarity=float(np.linalg.norm(action(q)-rhs)/np.linalg.norm(rhs))
-    else:result=p0;info=0;stationarity=0.
+        if fixed_iterations:info=0 if stationarity<=rtol else iterations
+    else:result=p0;info=0;stationarity=0.;stop_reason='stationary_initial_interpolation'
     before=float(p0.multiply(a@p0).sum());after=float(result.multiply(a@result).sum())
     if not np.isfinite(after) or after>before+1e-9*max(1.,abs(before)):
         raise ValueError('EM failed energy nonincrease check')
@@ -67,6 +99,7 @@ def energy_weights(a,pattern,*,maxiter=10,rtol=1e-8):
     fixed=coarse_fine_indices(pattern);weights[fixed]=pattern.bilinear_weights[fixed]
     if np.max(np.abs(weights).sum(1))>8.:raise ValueError('EM row magnitude safety limit exceeded')
     return weights,dict(method=f'EM-CG{maxiter}',iterations=iterations,optimizer_converged=info==0,
+        iteration_budget=maxiter,fixed_iterations=fixed_iterations,stop_reason=stop_reason,
         energy_before=before,energy_after=after,relative_gradient=stationarity,
         constraint_setup_seconds=build_seconds,setup_seconds=perf_counter()-start,
         scope='fixed support row-sum/injection energy candidate, not convergence certification')

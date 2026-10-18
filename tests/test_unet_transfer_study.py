@@ -126,14 +126,14 @@ def _gate_evidence():
     rows = []
     for name in ('validation-a', 'validation-b'):
         raw[name] = {
-            'strong_C': dict(feasible=True, contraction=.5),
-            'direct_CNN': dict(feasible=True, contraction=.4),
-            'teacher': dict(feasible=True, contraction=.3),
+            'fixed_C': dict(feasible=True, contraction=.5, fallback_allowed=False),
+            'direct_CNN': dict(feasible=True, contraction=.4, fallback_allowed=False),
+            'teacher': dict(feasible=True, contraction=.3, fallback_allowed=False),
         }
         arms = {}
         for arm in raw[name]:
             arms[arm] = {'cold': {'1': [dict(successful=True,
-                actual_neural_used=arm != 'strong_C', wall_seconds=100. if arm == 'teacher' else 1.)
+                actual_neural_used=arm != 'fixed_C', wall_seconds=100. if arm == 'teacher' else 1.)
                 for _ in range(2)]}}
         rows.append(dict(example=dict(name=name), runs=arms))
     return raw, dict(rows=rows)
@@ -147,7 +147,7 @@ def test_teacher_gate_uses_convergence_not_offline_teacher_inference_time():
     assert gate_decision(raw, numerical, min_cases=2)['adopted']
 
 
-@pytest.mark.parametrize('reference', ['strong_C', 'direct_CNN'])
+@pytest.mark.parametrize('reference', ['fixed_C', 'direct_CNN'])
 def test_teacher_gate_requires_improvement_over_both_references(reference):
     from adaptive_mg.v67.unet_transfer_study import gate_decision
 
@@ -158,7 +158,7 @@ def test_teacher_gate_requires_improvement_over_both_references(reference):
 
 
 @pytest.mark.parametrize('invalid', ['infeasible', 'nonfinite', 'nonpositive',
-                                      'classical_fallback', 'new_failure'])
+                                      'classical_fallback', 'raw_fallback', 'new_failure'])
 def test_teacher_gate_cannot_hide_bad_case_or_fallback(invalid):
     from adaptive_mg.v67.unet_transfer_study import gate_decision
 
@@ -173,6 +173,8 @@ def test_teacher_gate_cannot_hide_bad_case_or_fallback(invalid):
         teacher['contraction'] = 0.
     elif invalid == 'classical_fallback':
         measured[1]['actual_neural_used'] = False
+    elif invalid == 'raw_fallback':
+        teacher['fallback_allowed'] = True
     else:
         measured[1]['successful'] = False
     # min_cases=1 ensures that deleting the bad second case cannot pass the gate.
@@ -195,7 +197,7 @@ def test_teacher_gate_rejects_failure_swap_even_when_success_counts_match():
     raw, numerical = _gate_evidence()
     for run in numerical['rows'][0]['runs']['teacher']['cold']['1']:
         run['successful'] = False
-    for run in numerical['rows'][1]['runs']['strong_C']['cold']['1']:
+    for run in numerical['rows'][1]['runs']['fixed_C']['cold']['1']:
         run['successful'] = False
     assert not gate_decision(raw, numerical, min_cases=1)['adopted']
 
@@ -226,25 +228,26 @@ def test_direct_and_distilled_students_start_identically_with_shared_contract():
 
 def test_real_teacher_then_student_training_applies_kd_then_task_only(tmp_path):
     from adaptive_mg.v67.research_training import train_expert
-    from adaptive_mg.v67.strong import StrongRules, select_strong_strategy
-    from adaptive_mg.v67.unet_transfer_study import initial_model
+    from adaptive_mg.v67.fixed_classical import FixedClassicalBaseline
+    from adaptive_mg.v67.unet_transfer_study import initial_model, validate_settings
 
     torch.set_num_threads(1)
     settings = _study_settings()
     settings['unet_transfer'].update(student_hidden=4, teacher_hidden=4, teacher_depth=1)
     e = dataset([7], 7, 716033)[0]
-    rules = StrongRules()
-    e.strong_selection = select_strong_strategy(e.a, e.n, rules).to_dict()
+    cfg = validate_settings(settings)
+    baseline = FixedClassicalBaseline.from_config(cfg)
+    e.classical_selection = baseline.selection_record()
     e.research_split = 'train'
     training = dict(settings['training'], updates=2, kd_updates=1, prefix_cycles=1,
                     tail_cycles=0, rhs_variants=1, lambda_noharm=0.)
     teacher, teacher_status = train_expert(initial_model(settings, 'teacher'), [e],
-        _config(), rules, training, tmp_path / 'teacher', branch='H_P')
+        cfg, baseline, training, tmp_path / 'teacher', branch='H_P')
     assert teacher_status['all_updates_completed'] and teacher_status['feasible_task_updates'] == 2
     assert teacher.transfer.training_only
     original_signature = teacher.generation_signature()
     student, status = train_expert(initial_model(settings, 'distilled'), [e],
-        _config(), rules, training, tmp_path / 'student', branch='H_P', teacher=teacher)
+        cfg, baseline, training, tmp_path / 'student', branch='H_P', teacher=teacher)
     records = json.loads((tmp_path / 'student/training.json').read_text())
     assert status['all_updates_completed'] and status['feasible_task_updates'] == 2
     assert records[0]['phase'] == 'distill_plus_task' and records[0]['kd_status'] == 'applied'
@@ -259,15 +262,15 @@ def test_real_teacher_then_student_training_applies_kd_then_task_only(tmp_path):
 
 
 def _deployment_report(regime='cold'):
-    entry = dict(ci95=[1.5, 2.5], new_failure_case_ids=[], accuracy_worse_vs_strong_case_ids=[])
+    entry = dict(ci95=[1.5, 2.5], new_failure_case_ids=[], accuracy_worse_vs_fixed_case_ids=[])
     rows = []
     for name in ('validation-a', 'validation-b'):
         runs = {}
-        for arm in ('strong_C', 'direct_CNN', 'distilled_CNN'):
+        for arm in ('fixed_C', 'direct_CNN', 'distilled_CNN'):
             runs[arm] = {regime: {'1': [dict(successful=True,
-                actual_neural_used=arm != 'strong_C',
-                wall_seconds=2. if arm == 'strong_C' else 1.,
-                solve_seconds=.2, total_setup_seconds=1.8 if arm == 'strong_C' else .8)]}}
+                actual_neural_used=arm != 'fixed_C',
+                wall_seconds=2. if arm == 'fixed_C' else 1.,
+                solve_seconds=.2, total_setup_seconds=1.8 if arm == 'fixed_C' else .8)]}}
         rows.append(dict(example=dict(name=name), runs=runs))
     return dict(rows=rows, summary={regime: {'1': {
         'direct_CNN': deepcopy(entry), 'distilled_CNN': deepcopy(entry)}}})
@@ -300,7 +303,7 @@ def test_deployment_cannot_qualify_on_timing_alone(defect):
     elif defect == 'no_neural':
         bad['actual_neural_used'] = False
     elif defect == 'accuracy':
-        entry['accuracy_worse_vs_strong_case_ids'] = ['validation-b']
+        entry['accuracy_worse_vs_fixed_case_ids'] = ['validation-b']
     else:
         entry['ci95'] = [.99, 2.5]
     assert not deployment_decisions(result, min_cases=1)['cold/rhs1/distilled_CNN']['qualifies']

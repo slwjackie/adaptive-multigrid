@@ -24,6 +24,9 @@ class MGConfig:
     chebyshev_lower_fraction: float = 0.15
     em_iterations: int = 10
     em_rtol: float = 1e-8
+    # A fixed setup budget ignores em_rtol for stopping. Only a machine-zero
+    # projected gradient may stop earlier; reports retain the actual count.
+    em_fixed_iterations: bool = False
     operator_sweeps: int = 3
     operator_omega: float = 0.70
     operator_blend: float = 0.75
@@ -60,6 +63,8 @@ class MGConfig:
             raise ValueError('EM iteration budget must be a positive integer')
         if not math.isfinite(self.em_rtol) or not 0 < self.em_rtol < 1:
             raise ValueError('EM relative tolerance must be in (0,1)')
+        if not isinstance(self.em_fixed_iterations, bool):
+            raise ValueError('em_fixed_iterations must be boolean')
         if self.mode not in {"classical", "fixed", "temporal", "predicted"}:
             raise ValueError("mode must be classical/fixed/temporal/predicted")
         ints = ("fixed_k", "max_nn_cycles", "max_cycles", "pre_steps", "post_steps",

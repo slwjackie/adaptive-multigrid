@@ -23,12 +23,14 @@ from .limited import forced_config, initialize_timing_runtime, vector_digest
 from .research_data import HOLDOUT, _check_claim, _hash, _write_json
 from .research_runtime import is_teacher, offline_teacher_generation
 from .solver import PreparedAdaptiveMG
-from .strong import PreparedStrongMG, classical_bank
-from .strong_evaluation import (_hierarchy, _source_signature, _speed_summary,
-                                build_strong_arms, run_strong_benchmark)
+from .evaluation_metrics import _hierarchy, _source_signature, _speed_summary
 
-VERSION = 'strong-aware-research-measurement-v1'
+VERSION = 'classical-parent-research-measurement-v2'
 REGIMES = ('cold', 'warm', 'multiple', 'warm_multiple')
+
+
+def _fixed_baseline(rules):
+    return getattr(rules, 'kind', None) == 'fixed_classical'
 
 
 def manufactured_rhs(example, count):
@@ -109,6 +111,11 @@ def _arm_config(cfg, arm):
 
 def _construct(example, arm, cfg, rules, expected_rhs):
     rules = arm.get('rules') or rules
+    if _fixed_baseline(rules):
+        rules.validate_config(cfg)
+        if arm.get('selector', True) or arm.get('policy') is not None:
+            raise ValueError('Fixed classical evaluation forbids selectors and policies')
+        return PreparedAdaptiveMG(example.a, example.n, arm.get('model'), cfg)
     if arm.get('policy') is not None:
         if getattr(arm['policy'], 'continuous_size_policy', False):
             from .cost_policy import PreparedCostMG
@@ -127,11 +134,13 @@ def _construct(example, arm, cfg, rules, expected_rhs):
                     # Bypass only PreparedResearchMG's len(bs) hint update. The
                     # inherited actual batch solve/freshness/safety path remains.
                     self.expected_rhs = 1
+                    from .strong import PreparedStrongMG
                     return PreparedStrongMG.solve_many(self, bs, x0)
             cls, expected_rhs = RHSBlindResearchMG, 1
         return cls(example.a, example.n, policy=arm['policy'], config=cfg,
                    rules=rules, expected_rhs=expected_rhs)
     if arm.get('selector', True):
+        from .strong import PreparedStrongMG
         return PreparedStrongMG(example.a, example.n, arm.get('model'), cfg, rules=rules)
     return PreparedAdaptiveMG(example.a, example.n, arm.get('model'), cfg)
 
@@ -233,6 +242,7 @@ def measured_research(example, arm, cfg, rules, *, regime='cold', rhs_count=1):
     complexity = dict(operator_complexity=sum(row['operator_nnz'] for row in hierarchy) / example.a.nnz,
                       transfer_complexity=sum(row['prolongation_nnz'] for row in hierarchy) / example.a.shape[0]) if hierarchy else dict(operator_complexity=None, transfer_complexity=None)
     selection = getattr(root, 'selection', None)
+    fixed = _fixed_baseline(rules)
     neural_setup = float(counters.get('branch_setup_seconds', counters.get('nn_setup_seconds', 0.)))
     total_setup = construction + neural_setup
     accepted_neural = sum(counters.get('branch_' + b + '_cycles', 0) for b in ('H_S', 'H_P', 'H_SP'))
@@ -245,7 +255,8 @@ def measured_research(example, arm, cfg, rules, *, regime='cold', rhs_count=1):
         seconds_per_rhs=elapsed / rhs_count, success=success, successful=success, error=failure,
         convergence_factor=contraction,
         constructor_seconds=construction, classical_setup_seconds=construction,
-        classical_setup_scope='constructor including A-only selection, hierarchy, factorization and cache-key work',
+        classical_setup_scope=('constructor including fixed energy-minimization hierarchy, factorization and cache-key work'
+                               if fixed else 'constructor including A-only selection, hierarchy, factorization and cache-key work'),
         neural_setup_seconds=neural_setup, total_setup_seconds=total_setup,
         solve_seconds=max(0., elapsed - total_setup),
         solve_seconds_scope='measured outer wall minus separately instrumented constructor/branch setup; diagnostic decomposition',
@@ -257,7 +268,7 @@ def measured_research(example, arm, cfg, rules, *, regime='cold', rhs_count=1):
         operator_digest=example.digest, normalized_operator_digest=example.group_digest,
         rhs_digests=[vector_digest(b) for b in rhs], exact_digests=[vector_digest(x) for x in exacts],
         requested_branch=arm['branch'], selector_in_wall_time=bool(arm.get('selector', True) and regime not in ('warm', 'warm_multiple')),
-        selection=selection.to_dict() if selection is not None else None,
+        selection=rules.selection_record() if fixed else selection.to_dict() if selection is not None else None,
         classical_hierarchy=classical, learned_hierarchy=learned, **complexity,
         executed_cycles=sum(r.get('executed_cycles', 0) for r in checked),
         accepted_neural_cycles=accepted_neural, actual_neural_used=accepted_neural > 0,
@@ -289,6 +300,10 @@ def _max_error(runs, metric):
 
 def aggregate_research(rows, arm_metadata, *, repeats, regimes, rhs_counts, reference_arm='strong_C'):
     """Paired operator bootstrap; all repeats/all RHS must meet FP64 tolerance."""
+    reference_suffix = 'fixed' if reference_arm == 'fixed_C' else 'strong' if reference_arm == 'strong_C' else 'reference'
+    speed_key = f'speedup_vs_{reference_suffix}'
+    common_speed_key = f'common_cohort_{speed_key}'
+    accuracy_key = f'accuracy_worse_vs_{reference_suffix}'
     summary, table = {}, []
     for regime in regimes:
         summary[regime] = {}
@@ -336,10 +351,10 @@ def aggregate_research(rows, arm_metadata, *, repeats, regimes, rhs_counts, refe
                         worse_errors.append(case)
                     entry = dict(case=case, split=row.get('research_split'), family=row.get('family'), n=row['example']['case']['n'],
                         arm=name, regime=regime, rhs_count=count, successful=good, successful_repeats=sum(bool(r.get('successful')) for r in runs),
-                        speedup_vs_strong=speedup, parameter_count=metadata['parameter_count'],
+                        parameter_count=metadata['parameter_count'],
                         training_only=metadata['training_only'], actual_neural_used=case in neural,
                         expected_rhs_mode=metadata.get('expected_rhs_mode', 'actual'),
-                        accuracy_worse_vs_strong=worse, **errors)
+                        **{speed_key: speedup, accuracy_key: worse}, **errors)
                     for key in ('wall_seconds', 'seconds_per_rhs', 'classical_setup_seconds', 'neural_setup_seconds',
                                 'total_setup_seconds', 'solve_seconds', 'warm_prime_seconds', 'operator_generation_seconds',
                                 'executed_cycles', 'accepted_neural_cycles', 'rollback_count', 'fallback_count', 'setup_failures',
@@ -351,10 +366,10 @@ def aggregate_research(rows, arm_metadata, *, repeats, regimes, rhs_counts, refe
                 group[name] = dict(successes=len(successful), total=len(rows), success_case_ids=successful,
                     geometric_speedup=speed['geometric_speedup'], ci95=speed['ci95'],
                     median_wall_seconds=float(np.median(successful_times)) if successful_times else None,
-                    speedup_vs_strong=speed, common_cohort_speedup_vs_strong=_speed_summary(common_ratios),
+                    **{speed_key: speed, common_speed_key: _speed_summary(common_ratios)},
                     common_cohort_case_ids=[rows[i]['example']['name'] for i in common],
                     new_failure_case_ids=new_failures, rescued_case_ids=rescued, actual_neural_case_ids=neural,
-                    accuracy_worse_vs_strong_case_ids=worse_errors, training_only=metadata['training_only'],
+                    **{accuracy_key + '_case_ids': worse_errors}, training_only=metadata['training_only'],
                     parameter_count=metadata['parameter_count'], final_certificate=False)
             summary[regime][str(count)] = group
     crossover = {}
@@ -362,7 +377,7 @@ def aggregate_research(rows, arm_metadata, *, repeats, regimes, rhs_counts, refe
         qualifying = []
         for count in sorted(rhs_counts):
             entry = summary.get('multiple', {}).get(str(count), {}).get(name)
-            if entry and not entry['new_failure_case_ids'] and entry['speedup_vs_strong']['geometric_speedup'] is not None and entry['speedup_vs_strong']['geometric_speedup'] > 1:
+            if entry and not entry['new_failure_case_ids'] and entry[speed_key]['geometric_speedup'] is not None and entry[speed_key]['geometric_speedup'] > 1:
                 qualifying.append(count)
         crossover[name] = dict(first_measured_faster_rhs_count=min(qualifying) if qualifying else None,
                                tested_counts=list(rhs_counts) if 'multiple' in regimes else [],
@@ -385,6 +400,11 @@ def evaluate_research(examples, arm_specs, cfg, rules, out, *, repeats=5, warmup
     Resume requires exact sources, models, rules, hardware, vectors and settings.
     """
     examples, regimes, rhs_counts = list(examples), tuple(regimes), tuple(rhs_counts)
+    fixed = _fixed_baseline(rules)
+    if fixed:
+        rules.validate_config(cfg)
+        if reference_arm != 'fixed_C':
+            raise ValueError('Fixed classical evaluation requires reference_arm=fixed_C')
     if not examples or not arm_specs or reference_arm not in arm_specs:
         raise ValueError('Nonempty examples/arms and explicit reference arm required')
     if isinstance(repeats, bool) or not isinstance(repeats, int) or repeats < 1 or isinstance(warmups, bool) or not isinstance(warmups, int) or warmups < 0:
@@ -396,22 +416,37 @@ def evaluate_research(examples, arm_specs, cfg, rules, out, *, repeats=5, warmup
     if len({e.group_digest for e in examples}) != len(examples) or len({e.name for e in examples}) != len(examples):
         raise ValueError('Evaluation operators and names must be unique')
     for example in examples:
-        stored_selection = getattr(example, 'strong_selection', None)
-        if stored_selection is not None and stored_selection.get('rules_digest') != rules.digest():
-            raise ValueError('Example was labelled by different frozen strong rules')
+        if fixed:
+            stored_selection = getattr(example, 'classical_selection', None)
+            if (not isinstance(stored_selection, dict)
+                    or stored_selection.get('baseline_digest') != rules.digest()
+                    or stored_selection != rules.selection_record()):
+                raise ValueError('Example was not labelled by the identical frozen fixed classical baseline')
+            if getattr(example, 'strong_selection', None) is not None:
+                raise ValueError('Fixed classical evaluation cannot use selector-labelled data')
+        else:
+            stored_selection = getattr(example, 'strong_selection', None)
+            if stored_selection is not None and stored_selection.get('rules_digest') != rules.digest():
+                raise ValueError('Example was labelled by different frozen strong rules')
         if getattr(example, 'research_split', None) in HOLDOUT:
             _check_claim(getattr(example, 'research_run_root', None), getattr(example, 'research_final_claim', None))
             if any(spec.get('training_only') for spec in arm_specs.values()):
                 raise ValueError('Teacher upper bounds cannot consume the untouched final/OOD test')
     baseline = arm_specs[reference_arm]
-    if baseline.get('branch') != 'C' or baseline.get('model') is not None or not baseline.get('selector', True) or baseline.get('policy') is not None:
+    if fixed:
+        if (baseline.get('branch') != 'C' or baseline.get('model') is not None
+                or baseline.get('selector', True) or baseline.get('policy') is not None):
+            raise ValueError('reference must be the unchanged fixed pure classical solver without a selector')
+    elif baseline.get('branch') != 'C' or baseline.get('model') is not None or not baseline.get('selector', True) or baseline.get('policy') is not None:
         raise ValueError('reference must be the unchanged selected pure classical solver')
     if baseline.get('rules') is not None and baseline['rules'].digest() != rules.digest():
         raise ValueError('reference rules differ from primary parent')
     arms, metadata = {}, {}
     for name, spec in arm_specs.items():
+        if fixed and (spec.get('selector', True) or spec.get('policy') is not None):
+            raise ValueError('Fixed classical evaluation forbids selectors and policies in every arm')
         if spec.get('rules') is not None and spec['rules'].digest() != rules.digest():
-            if spec.get('branch') != 'C' or spec.get('model') is not None or spec.get('policy') is not None or not spec.get('robustness_only'):
+            if fixed or spec.get('branch') != 'C' or spec.get('model') is not None or spec.get('policy') is not None or not spec.get('robustness_only'):
                 raise ValueError('different-parent rules are only allowed for a labelled classical robustness arm')
         if spec.get('branch') not in {'C', 'H_S', 'H_P', 'H_SP', 'auto'}:
             raise ValueError('Invalid branch')
@@ -422,6 +457,8 @@ def evaluate_research(examples, arm_specs, cfg, rules, out, *, repeats=5, warmup
         if spec.get('expected_rhs_mode') == 'blind' and spec.get('policy') is None:
             raise ValueError('RHS-count blindness is only a policy ablation')
         arm = {**spec, 'config': _arm_config(cfg, spec)}
+        if fixed:
+            rules.validate_config(arm['config'])
         if arm['config'].mg != cfg.mg or arm['config'].inference_dtype != cfg.inference_dtype or arm['config'].inference_device != cfg.inference_device:
             raise ValueError('All arms must share numerical protocol, generation dtype and device')
         allowed_flags = {'mode', 'branch', 'use_smoother', 'use_transfer', 'spatial', 'gate_mode', 'record_trace', 'use_learned_controller'}
@@ -434,20 +471,23 @@ def evaluate_research(examples, arm_specs, cfg, rules, out, *, repeats=5, warmup
             raise ValueError('All arms must share replacement budget, safety, and numerical protocol')
         arms[name] = arm
         metadata[name] = {**_model_metadata(arm), 'branch': arm['branch'], 'selector': arm.get('selector', True), 'config': arm['config'].to_dict(),
-                          'rules_digest': (arm.get('rules') or rules).digest(),
+                          'baseline_digest' if fixed else 'rules_digest': (arm.get('rules') or rules).digest(),
                           'robustness_only': bool(arm.get('robustness_only', False))}
     initialize_timing_runtime()
     output = Path(out).resolve()
     output.mkdir(parents=True, exist_ok=True)
     inputs = [dict(e.manifest(), research_split=getattr(e, 'research_split', None), family=getattr(e, 'research_family', getattr(e.case, 'family', e.case.pattern)),
-                   rhs_digest=vector_digest(e.b), exact_digest=vector_digest(e.exact), strong_selection=getattr(e, 'strong_selection', None)) for e in examples]
+                   rhs_digest=vector_digest(e.b), exact_digest=vector_digest(e.exact),
+                   **({'classical_selection': e.classical_selection} if fixed else {'strong_selection': getattr(e, 'strong_selection', None)})) for e in examples]
     manifest = json_safe(dict(version=VERSION, reference_arm=reference_arm, case_inputs=inputs, arms=metadata, source_signature=_source_signature(),
-        rules=rules.to_dict(), rules_digest=rules.digest(), config=cfg.to_dict(), repeats=repeats,
+        **({'baseline': rules.to_dict(), 'baseline_digest': rules.digest()} if fixed else {'rules': rules.to_dict(), 'rules_digest': rules.digest()}), config=cfg.to_dict(), repeats=repeats,
         warmups=warmups, rhs_counts=rhs_counts, regimes=regimes, order_seed=order_seed,
         hardware=hardware_environment(), final_test_eligibility='caller must enforce untouched final gate; evaluator never certifies',
-        cold_scope='imported process; selector+constructor+generation+solve, rollback included; checkpoint disk load/native library initialization excluded',
+        cold_scope=('imported process; fixed energy-minimization constructor+CNN generation+Galerkin hierarchy+solve, rollback and fallback included; checkpoint disk load/native library initialization excluded'
+                    if fixed else 'imported process; selector+constructor+generation+solve, rollback included; checkpoint disk load/native library initialization excluded'),
         warm_scope='one explicit successful cache-prime solve excluded and reported; actual subsequent same-A solve timed',
-        multiple_scope='fresh constructor and actual solve_many for independent manufactured RHS; setup included once',
+        multiple_scope=('fresh fixed energy-minimization constructor+CNN generation+Galerkin hierarchy and actual solve_many for independent manufactured RHS; setup included once; rollback and fallback included'
+                        if fixed else 'fresh constructor and actual solve_many for independent manufactured RHS; setup included once'),
         warm_multiple_scope='operator preparation and independent prime excluded; actual distinct timed RHS; decisions/probes/recovery included',
         teacher_scope='offline training-only upper-bound evaluation; never a student/deployment result'))
     manifest_path = output / 'run_manifest.json'
@@ -501,12 +541,6 @@ def evaluate_research(examples, arm_specs, cfg, rules, out, *, repeats=5, warmup
                 _write_json(output / 'progress.json', dict(status='running', completed_measurements=completed, total_measurements=total))
     report = aggregate_research(rows, metadata, repeats=repeats, regimes=regimes, rhs_counts=rhs_counts, reference_arm=reference_arm)
     if reference_arm != 'strong_C':
-        def rename(value):
-            if isinstance(value, dict):
-                return {k.replace('_vs_strong', '_vs_reference'): rename(v) for k,v in value.items()}
-            if isinstance(value, list):return [rename(v) for v in value]
-            return value
-        report = rename(report)
         report['reference_arm'] = reference_arm
     report.update(rows=rows, manifest=manifest, output_dir=str(output), warmup_wall_seconds_this_invocation=warmup_wall)
     if previous_complete_report is not None:
@@ -536,6 +570,9 @@ def evaluate_classical_reference(examples, cfg, rules, out, *, research, bank='c
     Only cold time-to-tolerance is relevant; total bank search cost is separate.
     """
     examples = list(examples)
+    from .strong import classical_bank
+    from .strong_evaluation import build_strong_arms, run_strong_benchmark
+
     classical_bank(bank)  # Validate a concrete predeclared bank, never a null oracle.
     if not examples or len({e.group_digest for e in examples}) != len(examples):
         raise ValueError('Classical reference needs unique operators')

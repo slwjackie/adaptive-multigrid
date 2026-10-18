@@ -1,18 +1,8 @@
 {
-  "version": "three-pillars-v1",
+  "version": "residual-unet-fixed-em-study-v2",
   "smoke": true,
   "seed": 2026101801,
   "torch_threads": 1,
-  "calibration_sizes": [
-    7,
-    15
-  ],
-  "calibration_per_family": 1,
-  "calibration_repeats": 1,
-  "calibration_rhs": 2,
-  "minimum_leaf_cases": 2,
-  "cycle_margin": 0.8,
-  "bank": "controlled",
   "training_sizes": [
     7,
     15
@@ -65,7 +55,7 @@
       "pre_steps": 2,
       "post_steps": 2,
       "coarsest_n": 3,
-      "strategy_name": "line_alt_bilinear_full",
+      "strategy_name": "line_alt_energymin_full__em5__v22",
       "jacobi_omega": 0.72,
       "chebyshev_degree": 2,
       "chebyshev_lower_fraction": 0.15,
@@ -88,7 +78,10 @@
       "reserve_classical_cycles": 1,
       "divergence_factor": 1000000000000.0,
       "device": "cpu",
-      "verbose": false
+      "verbose": false,
+      "em_iterations": 5,
+      "em_fixed_iterations": true,
+      "em_rtol": 1e-08
     },
     "mode": "research",
     "branch": "H_P",
@@ -122,7 +115,6 @@
     "record_trace": true,
     "transfer_levels": "all"
   },
-  "calibration_regime": "multiple",
   "teacher_training": {
     "seed": 2026101801,
     "updates": 8,
@@ -143,7 +135,7 @@
     "kd_probes": 2
   },
   "unet_transfer": {
-    "version": "residual-unet-transfer-study-v1",
+    "version": "residual-unet-fixed-em-study-v2",
     "student_hidden": 8,
     "teacher_hidden": 4,
     "teacher_depth": 2,

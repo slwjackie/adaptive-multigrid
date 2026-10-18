@@ -1,4 +1,4 @@
-"""Strong-C-aware direct, teacher, KD and joint full-V-cycle training.
+"""Classical-parent-bound direct, teacher, KD and joint full-V-cycle training.
 
 Only development examples accepted by research_data enter these routines.
 Architecture/weight selection belongs to a separate measured validation step.
@@ -16,7 +16,8 @@ from torch.nn import functional as F
 from ..provenance import json_safe, write_json, hardware_environment
 from .models import Components, TransferNet
 from .limited import forced_config, digest_file
-from .strong import PreparedStrongMG
+from .fixed_classical import FixedClassicalBaseline, baseline_metadata
+from .solver import PreparedAdaptiveMG
 from .banks import Stats, hybrid_cycle, selected_level
 from .spatial import SpatialState
 from ..hierarchy import classical_cycle
@@ -110,6 +111,11 @@ def parameter_counts(model):
 
 
 def sample_config(example, cfg, rules, branch):
+    if isinstance(rules, FixedClassicalBaseline):
+        rules.validate_config(cfg)
+        if getattr(example, 'classical_selection', None) != rules.selection_record():
+            raise ValueError('Training requires the saved fixed classical baseline for every example')
+        return forced_config(cfg, branch)
     evidence = getattr(example, 'strong_selection', None)
     if not evidence or evidence.get('rules_digest') != rules.digest():
         raise ValueError('Training requires the saved frozen C*(A) for every example')
@@ -289,7 +295,12 @@ def calibrate_work(example, model, cfg, rules):
     """Actual one-cycle throughput calibration on TRAIN only, not a timing gradient."""
     try:
         with offline_teacher_generation():
-            prepared=PreparedStrongMG(example.a,example.n,model,cfg,rules)
+            if isinstance(rules, FixedClassicalBaseline):
+                rules.validate_config(cfg)
+                prepared=PreparedAdaptiveMG(example.a,example.n,model,cfg)
+            else:
+                from .strong import PreparedStrongMG
+                prepared=PreparedStrongMG(example.a,example.n,model,cfg,rules)
             stats=Stats();t=perf_counter();root=prepared.ensure_branch(cfg.branch,stats);setup=perf_counter()-t
             x=np.zeros_like(example.b);ct=[];ht=[]
             for _ in range(3):
@@ -322,7 +333,7 @@ def train_expert(initial, examples, cfg, rules, settings, out, *, branch, teache
             eligible[target]=[]
             for i,e in enumerate(examples):
                 shape=(e.n,e.n);level=0
-                strategy=get_strategy(e.strong_selection['strategy_name'])
+                strategy=get_strategy(sample_config(e,cfg,rules,branch).mg.strategy_name)
                 while not terminal(shape,cfg.mg.coarsest_n) and level<target:
                     shape=next_shape(shape,strategy.coarsening,cfg.mg.coarsest_n,level_index=level);level+=1
                 if level==target and not terminal(shape,cfg.mg.coarsest_n):eligible[target].append(i)
@@ -330,7 +341,7 @@ def train_expert(initial, examples, cfg, rules, settings, out, *, branch, teache
         rng=np.random.default_rng(int(settings['seed']))
         schedule=[int(rng.choice(eligible[level_order[min(len(level_order)-1,j*len(level_order)//steps)]])) for j in range(steps)]
     spec=dict(version=1,initial_signature=initial.generation_signature(),teacher_signature=teacher_signature,
-        rules_digest=rules.digest(),branch=branch,config=cfg.to_dict(),settings=settings,
+        **baseline_metadata(rules),branch=branch,config=cfg.to_dict(),settings=settings,
         sample_ids=[e.name for e in examples],sample_digests=[e.group_digest for e in examples],
         sequence=[examples[i].name for i in schedule],kd_updates=kd_steps,
         no_final_test=True,hardware=hardware_environment())
@@ -427,10 +438,12 @@ def train_expert(initial, examples, cfg, rules, settings, out, *, branch, teache
     for module in model.modules():
         module.cpu().eval()
         for p in module.parameters():p.requires_grad_(True)
-    model.metadata.update(training_rules_digest=rules.digest(),training_operator_digests=[e.group_digest for e in examples],
+    model.metadata.update({('training_baseline_digest' if isinstance(rules, FixedClassicalBaseline) else 'training_rules_digest'): rules.digest()})
+    model.metadata.update(training_operator_digests=[e.group_digest for e in examples],
         training_branch=branch,training_kind='distilled_then_task_finetuned' if teacher else 'direct_full_cycle',
         optimizer_updates=updates,requested_optimizer_updates=steps,teacher_signature=teacher_signature)
-    model.mark_policy_stale('strong_aware_experts_changed_requires_new_labels')
+    model.mark_policy_stale('fixed_baseline_experts_changed' if isinstance(rules, FixedClassicalBaseline)
+                            else 'strong_aware_experts_changed_requires_new_labels')
     model.save(out/'candidate.pt',extra={'role':'teacher' if model.metadata.get('role')=='teacher' else 'student_candidate',
                                       'not_selected_or_certified':True})
     report=dict(status='complete',branch=branch,updates=updates,requested_updates=steps,skipped=steps-updates,
@@ -439,7 +452,7 @@ def train_expert(initial, examples, cfg, rules, settings, out, *, branch, teache
         teacher_used_for_training=teacher is not None,
         feasible_task_updates=sum(not r['skipped'] and r.get('task_branch')=='learned_prefix' for r in records),
         feasibility_repair_updates=sum(not r['skipped'] and r.get('task_branch')=='classical_fallback' for r in records),
-        generation_signature=model.generation_signature(),rules_digest=rules.digest(),
+        generation_signature=model.generation_signature(),**baseline_metadata(rules),
         training_seconds_this_invocation=perf_counter()-start_time,all_updates_completed=updates==steps,
         final_test_seen=False,performance_certified=False,selection_requires_measured_validation=True)
     write_json(out/'status.json',report)

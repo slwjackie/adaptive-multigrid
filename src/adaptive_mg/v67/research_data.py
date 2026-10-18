@@ -1,6 +1,6 @@
-"""Fresh strong-aware research data and a single-use final-test gate.
+"""Fresh classical-parent-bound research data and a single-use final-test gate.
 
-Only the existing deterministic selector labels examples.  Preparing development
+The caller supplies an immutable fixed baseline or legacy selector. Preparing development
 data commits final specifications without assembling, selecting, or solving any
 final/OOD operator.  This is reproducibility/leakage protection, not a security
 boundary against a person deliberately editing Python or its JSON ledgers.
@@ -22,7 +22,8 @@ from ..data import Example
 from ..pde import DiffusionCase, assemble_stiffness
 from ..provenance import json_safe, operator_digest
 from .data import VariableCase, variable_stiffness
-from .strong import StrongRules, load_strong_rules, select_strong_strategy
+from .fixed_classical import (FixedClassicalBaseline, baseline_metadata,
+                              stored_baseline_digest, load_baseline)
 
 VERSION = 'strong-aware-research-data-v1'
 FAMILIES = ('near_isotropic', 'aligned_anisotropy', 'rotated_anisotropy',
@@ -290,10 +291,18 @@ def _example(record):
 
 
 def _selection_record(example, rules):
+    if isinstance(rules, FixedClassicalBaseline):
+        return rules.selection_record()
+    from .strong import select_strong_strategy
     selected = select_strong_strategy(example.a, example.n, rules)
     return dict(strategy_name=selected.strategy_name, rule_id=selected.rule_id,
                 rules_digest=selected.rules_digest, features=selected.features,
                 rule_evidence=selected.rule_evidence)
+
+
+def _attach_selection(example, selection, rules):
+    attribute = 'classical_selection' if isinstance(rules, FixedClassicalBaseline) else 'strong_selection'
+    setattr(example, attribute, selection)
 
 
 def _generate_split(name, spec, forbidden, rules):
@@ -309,7 +318,7 @@ def _generate_split(name, spec, forbidden, rules):
                         continue
                     forbidden.add(example.group_digest)
                     selection = _selection_record(example, rules)
-                    example.strong_selection = selection
+                    _attach_selection(example, selection, rules)
                     example.research_split = name
                     example.research_family = family
                     example.research_ood = name.removeprefix('ood_') if name.startswith('ood_') else None
@@ -334,8 +343,8 @@ def _restore(records, rules):
             raise ValueError('Stored manufactured RHS/solution does not reconstruct exactly')
         selected = _selection_record(example, rules)
         if json_safe(selected) != record['selection']:
-            raise ValueError('Frozen C*(A) selection changed')
-        example.strong_selection = selected
+            raise ValueError('Frozen classical parent changed')
+        _attach_selection(example, selected, rules)
         example.research_split = record['split']
         example.research_family = record['family']
         example.research_ood = record['split'].removeprefix('ood_') if record['split'].startswith('ood_') else None
@@ -362,7 +371,7 @@ def prepare_development_data(output_dir, rules, *, plan=None, historical_roots=(
     splits, records, rejected = {}, {}, {}
     for name in DEVELOPMENT:
         splits[name], records[name], rejected[name] = _generate_split(name, plan['splits'][name], forbidden, rules)
-    manifest = dict(version=VERSION, plan_digest=_hash(plan), rules=rules.to_dict(), rules_digest=rules.digest(),
+    manifest = dict(version=VERSION, plan_digest=_hash(plan), **baseline_metadata(rules, include_contract=True),
         historical_index=history, splits=records, rejected_normalized_duplicates=rejected,
         normalized_operator_disjoint=True, final_operators_materialized=False,
         final_operators_selected=False, final_operators_solved=False)
@@ -377,8 +386,8 @@ def load_development_data(output_dir, rules):
     plan = json.loads((output / 'dataset_plan.json').read_text())
     manifest = json.loads((output / 'development_manifest.json').read_text())
     _validate_plan(plan)
-    if manifest['plan_digest'] != _hash(plan) or manifest['rules_digest'] != rules.digest():
-        raise ValueError('Plan or frozen classical selector changed')
+    if manifest['plan_digest'] != _hash(plan) or stored_baseline_digest(manifest, rules) != rules.digest():
+        raise ValueError('Plan or frozen classical baseline/selector changed')
     seen = set(manifest['historical_index']['normalized_operator_digests'])
     for name in DEVELOPMENT:
         records = manifest['splits'][name]
@@ -408,16 +417,16 @@ def freeze_research(output_dir, checkpoint_paths, rules_path, controller_paths, 
     if not checkpoint_paths or not source_paths or not config:
         raise ValueError('Freeze needs student checkpoints, source files and full evaluation configuration')
     manifest = json.loads((output / 'development_manifest.json').read_text())
-    rules = load_strong_rules(rules_path)
-    if manifest['plan_digest'] != _hash(plan) or rules.digest() != manifest['rules_digest']:
-        raise ValueError('Dataset plan or C*(A) rules changed before freeze')
-    files = {'rules': str(Path(rules_path).resolve()),
+    rules = load_baseline(rules_path)
+    if manifest['plan_digest'] != _hash(plan) or rules.digest() != stored_baseline_digest(manifest, rules):
+        raise ValueError('Dataset plan or classical baseline changed before freeze')
+    files = {('baseline' if isinstance(rules, FixedClassicalBaseline) else 'rules'): str(Path(rules_path).resolve()),
              'plan': str(output / 'dataset_plan.json'),
              'development': str(output / 'development_manifest.json')}
     files.update({'checkpoint:' + k: str(Path(v).resolve()) for k, v in checkpoint_paths.items()})
     files.update({'controller:' + k: str(Path(v).resolve()) for k, v in controller_paths.items()})
     files.update({'source:' + str(index): str(Path(p).resolve()) for index, p in enumerate(sorted(map(str, source_paths)))})
-    frozen = dict(version=VERSION, output_dir=str(output), plan_digest=_hash(plan), rules_digest=rules.digest(),
+    frozen = dict(version=VERSION, output_dir=str(output), plan_digest=_hash(plan), **baseline_metadata(rules),
                   files={name: dict(path=path, sha256=_file_hash(path)) for name, path in files.items()},
                   config=json_safe(config), config_digest=_hash(config), final_test_consumed=False,
                   controller_files_declared=len(controller_paths), no_final_operator_observation=True)
@@ -514,8 +523,8 @@ def materialize_final_data(output_dir, claim, rules):
     plan = json.loads((output / 'dataset_plan.json').read_text())
     development = json.loads((output / 'development_manifest.json').read_text())
     _validate_plan(plan)
-    if plan['smoke'] or rules.digest() != development['rules_digest'] or _hash(plan) != ledger['plan_digest']:
-        raise ValueError('Smoke, changed rules, or changed final plan cannot consume final data')
+    if plan['smoke'] or rules.digest() != stored_baseline_digest(development, rules) or _hash(plan) != ledger['plan_digest']:
+        raise ValueError('Smoke, changed classical baseline, or changed final plan cannot consume final data')
     final_path = output / 'final_data_manifest.json'
     if final_path.exists():
         manifest = json.loads(final_path.read_text())
@@ -544,7 +553,7 @@ def materialize_final_data(output_dir, claim, rules):
     for name in HOLDOUT:
         splits[name], records[name], rejected[name] = _generate_split(name, plan['splits'][name], forbidden, rules)
     manifest = dict(version=VERSION, claim_fingerprint=claim.fingerprint, plan_digest=_hash(plan),
-                    rules_digest=rules.digest(), splits=records, historical_index=history,
+                    **baseline_metadata(rules), splits=records, historical_index=history,
                     rejected_normalized_duplicates=rejected, normalized_operator_disjoint=True,
                     split_use='single frozen evaluation; never model/teacher/KD/controller selection')
     manifest = json_safe(manifest)

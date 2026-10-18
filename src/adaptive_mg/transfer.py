@@ -430,6 +430,7 @@ def baseline_weights(
     operator_candidate_topk: int | None = 8,
     em_iterations: int = 10,
     em_rtol: float = 1e-8,
+    em_fixed_iterations: bool = False,
 ) -> np.ndarray:
     pattern = build_transfer_pattern(
         fine,
@@ -442,7 +443,8 @@ def baseline_weights(
         return pattern.bilinear_weights.copy()
     if baseline == "energymin":
         from .energymin import energy_weights
-        return energy_weights(a, pattern, maxiter=em_iterations, rtol=em_rtol)[0]
+        return energy_weights(a, pattern, maxiter=em_iterations, rtol=em_rtol,
+                              fixed_iterations=em_fixed_iterations)[0]
     if baseline == "operator":
         return operator_dependent_weights(
             a,

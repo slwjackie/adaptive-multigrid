@@ -23,6 +23,7 @@ from .data import dataset
 from .limited import (digest_file, diagnostic_cases, forced_config, initialize_timing_runtime,
                       make_arm, read_settings, vector_digest)
 from .solver import PreparedAdaptiveMG
+from .evaluation_metrics import _hierarchy, _source_signature, _speed_summary
 from .strong import PreparedStrongMG, classical_bank, load_strong_rules, select_strong_strategy
 
 REVISION = 'v67-strong-comparison-1'
@@ -136,19 +137,6 @@ def build_strong_arms(research, cfg, branches=('H_S',), checkpoint=None):
     return arms
 
 
-def _hierarchy(level):
-    rows = []
-    while level is not None:
-        rows.append(dict(grid_shape=list(level.shape), operator_shape=list(level.a.shape),
-                         operator_nnz=int(level.a.nnz),
-                         prolongation_shape=list(level.p.shape) if level.p is not None else None,
-                         prolongation_nnz=int(level.p.nnz) if level.p is not None else 0))
-        if getattr(level,"transfer_setup_report",None) is not None:
-            rows[-1]["transfer_setup_report"]=dict(level.transfer_setup_report)
-        level = level.coarse
-    return rows
-
-
 def measured_strong(example, arm, rules):
     """Imported-process cold constructor+solve, including selector and rollback."""
     cfg = arm['config']
@@ -229,14 +217,6 @@ def _counters(runs):
                 if isinstance(v, (float, int)) and not isinstance(v, bool):
                     total[k] = total.get(k, 0) + v
     return total
-
-
-def _speed_summary(ratios):
-    if not ratios:
-        return dict(geometric_speedup=None, ci95=[None, None], cases=0)
-    logs = np.log(ratios)
-    samples = np.exp(np.random.default_rng(93).choice(logs, (2000, len(logs)), replace=True).mean(axis=1))
-    return dict(geometric_speedup=float(np.exp(logs.mean())), ci95=np.quantile(samples, [.025, .975]).tolist(), cases=len(logs))
 
 
 def aggregate_strong_comparison(rows, arms, *, min_cases=20, minimum_speedup=1.0, accuracy_rtol=.05, accuracy_atol=1e-12):
@@ -368,12 +348,6 @@ def aggregate_strong_comparison(rows, arms, *, min_cases=20, minimum_speedup=1.0
         accuracy_scope=dict(reference='manufactured exact discrete solution; diagnostics computed after timing', relative_error_slack=accuracy_rtol, absolute_error_slack=accuracy_atol,
             comparison='case maximum over repeats; relative L2 and energy errors must both be no worse within explicit slack for diagnostic superiority eligibility; stopping rule unchanged'),
         final_certificate_modified=False, no_training=True)
-
-
-def _source_signature():
-    source_root = Path(__file__).resolve().parents[1]
-    files = sorted(source_root.rglob('*.py'))
-    return _hash({str(path.relative_to(source_root)): digest_file(path) for path in files})
 
 
 def _run_inputs(example, arm, repeat, manifest_digest):

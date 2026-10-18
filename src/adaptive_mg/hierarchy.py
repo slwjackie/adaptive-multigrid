@@ -120,6 +120,7 @@ class StencilBank:
 
 def baseline_kwargs(config):
     return dict(em_iterations=config.em_iterations,em_rtol=config.em_rtol,
+                em_fixed_iterations=config.em_fixed_iterations,
                 operator_sweeps=config.operator_sweeps,operator_omega=config.operator_omega,
                 operator_blend=config.operator_blend,operator_drop_tolerance=config.operator_drop_tolerance,
                 operator_candidate_topk=config.operator_candidate_topk)
@@ -138,7 +139,9 @@ def build_fixed_hierarchy(a, shape, strategy, config, stats, *, index=0, auxilia
         level.pattern=build_transfer_pattern(shape,coarse_shape)
         if strategy.transfer=='energymin':
             from .energymin import energy_weights
-            level.base_weights,level.transfer_setup_report=energy_weights(a,level.pattern,maxiter=config.em_iterations,rtol=config.em_rtol)
+            level.base_weights,level.transfer_setup_report=energy_weights(a,level.pattern,
+                maxiter=config.em_iterations,rtol=config.em_rtol,
+                fixed_iterations=config.em_fixed_iterations)
             stats.em_levels+=1;stats.em_iterations+=level.transfer_setup_report['iterations']
             stats.em_setup_seconds+=level.transfer_setup_report['setup_seconds']
         else:

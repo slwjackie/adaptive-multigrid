@@ -37,6 +37,8 @@ def require_components_allowed(components, cfg, branch):
 
 
 def research_spec(module):
+    if hasattr(module, 'sparse_smoother_spec'):
+        return dict(family='sparse_polynomial_smoother', config=module.sparse_smoother_spec())
     if hasattr(module, 'unet_transfer_spec'):
         return dict(family='unet_transfer', config=module.unet_transfer_spec())
     if hasattr(module, 'multistage_spec'):
@@ -51,6 +53,9 @@ def research_spec(module):
 
 
 def restore_expert(spec):
+    if spec['family'] == 'sparse_polynomial_smoother':
+        from .sparse_smoother import SparsePolynomialSmoother
+        return SparsePolynomialSmoother(**spec['config'])
     if spec['family'] == 'unet_transfer':
         from .unet_transfer import make_unet_transfer
         return make_unet_transfer(**spec['config'])

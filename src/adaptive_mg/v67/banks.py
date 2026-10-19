@@ -104,7 +104,7 @@ class CachedGenerationFailure(RuntimeError):
 
 def selected_level(index, cfg, component=None):
     levels = getattr(cfg, component + '_levels', None) if component else None
-    if component=='transfer' and levels=='all':return True
+    if levels=='all':return True
     return index in levels if levels is not None else (cfg.mg.nn_levels == -1 or index < cfg.mg.nn_levels)
 
 
@@ -183,6 +183,15 @@ def _features(level, stats):
 def generated_stencil(level, components, cfg, stats, device, dtype):
     stats.smoother_nn_calls += 1
     stats.neural_setup_calls += 1
+    if hasattr(components.smoother, 'sparse_smoother_spec'):
+        start = perf_counter()
+        try:
+            matrix = components.smoother.sparse_matrix(level.a)
+            matrix *= cfg.mg.smoother_gain_multiplier
+            stats.smoother_stage_generations += 1
+            return StencilBank(matrix)
+        finally:
+            stats.operator_generation_seconds += perf_counter() - start
     cascade = hasattr(components.smoother, 'stage_directions_and_gains')
     def generate(module, features):
         return (module.stage_directions_and_gains(features, level.index) if cascade
@@ -272,7 +281,14 @@ def prepare_transfer_bank(base,components,cfg,stats):
         classical_p=(base_level.p if reuse else scipy_prolongation_from_weights(level.pattern,level.base_weights)) if hasattr(components.transfer,'complexity_caps') else None
         level._classical_p=classical_p
         level.cache=base_level.cache if same else LineSmootherCache(a,shape)
-        if not same:
+        sparse_only=(cfg.use_smoother and hasattr(components.smoother,'sparse_smoother_spec')
+            and selected_level(index,cfg,'smoother') and cfg.application=='replace'
+            and (not cfg.spatial or cfg.gate_mode=='open') and cfg.mg.smoother_gain_multiplier>0
+            and cfg.replace_pre==cfg.mg.pre_steps and cfg.replace_post==cfg.mg.post_steps)
+        # The immutable classical recovery bank is already fully factored.
+        # A fully replaced learned level needs no eager line factorizations.
+        # Its cache remains usable for a later H_P request (lazy preparation).
+        if not same and not sparse_only:
             for direction in {'line_x':('x',),'line_y':('y',),'line_alt':('x','y'),'line_diag45':('diag45',)}.get(base.strategy.smoother,()):
                 level.cache.prepare(direction)
             stats.learned_factorizations+=level.cache.factorization_count

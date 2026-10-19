@@ -320,6 +320,10 @@ def train_expert(initial, examples, cfg, rules, settings, out, *, branch, teache
     if not examples or any(getattr(e,'research_split',None) not in ('train',) for e in examples):
         raise ValueError('Only fresh committed TRAIN examples may optimize weights')
     steps=int(settings['updates']);kd_steps=int(settings.get('kd_updates',steps//2)) if teacher is not None else 0
+    active=('smoother',) if branch=='H_S' else ('transfer',) if branch=='H_P' else ('smoother','transfer')
+    names=tuple(settings.get('trainable_components',active))
+    if not names or len(set(names))!=len(names) or not set(names)<=set(active):
+        raise ValueError('Trainable components must be a nonempty subset of the executed branch')
     if steps<1 or not 0<=kd_steps<steps:raise ValueError('KD must leave at least one task-only fine-tuning update')
     teacher_signature=teacher.generation_signature() if teacher else None
     schedule=np.random.default_rng(int(settings['seed'])).permutation(len(examples)).tolist()
@@ -358,7 +362,6 @@ def train_expert(initial, examples, cfg, rules, settings, out, *, branch, teache
             if digest_file(out/'candidate.pt')!=old['checkpoint_sha256']:raise ValueError('Candidate checksum mismatch')
             return Components.load(out/'candidate.pt'),old
     model=deepcopy(initial)
-    names=('smoother',) if branch=='H_S' else ('transfer',) if branch=='H_P' else ('smoother','transfer')
     start=0;records=[];payload=None
     if resume and (out/'resume.pt').exists():
         model=Components.load(out/'resume.pt')
@@ -441,7 +444,8 @@ def train_expert(initial, examples, cfg, rules, settings, out, *, branch, teache
     model.metadata.update({('training_baseline_digest' if isinstance(rules, FixedClassicalBaseline) else 'training_rules_digest'): rules.digest()})
     model.metadata.update(training_operator_digests=[e.group_digest for e in examples],
         training_branch=branch,training_kind='distilled_then_task_finetuned' if teacher else 'direct_full_cycle',
-        optimizer_updates=updates,requested_optimizer_updates=steps,teacher_signature=teacher_signature)
+        optimizer_updates=updates,requested_optimizer_updates=steps,teacher_signature=teacher_signature,
+        trainable_components=list(names))
     model.mark_policy_stale('fixed_baseline_experts_changed' if isinstance(rules, FixedClassicalBaseline)
                             else 'strong_aware_experts_changed_requires_new_labels')
     model.save(out/'candidate.pt',extra={'role':'teacher' if model.metadata.get('role')=='teacher' else 'student_candidate',

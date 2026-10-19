@@ -24,6 +24,7 @@ class TLevel:
     coarse: object=None
     dirs: object=None
     gains: object=None
+    sparse_smoother: object=None
     mask: object=None
     mask_hard: object=None
     raw_scipy: object=None
@@ -96,11 +97,15 @@ def make_graph(a,shape,components,cfg,*,learned=True,reference_root=None):
             level.interpolation_weights=torch.tensor(base,dtype=torch.float64)
         ac=level.p.transpose().product(at.product(level.p)).symmetrize()
         if use_s and cfg.use_smoother:
-            cascade=hasattr(components.smoother,'stage_directions_and_gains')
-            dirs,gains=(components.smoother.stage_directions_and_gains(feat,index) if cascade
-                        else components.smoother.direction_and_gain(feat))
-            level.is_residual_cascade=cascade
-            level.dirs=dirs.to('cpu',dtype=torch.float64);level.gains=gains.to('cpu',dtype=torch.float64)*cfg.mg.smoother_gain_multiplier
+            if hasattr(components.smoother,'sparse_smoother_spec'):
+                values=components.smoother.sparse_values(at)*cfg.mg.smoother_gain_multiplier
+                level.sparse_smoother=SparseTensor.from_coo(at.rows,at.cols,values,at.shape)
+            else:
+                cascade=hasattr(components.smoother,'stage_directions_and_gains')
+                dirs,gains=(components.smoother.stage_directions_and_gains(feat,index) if cascade
+                            else components.smoother.direction_and_gain(feat))
+                level.is_residual_cascade=cascade
+                level.dirs=dirs.to('cpu',dtype=torch.float64);level.gains=gains.to('cpu',dtype=torch.float64)*cfg.mg.smoother_gain_multiplier
         level.coarse=build(ac,cs,index+1,reference.coarse if frozen else None)
         return level
     return build(SparseTensor.from_scipy(a),shape,0,reference_root)
@@ -145,6 +150,8 @@ def _line_batches(level,direction,reverse=False):
 
 
 def neural_delta(level,r):
+    if level.sparse_smoother is not None:
+        return level.sparse_smoother.apply(r)
     diagonal=level.a.diagonal().abs().clamp_min(1e-14)
     matrix=r.ndim==2
     if r.ndim not in (1,2):raise ValueError('residual must be (N,) or (N,probes)')
@@ -164,7 +171,7 @@ def neural_delta(level,r):
 
 def smooth(level,r,cfg,reverse=False,gate=None):
     if r.ndim==2 and gate is not None and not bool(gate.any()):gate=None
-    kind=level.strategy.smoother;has=gate is not None and level.dirs is not None
+    kind=level.strategy.smoother;has=gate is not None and (level.dirs is not None or level.sparse_smoother is not None)
     hard_mask=level.mask_hard if level.mask_hard is not None else (gate.detach()>=cfg.gate_on if has else None)
     if has and bool(hard_mask.all()):
         dn=neural_delta(level,r)
@@ -239,7 +246,7 @@ def graph_gate(level,r,components,cfg):
 def cycle(level,x,b,components,cfg,step=0):
     if level.coarse is None:return level.a.solve(b)
     gate=None
-    if level.dirs is not None:
+    if level.dirs is not None or level.sparse_smoother is not None:
         if level.mask is None or step%cfg.gate_refresh==0:
             level.mask=graph_gate(level,b-level.a.apply(x),components,cfg)
         gate=level.mask

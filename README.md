@@ -7,6 +7,10 @@ See [the current Korean runbook](docs/RESIDUAL_UNET_TRANSFER_KR.md) for the trai
 PDE, data generation, commands and evaluation protocol. Sloshing, shear mixing
 layers, Navier–Stokes time integration and external CFD bridges are not included.
 
+The direct CNN can also be studied with a learned, cached sparse approximate-inverse
+smoother in place of line smoothing. See the [sparse smoother runbook](docs/direct_sparse_smoother.md)
+for frozen-P and joint P/smoother controls, cycle diagnostics, timing and Mac commands.
+
 ## Legacy H_S workflow: C_tuned + H_S + solver world model
 
 Use [`run_v6_7_hs_world_study.py`](scripts/run_v6_7_hs_world_study.py), with the

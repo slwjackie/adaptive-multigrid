@@ -192,14 +192,19 @@ def generated_stencil(level, components, cfg, stats, device, dtype):
             return StencilBank(matrix)
         finally:
             stats.operator_generation_seconds += perf_counter() - start
-    cascade = hasattr(components.smoother, 'stage_directions_and_gains')
+    paired = hasattr(components.smoother, 'paired_directions_and_gains')
+    cascade = not paired and hasattr(components.smoother, 'stage_directions_and_gains')
     def generate(module, features):
+        if paired:
+            return module.paired_directions_and_gains(features, level.index)
         return (module.stage_directions_and_gains(features, level.index) if cascade
                 else module.direction_and_gain(features))
     directions, gains = _inference(components.smoother, _features(level, stats),
                                   device, dtype, generate, stats)
-    directions = directions[0] if cascade else directions[0, :1]
-    gains = (gains[0] if cascade else gains[0, :1]) * cfg.mg.smoother_gain_multiplier
+    if paired and (directions.shape != (1, 2, 9, *level.shape) or gains.shape != (1, 2)):
+        raise ValueError('paired smoother must generate exactly pre/post 9-point stencils and gains')
+    directions = directions[0] if cascade or paired else directions[0, :1]
+    gains = (gains[0] if cascade or paired else gains[0, :1]) * cfg.mg.smoother_gain_multiplier
     if not np.isfinite(directions).all() or not np.isfinite(gains).all():
         raise ValueError('nonfinite generated smoother')
     banks = []
@@ -219,6 +224,9 @@ def generated_stencil(level, components, cfg, stats, device, dtype):
         else:
             banks.append(StencilBank(factory()))
     stats.smoother_stage_generations += len(banks)
+    if paired:
+        from .paired_smoother import PairedStencilBank
+        return PairedStencilBank(*banks)
     if len(banks) == 1:
         return banks[0]
     from .multistage import ResidualCascadeBank
@@ -281,7 +289,8 @@ def prepare_transfer_bank(base,components,cfg,stats):
         classical_p=(base_level.p if reuse else scipy_prolongation_from_weights(level.pattern,level.base_weights)) if hasattr(components.transfer,'complexity_caps') else None
         level._classical_p=classical_p
         level.cache=base_level.cache if same else LineSmootherCache(a,shape)
-        sparse_only=(cfg.use_smoother and hasattr(components.smoother,'sparse_smoother_spec')
+        sparse_only=(cfg.use_smoother and (hasattr(components.smoother,'sparse_smoother_spec')
+            or hasattr(components.smoother,'paired_directions_and_gains'))
             and selected_level(index,cfg,'smoother') and cfg.application=='replace'
             and (not cfg.spatial or cfg.gate_mode=='open') and cfg.mg.smoother_gain_multiplier>0
             and cfg.replace_pre==cfg.mg.pre_steps and cfg.replace_post==cfg.mg.post_steps)
@@ -372,7 +381,9 @@ def prepare_smoother_bank(base,components,cfg,stats,operator_cache=None):
             if selected_level(level.index,cfg,"smoother") and cfg.mg.smoother_gain_multiplier>0 and (cfg.replace_pre or cfg.replace_post):
                 if not hasattr(level,'_operator_digest'):
                     level._operator_digest=operator_digest(level.a)
-                key=(level._operator_digest,level.shape,level.index if hasattr(components.smoother,"multistage_spec") else None,generation_key)
+                indexed=(hasattr(components.smoother,'multistage_spec')
+                         or hasattr(components.smoother,'paired_directions_and_gains'))
+                key=(level._operator_digest,level.shape,level.index if indexed else None,generation_key)
                 if operator_cache is not None and key in operator_cache:
                     cached=operator_cache[key]
                     if isinstance(cached,GenerationFailure):cached.reject_cached(stats,'smoother')
@@ -437,6 +448,8 @@ def replacement_step(level,r,mask,cfg,stats,reverse=False):
         return classical_step(level,r,cfg.mg,stats,reverse=reverse)
     stats.possible_rows+=r.size
     bank=level.neural_stencil
+    if getattr(bank,'is_paired_smoother',False):
+        bank=bank.for_phase(reverse)
     if cfg.application=='additive':
         dc=classical_step(level,r,cfg.mg,stats,reverse=reverse)
         return dc+_bank_apply(bank,r-level.a@dc,stats,mask,cfg.active_dense)

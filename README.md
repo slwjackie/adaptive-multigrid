@@ -1,4 +1,16 @@
-# Residual U-net transfer teacher study
+# Learned multigrid operator studies
+
+The new [joint P/pre/post smoother study](docs/joint_transfer_study.md) uses
+`line_alt + bilinear + full coarsening` as its fixed parent and fallback. Two
+small residual CNNs generate sparse interpolation and separate pre/post
+smoothers once per level. Its independent pipeline trains ablations and the
+joint model, refines numerical operators offline with multi-start Adam, then
+distills their operators and complete V-cycle actions. Six arms are compared
+using measured setup-plus-solve time; EM5 is an independent reference arm only.
+Use `scripts/run_v6_7_joint_transfer_study.py` and a new run directory. This is
+an experiment implementation, not evidence of a speedup.
+
+## Residual U-net transfer teacher study (existing independent workflow)
 
 This branch focuses on learning sparse prolongation from synthetic 2D elliptic
 systems, using a residual U-net teacher and compact CNN student. The fixed reference

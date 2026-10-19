@@ -37,6 +37,8 @@ def require_components_allowed(components, cfg, branch):
 
 
 def research_spec(module):
+    if hasattr(module, 'paired_smoother_spec'):
+        return dict(family='paired_stencil_smoother', config=module.paired_smoother_spec())
     if hasattr(module, 'sparse_smoother_spec'):
         return dict(family='sparse_polynomial_smoother', config=module.sparse_smoother_spec())
     if hasattr(module, 'unet_transfer_spec'):
@@ -53,6 +55,9 @@ def research_spec(module):
 
 
 def restore_expert(spec):
+    if spec['family'] == 'paired_stencil_smoother':
+        from .paired_smoother import PairedStencilSmoother
+        return PairedStencilSmoother(**spec['config'])
     if spec['family'] == 'sparse_polynomial_smoother':
         from .sparse_smoother import SparsePolynomialSmoother
         return SparsePolynomialSmoother(**spec['config'])

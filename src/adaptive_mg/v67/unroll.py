@@ -101,9 +101,14 @@ def make_graph(a,shape,components,cfg,*,learned=True,reference_root=None):
                 values=components.smoother.sparse_values(at)*cfg.mg.smoother_gain_multiplier
                 level.sparse_smoother=SparseTensor.from_coo(at.rows,at.cols,values,at.shape)
             else:
-                cascade=hasattr(components.smoother,'stage_directions_and_gains')
-                dirs,gains=(components.smoother.stage_directions_and_gains(feat,index) if cascade
+                paired=hasattr(components.smoother,'paired_directions_and_gains')
+                cascade=not paired and hasattr(components.smoother,'stage_directions_and_gains')
+                dirs,gains=(components.smoother.paired_directions_and_gains(feat,index) if paired
+                            else components.smoother.stage_directions_and_gains(feat,index) if cascade
                             else components.smoother.direction_and_gain(feat))
+                if paired and (dirs.shape != (1,2,9,*sh) or gains.shape != (1,2)):
+                    raise ValueError('paired smoother must generate exactly pre/post 9-point stencils and gains')
+                level.is_paired_smoother=paired
                 level.is_residual_cascade=cascade
                 level.dirs=dirs.to('cpu',dtype=torch.float64);level.gains=gains.to('cpu',dtype=torch.float64)*cfg.mg.smoother_gain_multiplier
         level.coarse=build(ac,cs,index+1,reference.coarse if frozen else None)
@@ -149,7 +154,7 @@ def _line_batches(level,direction,reverse=False):
     return list(reversed(blocks)) if reverse else blocks
 
 
-def neural_delta(level,r):
+def neural_delta(level,r,reverse=False):
     if level.sparse_smoother is not None:
         return level.sparse_smoother.apply(r)
     diagonal=level.a.diagonal().abs().clamp_min(1e-14)
@@ -158,14 +163,15 @@ def neural_delta(level,r):
     columns=r.shape[1] if matrix else 1
     stages=level.dirs.shape[1] if getattr(level,'is_residual_cascade',False) else 1
     d=torch.zeros_like(r);current=r
-    for j in range(stages):
+    indices=([int(bool(reverse))] if getattr(level,'is_paired_smoother',False) else range(stages))
+    for position,j in enumerate(indices):
         scaled=current/(diagonal[:,None] if matrix else diagonal)
         inp=(scaled.T if matrix else scaled).reshape(columns,1,*level.shape)
         directions=level.dirs[:,j:j+1].expand(columns,-1,-1,-1,-1)
         out=level.gains[0,j]*NeuralSmootherNet.apply_coefficients(directions,inp)[:,0]
         inc=out.reshape(columns,-1).T if matrix else out.ravel()
         d=d+inc
-        if j+1<stages:current=current-level.a.apply(inc)
+        if position+1<stages:current=current-level.a.apply(inc)
     return d
 
 
@@ -174,7 +180,7 @@ def smooth(level,r,cfg,reverse=False,gate=None):
     kind=level.strategy.smoother;has=gate is not None and (level.dirs is not None or level.sparse_smoother is not None)
     hard_mask=level.mask_hard if level.mask_hard is not None else (gate.detach()>=cfg.gate_on if has else None)
     if has and bool(hard_mask.all()):
-        dn=neural_delta(level,r)
+        dn=neural_delta(level,r,reverse)
         if not cfg.spatial or cfg.gate_mode=='open':return dn
         dc=smooth(level,r,cfg,reverse,None)
         sp=(1-gate.mean())*dc+gate.mean()*dn
@@ -184,7 +190,7 @@ def smooth(level,r,cfg,reverse=False,gate=None):
     if kind=='jacobi':
         dc=cfg.mg.jacobi_omega*r/den
         if not has:return dc
-        soft=gate;hard=hard_mask.double();dn=neural_delta(level,r)
+        soft=gate;hard=hard_mask.double();dn=neural_delta(level,r,reverse)
         # Product STE: closed forward branches still train all participating heads.
         sp=(1-soft)*dc+soft*dn;hp=(1-hard)*dc+hard*dn
         return sp+(hp-sp).detach()
@@ -212,7 +218,7 @@ def smooth(level,r,cfg,reverse=False,gate=None):
             if has:
                 # Actual deployment replaces only whole selected lines.
                 hard=hard_mask[idx].all().double();soft=gate[idx].mean()
-                ni=neural_delta(level,cur)[idx]
+                ni=neural_delta(level,cur,reverse)[idx]
                 sp=(1-soft)*ci+soft*ni;hp=(1-hard)*ci+hard*ni
                 ci=sp+(hp-sp).detach()
             d=d.index_add(0,idx,ci);cur=cur-columns.apply(ci)

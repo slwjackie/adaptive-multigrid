@@ -23,6 +23,7 @@ from .limited import forced_config, initialize_timing_runtime, vector_digest
 from .research_data import HOLDOUT, _check_claim, _hash, _write_json
 from .research_runtime import is_teacher, offline_teacher_generation
 from .solver import PreparedAdaptiveMG
+from .fixed_classical import BilinearClassicalBaseline, FixedClassicalBaseline
 from .evaluation_metrics import _hierarchy, _source_signature, _speed_summary
 
 VERSION = 'classical-parent-research-measurement-v2'
@@ -31,6 +32,30 @@ REGIMES = ('cold', 'warm', 'multiple', 'warm_multiple')
 
 def _fixed_baseline(rules):
     return getattr(rules, 'kind', None) == 'fixed_classical'
+
+
+def _independent_em_reference(spec, primary, cfg):
+    """Allow only the explicitly separate EM5 classical comparison arm.
+
+    Neural arms keep the bilinear parent. The EM reference shares every active
+    numerical control except interpolation/setup, including smoothing budget,
+    stopping tolerance and precision. It cannot be used as a fallback parent.
+    """
+    alternate = spec.get('rules')
+    if (not isinstance(primary, BilinearClassicalBaseline)
+            or type(alternate) is not FixedClassicalBaseline
+            or not spec.get('reference_only', False)
+            or spec.get('branch') != 'C' or spec.get('model') is not None
+            or spec.get('selector', True) or spec.get('policy') is not None
+            or spec.get('ttt') is not None or spec.get('training_only', False)):
+        return False
+    arm_cfg = _arm_config(cfg, spec)
+    alternate.validate_config(arm_cfg)
+    ignored = {'strategy_name', 'em_iterations', 'em_rtol', 'em_fixed_iterations'}
+    if ({k: v for k, v in arm_cfg.mg.numerical_scope().items() if k not in ignored}
+            != {k: v for k, v in cfg.mg.numerical_scope().items() if k not in ignored}):
+        raise ValueError('Independent EM5 reference must share the bilinear numerical protocol except transfer setup')
+    return True
 
 
 def manufactured_rhs(example, count):
@@ -199,6 +224,7 @@ def measured_research(example, arm, cfg, rules, *, regime='cold', rhs_count=1):
     """Measure one actual constructor/solve workload; verify after stopping timer."""
     if regime not in REGIMES or (regime not in ('multiple', 'warm_multiple') and rhs_count != 1):
         raise ValueError('Cold/warm use one RHS; multiple/warm_multiple use actual batches')
+    rules = arm.get('rules') or rules
     rhs, exacts = manufactured_rhs(example, rhs_count)
     zeros = np.zeros_like(rhs)
     prepared, elapsed, construction = None, None, 0.
@@ -275,7 +301,9 @@ def measured_research(example, arm, cfg, rules, *, regime='cold', rhs_count=1):
         seconds_per_rhs=elapsed / rhs_count, success=success, successful=success, error=failure,
         convergence_factor=contraction,
         constructor_seconds=construction, classical_setup_seconds=classical_setup,
-        classical_setup_scope=('constructor including fixed energy-minimization hierarchy, factorization and cache-key work'
+        classical_setup_scope=('constructor including fixed bilinear hierarchy, factorization and cache-key work; no energy minimization'
+                               if isinstance(rules, BilinearClassicalBaseline) else
+                               'constructor including fixed energy-minimization hierarchy, factorization and cache-key work'
                                if fixed else 'constructor including A-only selection, hierarchy, factorization and cache-key work'),
         neural_setup_seconds=neural_setup, total_setup_seconds=total_setup,
         ttt_seconds=ttt_timed, warm_ttt_seconds=ttt_preparation if warm else 0.,
@@ -426,6 +454,9 @@ def evaluate_research(examples, arm_specs, cfg, rules, out, *, repeats=5, warmup
     ``arm_specs[name]``: model=Components|None, branch=C/H_S/H_P/H_SP,
     selector=True, training_only=False.  Optional policy=ResearchPolicy uses auto.
     Optional config may alter only branch/policy flags, not numerical protocol.
+    A bilinear fixed-parent study can additionally include a pure classical
+    EM5 arm with its own fixed rules/config and explicit reference_only=True;
+    only transfer-setup controls may differ for that independent comparison.
     Resume requires exact sources, models, rules, hardware, vectors and settings.
     """
     examples, regimes, rhs_counts = list(examples), tuple(regimes), tuple(rhs_counts)
@@ -475,8 +506,9 @@ def evaluate_research(examples, arm_specs, cfg, rules, out, *, repeats=5, warmup
     for name, spec in arm_specs.items():
         if fixed and (spec.get('selector', True) or spec.get('policy') is not None):
             raise ValueError('Fixed classical evaluation forbids selectors and policies in every arm')
+        independent_em = _independent_em_reference(spec, rules, cfg)
         if spec.get('rules') is not None and spec['rules'].digest() != rules.digest():
-            if fixed or spec.get('branch') != 'C' or spec.get('model') is not None or spec.get('policy') is not None or not spec.get('robustness_only'):
+            if not independent_em and (fixed or spec.get('branch') != 'C' or spec.get('model') is not None or spec.get('policy') is not None or not spec.get('robustness_only')):
                 raise ValueError('different-parent rules are only allowed for a labelled classical robustness arm')
         if spec.get('branch') not in {'C', 'H_S', 'H_P', 'H_SP', 'auto'}:
             raise ValueError('Invalid branch')
@@ -494,10 +526,14 @@ def evaluate_research(examples, arm_specs, cfg, rules, out, *, repeats=5, warmup
             raise ValueError('RHS-count blindness is only a policy ablation')
         arm = {**spec, 'config': _arm_config(cfg, spec)}
         if fixed:
-            rules.validate_config(arm['config'])
-        if arm['config'].mg != cfg.mg or arm['config'].inference_dtype != cfg.inference_dtype or arm['config'].inference_device != cfg.inference_device:
+            (arm.get('rules') or rules).validate_config(arm['config'])
+        if ((not independent_em and arm['config'].mg != cfg.mg)
+                or arm['config'].inference_dtype != cfg.inference_dtype
+                or arm['config'].inference_device != cfg.inference_device):
             raise ValueError('All arms must share numerical protocol, generation dtype and device')
         allowed_flags = {'mode', 'branch', 'use_smoother', 'use_transfer', 'spatial', 'gate_mode', 'record_trace', 'use_learned_controller'}
+        if independent_em:
+            allowed_flags.add('mg')  # All active MG controls checked above.
         if spec.get('schedule_ablation', False):
             if spec.get('branch') == 'C':
                 raise ValueError('Do not change classical parent through a schedule ablation')
@@ -519,10 +555,14 @@ def evaluate_research(examples, arm_specs, cfg, rules, out, *, repeats=5, warmup
         **({'baseline': rules.to_dict(), 'baseline_digest': rules.digest()} if fixed else {'rules': rules.to_dict(), 'rules_digest': rules.digest()}), config=cfg.to_dict(), repeats=repeats,
         warmups=warmups, rhs_counts=rhs_counts, regimes=regimes, order_seed=order_seed,
         hardware=hardware_environment(), final_test_eligibility='caller must enforce untouched final gate; evaluator never certifies',
-        cold_scope=('imported process; fixed energy-minimization constructor+CNN generation+Galerkin hierarchy+solve, rollback and fallback included; checkpoint disk load/native library initialization excluded'
+        cold_scope=('imported process; fixed bilinear constructor+CNN generation+Galerkin hierarchy+solve, rollback and fallback included; EM5 setup only in its independent reference arm; checkpoint disk load/native library initialization excluded'
+                    if isinstance(rules, BilinearClassicalBaseline) else
+                    'imported process; fixed energy-minimization constructor+CNN generation+Galerkin hierarchy+solve, rollback and fallback included; checkpoint disk load/native library initialization excluded'
                     if fixed else 'imported process; selector+constructor+generation+solve, rollback included; checkpoint disk load/native library initialization excluded'),
         warm_scope='one explicit successful cache-prime solve excluded and reported; actual subsequent same-A solve timed',
-        multiple_scope=('fresh fixed energy-minimization constructor+CNN generation+Galerkin hierarchy and actual solve_many for independent manufactured RHS; setup included once; rollback and fallback included'
+        multiple_scope=('fresh fixed bilinear constructor+CNN generation+Galerkin hierarchy and actual solve_many for independent manufactured RHS; setup included once; rollback and fallback included; EM5 setup only in its independent reference arm'
+                        if isinstance(rules, BilinearClassicalBaseline) else
+                        'fresh fixed energy-minimization constructor+CNN generation+Galerkin hierarchy and actual solve_many for independent manufactured RHS; setup included once; rollback and fallback included'
                         if fixed else 'fresh constructor and actual solve_many for independent manufactured RHS; setup included once'),
         warm_multiple_scope='operator preparation and independent prime excluded; actual distinct timed RHS; decisions/probes/recovery included',
         teacher_scope='offline training-only upper-bound evaluation; never a student/deployment result'))

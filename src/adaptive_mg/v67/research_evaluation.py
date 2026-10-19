@@ -98,6 +98,10 @@ def _model_metadata(arm):
         training_only=bool(arm.get('training_only', False)),
         teacher_modules=sum(is_teacher(module) for module in modules),
         deployment_teacher_allowed=False,
+        ttt_settings=json_safe(arm.get('ttt')),
+        ttt_scope=('A-only episodic adaptation; reset from starting weights for every constructor; '
+                   'adaptation and acceptance charged to cold/multiple setup, separately reported for warm'
+                   if arm.get('ttt') is not None else None),
         expected_rhs_mode=arm.get('expected_rhs_mode', 'actual'),
         reference_only=bool(arm.get('reference_only', False)),
         model_metadata=json_safe(model.metadata) if model is not None else None)
@@ -111,6 +115,13 @@ def _arm_config(cfg, arm):
 
 def _construct(example, arm, cfg, rules, expected_rhs):
     rules = arm.get('rules') or rules
+    if arm.get('ttt') is not None:
+        if (not _fixed_baseline(rules) or arm['branch'] != 'H_P' or arm.get('model') is None
+                or arm.get('selector', True) or arm.get('policy') is not None
+                or arm.get('training_only', False)):
+            raise ValueError('TTT requires a deployable fixed-parent H_P arm without a selector/policy')
+        from .transfer_ttt import PreparedTTTMG
+        return PreparedTTTMG(example.a, example.n, arm['model'], cfg, rules, arm['ttt'])
     if _fixed_baseline(rules):
         rules.validate_config(cfg)
         if arm.get('selector', True) or arm.get('policy') is not None:
@@ -244,6 +255,15 @@ def measured_research(example, arm, cfg, rules, *, regime='cold', rhs_count=1):
     selection = getattr(root, 'selection', None)
     fixed = _fixed_baseline(rules)
     neural_setup = float(counters.get('branch_setup_seconds', counters.get('nn_setup_seconds', 0.)))
+    # The TTT constructor already contains adaptation and its eager learned-bank
+    # setup. Never add either to the measured wall or total_setup a second time.
+    ttt_preparation = float(getattr(prepared, 'ttt_seconds', 0.))
+    warm = regime in ('warm', 'warm_multiple')
+    ttt_timed = 0. if warm else ttt_preparation
+    ttt_report = getattr(prepared, 'ttt_report', None)
+    ttt_bank_stats = getattr(prepared, 'ttt_bank_stats', {})
+    ttt_generation = float(ttt_bank_stats.get('operator_generation_seconds', 0.))
+    classical_setup = max(0., construction - ttt_timed)
     total_setup = construction + neural_setup
     accepted_neural = sum(counters.get('branch_' + b + '_cycles', 0) for b in ('H_S', 'H_P', 'H_SP'))
     success = bool(failure is None and len(checked) == rhs_count and all(r['verified_success'] for r in checked)
@@ -254,10 +274,16 @@ def measured_research(example, arm, cfg, rules, *, regime='cold', rhs_count=1):
     record = dict(regime=regime, rhs_count=rhs_count, wall_seconds=elapsed,
         seconds_per_rhs=elapsed / rhs_count, success=success, successful=success, error=failure,
         convergence_factor=contraction,
-        constructor_seconds=construction, classical_setup_seconds=construction,
+        constructor_seconds=construction, classical_setup_seconds=classical_setup,
         classical_setup_scope=('constructor including fixed energy-minimization hierarchy, factorization and cache-key work'
                                if fixed else 'constructor including A-only selection, hierarchy, factorization and cache-key work'),
         neural_setup_seconds=neural_setup, total_setup_seconds=total_setup,
+        ttt_seconds=ttt_timed, warm_ttt_seconds=ttt_preparation if warm else 0.,
+        ttt_preparation_seconds=ttt_preparation, ttt_report=ttt_report,
+        ttt_bank_stats=ttt_bank_stats, ttt_operator_generation_seconds=ttt_generation,
+        ttt_adopted=bool(ttt_report and ttt_report.get('proposal_adopted', False)),
+        ttt_updates_applied=int(ttt_report.get('updates_applied', 0)) if ttt_report else 0,
+        ttt_timing_scope='constructor adaptation includes probe creation, gradients, guard and selected learned hierarchy; no double counting',
         solve_seconds=max(0., elapsed - total_setup),
         solve_seconds_scope='measured outer wall minus separately instrumented constructor/branch setup; diagnostic decomposition',
         warm_prime_seconds=prime_seconds, warm_prime_results=prime_records,
@@ -280,7 +306,8 @@ def measured_research(example, arm, cfg, rules, *, regime='cold', rhs_count=1):
         inference_dtype=cfg.inference_dtype, numerical_dtype='float64',
         expected_rhs_mode=arm.get('expected_rhs_mode', 'actual'),
         expected_rhs_hint=1 if arm.get('expected_rhs_mode') == 'blind' else rhs_count,
-        operator_generation_seconds=counters.get('operator_generation_seconds', 0.),
+        operator_generation_seconds=counters.get('operator_generation_seconds', 0.) + (0. if warm else ttt_generation),
+        operator_generation_scope='runtime operator-generation regions only; TTT selected-bank generation included when timed, training/guard forwards remain inside ttt_seconds',
         controller_seconds=counters.get('controller_seconds', 0.), detector_seconds=counters.get('detector_seconds', 0.),
         training_only=bool(arm.get('training_only', False)),
         teacher_evaluation_seconds=elapsed if arm.get('training_only', False) else 0.,
@@ -357,9 +384,11 @@ def aggregate_research(rows, arm_metadata, *, repeats, regimes, rhs_counts, refe
                         **{speed_key: speedup, accuracy_key: worse}, **errors)
                     for key in ('wall_seconds', 'seconds_per_rhs', 'classical_setup_seconds', 'neural_setup_seconds',
                                 'total_setup_seconds', 'solve_seconds', 'warm_prime_seconds', 'operator_generation_seconds',
+                                'ttt_seconds', 'warm_ttt_seconds', 'ttt_preparation_seconds', 'ttt_operator_generation_seconds', 'ttt_updates_applied',
                                 'executed_cycles', 'accepted_neural_cycles', 'rollback_count', 'fallback_count', 'setup_failures',
                                 'operator_complexity', 'transfer_complexity', 'controller_seconds', 'detector_seconds', 'teacher_evaluation_seconds'):
                         entry[key] = _median(runs, key)
+                    entry['ttt_adopted_repeats'] = sum(bool(r.get('ttt_adopted')) for r in runs)
                     table.append(entry)
                 speed = _speed_summary(ratios)
                 successful_times = [_median(measurements[i, name], 'wall_seconds') for i in range(len(rows)) if successes[name][i]]
@@ -435,7 +464,8 @@ def evaluate_research(examples, arm_specs, cfg, rules, out, *, repeats=5, warmup
     baseline = arm_specs[reference_arm]
     if fixed:
         if (baseline.get('branch') != 'C' or baseline.get('model') is not None
-                or baseline.get('selector', True) or baseline.get('policy') is not None):
+                or baseline.get('selector', True) or baseline.get('policy') is not None
+                or baseline.get('ttt') is not None):
             raise ValueError('reference must be the unchanged fixed pure classical solver without a selector')
     elif baseline.get('branch') != 'C' or baseline.get('model') is not None or not baseline.get('selector', True) or baseline.get('policy') is not None:
         raise ValueError('reference must be the unchanged selected pure classical solver')
@@ -450,6 +480,12 @@ def evaluate_research(examples, arm_specs, cfg, rules, out, *, repeats=5, warmup
                 raise ValueError('different-parent rules are only allowed for a labelled classical robustness arm')
         if spec.get('branch') not in {'C', 'H_S', 'H_P', 'H_SP', 'auto'}:
             raise ValueError('Invalid branch')
+        if spec.get('ttt') is not None:
+            if (not fixed or spec['branch'] != 'H_P' or spec.get('model') is None
+                    or spec.get('training_only', False) or spec.get('policy') is not None):
+                raise ValueError('TTT requires a deployable fixed-parent H_P arm')
+            if not isinstance(spec['ttt'], dict):
+                raise ValueError('TTT settings must be an explicit dictionary')
         if spec['branch'] == 'auto' and spec.get('policy') is None:
             raise ValueError('Research auto requires an explicit refitted policy')
         if spec.get('expected_rhs_mode', 'actual') not in {'actual', 'blind'}:
@@ -490,6 +526,10 @@ def evaluate_research(examples, arm_specs, cfg, rules, out, *, repeats=5, warmup
                         if fixed else 'fresh constructor and actual solve_many for independent manufactured RHS; setup included once'),
         warm_multiple_scope='operator preparation and independent prime excluded; actual distinct timed RHS; decisions/probes/recovery included',
         teacher_scope='offline training-only upper-bound evaluation; never a student/deployment result'))
+    if any(arm.get('ttt') is not None for arm in arms.values()):
+        manifest['ttt_scope'] = ('All adaptation/guard/rebuilding is measured in cold/multiple constructor wall; '
+                                 'warm excludes and separately reports ttt_preparation_seconds. '
+                                 'Only A is supplied to adaptation; evaluation exact solutions are not supplied.')
     manifest_path = output / 'run_manifest.json'
     previous_complete_report = None
     if manifest_path.exists():

@@ -1,13 +1,24 @@
 # Learned multigrid operator studies
 
-The new [joint P/pre/post smoother study](docs/joint_transfer_study.md) uses
+The current [P-only study](docs/learned_p_study.md) fixes classical `line_alt`
+smoothing (2 pre + 2 post), full coarsening and a bilinear fallback parent. Only
+the sparse P generator is learned, using a stochastic estimate of the complete
+V-cycle error-propagation operator's squared Frobenius norm. No neural smoother
+is instantiated, trained, serialized or executed in this path. Generated P/R/Ac
+and line factors are reused across cycles and RHS for the same A. Use
+`scripts/run_v6_7_learned_p_study.py`; it is also the default configuration of the
+existing joint-study CLI. Fixed-probe before/after diagnostics precede optional
+P-only offline refinement and distillation. Online setup+solve determines success.
+
+The earlier [joint P/pre/post smoother study](docs/joint_transfer_study.md) uses
 `line_alt + bilinear + full coarsening` as its fixed parent and fallback. Two
 small residual CNNs generate sparse interpolation and separate pre/post
 smoothers once per level. Its independent pipeline trains ablations and the
 joint model, refines numerical operators offline with multi-start Adam, then
 distills their operators and complete V-cycle actions. Six arms are compared
 using measured setup-plus-solve time; EM5 is an independent reference arm only.
-Use `scripts/run_v6_7_joint_transfer_study.py` and a new run directory. This is
+It remains available with its explicit legacy configuration for reproducibility.
+Use a new run directory for the current P-only study. This is
 an experiment implementation, not evidence of a speedup.
 
 ## Residual U-net transfer teacher study (existing independent workflow)

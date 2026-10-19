@@ -37,6 +37,8 @@ def require_components_allowed(components, cfg, branch):
 
 
 def research_spec(module):
+    if hasattr(module, 'fixed_smoother_spec'):
+        return dict(family='no_neural_smoother', config=module.fixed_smoother_spec())
     if hasattr(module, 'paired_smoother_spec'):
         return dict(family='paired_stencil_smoother', config=module.paired_smoother_spec())
     if hasattr(module, 'sparse_smoother_spec'):
@@ -55,6 +57,11 @@ def research_spec(module):
 
 
 def restore_expert(spec):
+    if spec['family'] == 'no_neural_smoother':
+        if spec['config'] != dict(strategy='line_alt', version=1):
+            raise ValueError('Unsupported fixed smoother marker')
+        from .learned_p import NoNeuralSmoother
+        return NoNeuralSmoother()
     if spec['family'] == 'paired_stencil_smoother':
         from .paired_smoother import PairedStencilSmoother
         return PairedStencilSmoother(**spec['config'])

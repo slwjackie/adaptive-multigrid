@@ -231,7 +231,7 @@ def select_measured_candidate(result, *, rhs_count=1, regime='multiple',
     candidates = tuple(candidate_arms)
     if not candidates or len(set(candidates)) != len(candidates):
         raise ValueError('Supply distinct learned candidate arms')
-    if set(candidates) - set(LEARNED_ARMS):
+    if set(candidates) - (set(LEARNED_ARMS) | {'distilled_P'}):
         raise ValueError('Only learned joint-study arms may be candidates')
     rows, repeats = result.get('rows', []), _repeats(result)
     if not rows:

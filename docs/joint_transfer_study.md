@@ -1,5 +1,9 @@
 # Bilinear 기반 P·pre/post smoother 공동 학습
 
+현재 기본 실험은 [line_alt 고정·P-only Frobenius 학습](learned_p_study.md)으로
+변경되었다. 아래는 명시적인 이전 joint 설정 파일을 사용하는 과거 실험 재현용이다.
+새 P-only run에는 smoother NN과 공동 학습 단계가 없다.
+
 이 실험은 작은 두 CNN이 각 level의 `P`, `B_pre`, `B_post`를 함께 생성하도록
 학습한다. 기존 U-net teacher, pruning, TTT, EM5 기반 sparse smoother 실험과는
 별도의 새 run이다. 이 경로에는 TTT나 diffusion이 없다. 구현과 smoke 검증만으로

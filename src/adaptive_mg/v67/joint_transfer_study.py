@@ -1,4 +1,4 @@
-"""Bilinear-parent joint P/pre/post learning, per-A search and action distillation.
+"""Fixed line_alt/P-only study, with explicit legacy joint-study compatibility.
 
 Every experiment owns fresh development data and sealed final/OOD operators.
 Search is offline and training-only; deployable models generate operators once
@@ -33,8 +33,11 @@ from .research_data import (make_research_plan, prepare_development_data,
     _write_json as write_json)
 from .research_evaluation import evaluate_research
 from .joint_transfer_training import (make_joint_components, curriculum_cycles,
-    joint_objective, make_oracle, export_oracle, import_oracle, measure_raw_candidate)
+    joint_objective, make_oracle as _make_pair_oracle, export_oracle as _export_pair_oracle,
+    import_oracle as _import_pair_oracle, measure_raw_candidate)
 from .joint_transfer_evaluation import raw_contractions, report, select_measured_candidate
+from .learned_p import (VERSION as P_VERSION, NoNeuralSmoother, make_p_components,
+    frobenius_objective, make_p_oracle, export_p_oracle, import_p_oracle, require_p_only, p_diagnostic)
 
 VERSION = 'joint-bilinear-transfer-smoother-v1'
 PROJECT = Path(__file__).resolve().parents[3]
@@ -43,6 +46,32 @@ STAGES = {'learned_P': ('H_P', ('transfer',)),
           'joint': ('H_SP', ('transfer', 'smoother')),
           'distilled_joint': ('H_SP', ('transfer', 'smoother'))}
 _THREAD_LIMIT = None
+
+
+def _p_only(settings):
+    return settings.get('version') == P_VERSION
+
+
+def _stages(settings):
+    return ({'learned_P': ('H_P', ('transfer',)), 'distilled_P': ('H_P', ('transfer',))}
+            if _p_only(settings) else STAGES)
+
+
+def _source_stage(settings):
+    return 'learned_P' if _p_only(settings) else 'joint'
+
+
+def make_oracle(example, model, cfg, **kwargs):
+    return (make_p_oracle if isinstance(model.smoother, NoNeuralSmoother) else _make_pair_oracle)(
+        example, model, cfg, **kwargs)
+
+
+def export_oracle(model):
+    return (export_p_oracle if isinstance(model.smoother, NoNeuralSmoother) else _export_pair_oracle)(model)
+
+
+def import_oracle(payload):
+    return (import_p_oracle if payload.get('version') == 'free-p-line-alt-v1' else _import_pair_oracle)(payload)
 
 
 def _read(path):
@@ -59,11 +88,25 @@ def _initialize(settings):
 
 
 def validate_settings(settings):
-    if settings.get('version') != VERSION:
+    p_only = _p_only(settings)
+    if settings.get('version') not in (VERSION, P_VERSION):
         raise ValueError('Use a joint bilinear study configuration')
     cfg = AdaptiveConfig.from_dict(settings['solver'])
     BilinearClassicalBaseline.from_config(cfg)
-    if (cfg.branch != 'H_SP' or cfg.mode != 'research' or not cfg.use_transfer
+    if p_only:
+        if (cfg.branch != 'H_P' or cfg.mode != 'research' or not cfg.use_transfer
+                or cfg.use_smoother or cfg.replace_pre or cfg.replace_post
+                or cfg.transfer_levels != 'all' or cfg.spatial or cfg.gate_mode != 'open'
+                or cfg.use_learned_controller or not cfg.lazy or cfg.application != 'replace'):
+            raise ValueError('P-only requires fixed line_alt, all-level P, no NN smoother/replacement')
+        objective = settings.get('objective', {})
+        if (set(objective) != {'kind', 'probes', 'diagnostic_probes'}
+                or objective.get('kind') != 'vcycle_frobenius'):
+            raise ValueError('P-only requires the full V-cycle Frobenius objective')
+        for key in ('probes', 'diagnostic_probes'):
+            if type(objective.get(key)) is not int or objective[key] < 1:
+                raise ValueError(f'objective.{key} must be positive')
+    elif (cfg.branch != 'H_SP' or cfg.mode != 'research' or not cfg.use_transfer
             or not cfg.use_smoother or cfg.smoother_levels != 'all'
             or cfg.transfer_levels != 'all' or cfg.replace_pre != 2 or cfg.replace_post != 2
             or cfg.replacement_group_pre != 1 or cfg.replacement_group_post != 1
@@ -79,16 +122,21 @@ def validate_settings(settings):
         if (not values or len(set(values)) != len(values)
                 or any(type(n) is not int or n < 3 or n & (n + 1) for n in values)):
             raise ValueError('Require distinct 2**L-1 grid sizes >=3')
+    if p_only and min(settings['training_sizes']) <= cfg.mg.coarsest_n:
+        raise ValueError('P learning requires at least one nonterminal level')
     for name in ('training', 'distillation'):
         spec = settings[name]
-        for key in ('updates', 'start_cycles', 'end_cycles', 'probes_per_kind',
-                    'hard_smoothing', 'hard_cycles'):
+        keys = ('updates', 'start_cycles', 'end_cycles') if p_only else (
+            'updates', 'start_cycles', 'end_cycles', 'probes_per_kind', 'hard_smoothing', 'hard_cycles')
+        for key in keys:
             if type(spec[key]) is not int or spec[key] < 1:
                 raise ValueError(f'{name}.{key} must be positive')
         if spec['end_cycles'] < spec['start_cycles'] or not np.isfinite(spec['learning_rate']) or spec['learning_rate'] <= 0:
             raise ValueError('Invalid curriculum or learning rate')
         if spec.get('gradient_clip', 0) <= 0:
             raise ValueError('Require positive gradient clipping')
+        if p_only and (spec['start_cycles'] != 1 or spec['end_cycles'] != 1):
+            raise ValueError('Frobenius training uses exactly one full V-cycle error operator')
     kd = settings['distillation']
     if (type(kd['finetune_updates']) is not int or kd['finetune_updates'] < 1
             or kd['lambda_action'] <= 0 or kd['lambda_operator'] <= 0):
@@ -99,16 +147,19 @@ def validate_settings(settings):
             raise ValueError(f'search.{key} must be positive')
     if search['starts'] < 2 or search['learning_rate'] <= 0 or search['perturbation'] < 0:
         raise ValueError('Search needs network and Jacobi starts and a positive learning rate')
+    if p_only and search['cycles'] != 1:
+        raise ValueError('P-only search optimizes the same one-cycle Frobenius objective')
     return cfg
 
 
 def _sources():
     return sorted([p for p in (PROJECT / 'src').rglob('*') if p.suffix in ('.py', '.cpp')]
-                  + [PROJECT / 'scripts/run_v6_7_joint_transfer_study.py'])
+                  + [PROJECT / 'scripts/run_v6_7_joint_transfer_study.py',
+                     PROJECT / 'scripts/run_v6_7_learned_p_study.py'])
 
 
 def _manifest(settings, baseline):
-    return dict(version=VERSION, settings_digest=_hash(settings), baseline_digest=baseline.digest(),
+    return dict(version=settings['version'], settings_digest=_hash(settings), baseline_digest=baseline.digest(),
         source_digest=_hash({str(p.relative_to(PROJECT)): digest_file(p) for p in _sources()}),
         hardware=hardware_environment(refresh=True))
 
@@ -159,12 +210,14 @@ def prepare(config, output, *, resume=False):
         out.mkdir(parents=True, exist_ok=True)
         write_json(out / 'configuration.json', settings)
         write_json(out / 'fixed_classical.json', baseline.to_dict())
-        model = make_joint_components(hidden=settings['hidden'], seed=settings['seed'])
+        factory = make_p_components if _p_only(settings) else make_joint_components
+        model = factory(hidden=settings['hidden'], seed=settings['seed'])
         model.save(out / 'initial.pt')
         write_json(out / 'initial.json', dict(sha256=digest_file(out / 'initial.pt')))
         write_json(out / 'joint_manifest.json', _manifest(settings, baseline))
     train_data, validation, _ = _development(out, settings, baseline)
-    print(f'Prepared joint study: train={len(train_data)}, validation={len(validation)}; '
+    print(f'Prepared {"P-only line_alt" if _p_only(settings) else "joint"} study: '
+          f'train={len(train_data)}, validation={len(validation)}; '
           'bilinear parent, EM5 evaluation only', flush=True)
 
 
@@ -210,7 +263,7 @@ def _checkpoint(out, name, baseline):
     status = _read(path.parent / 'status.json')
     training = _read(path.parent / 'training_manifest.json')
     spec = training['settings']
-    expected_updates = spec['updates'] + (spec['finetune_updates'] if name == 'distilled_joint' else 0)
+    expected_updates = spec['updates'] + (spec['finetune_updates'] if name.startswith('distilled') else 0)
     if (status.get('status') != 'complete' or status.get('baseline_digest') != baseline.digest()
             or not status.get('all_updates_completed') or status.get('skipped') != 0
             or status.get('updates') != expected_updates or training.get('stage') != name
@@ -224,15 +277,18 @@ def _checkpoint(out, name, baseline):
 
 
 def _run_training(out, name, initial, examples, cfg, baseline, settings, *, resume, teachers=None):
-    branch, names = STAGES[name]
+    branch, names = _stages(settings)[name]
     cfg = forced_config(cfg, branch)
-    spec = settings['distillation' if name == 'distilled_joint' else 'training']
+    spec = settings['distillation' if name.startswith('distilled') else 'training']
     total = spec['updates'] + (spec['finetune_updates'] if teachers is not None else 0)
     target = out / 'checkpoints' / name
-    manifest = dict(version=VERSION, stage=name, config=cfg.to_dict(), settings=spec,
+    manifest = dict(version=settings['version'], stage=name, config=cfg.to_dict(), settings=spec,
         baseline_digest=baseline.digest(), initial_signature=initial.signature(),
         operators=[e.group_digest for e in examples],
         oracle_hashes=({key: value['sha256'] for key, value in teachers.items()} if teachers is not None else None))
+    if _p_only(settings):
+        require_p_only(initial, cfg)
+        manifest['objective'] = settings['objective']
     path = target / 'training_manifest.json'
     if path.exists():
         if not resume or _read(path) != json_safe(manifest):
@@ -265,7 +321,7 @@ def _run_training(out, name, initial, examples, cfg, baseline, settings, *, resu
     eligible = [e for e in examples if teachers is None or e.group_digest in teachers]
     if not eligible:
         raise ValueError('No successful training-only oracle targets; inspect search report')
-    order = np.random.default_rng(settings['seed'] + list(STAGES).index(name)).permutation(len(eligible))
+    order = np.random.default_rng(settings['seed'] + list(_stages(settings)).index(name)).permutation(len(eligible))
     try:
         for update in range(start, total):
             kd = teachers is not None and update < spec['updates']
@@ -282,11 +338,17 @@ def _run_training(out, name, initial, examples, cfg, baseline, settings, *, resu
                         start=spec['start_cycles'], end=spec['end_cycles'])
                       if update < spec['updates'] else spec['end_cycles'])
             optimizer.zero_grad(set_to_none=True)
-            loss, metrics = joint_objective(example, model, cfg, cycles=cycles,
-                seed=settings['seed'] + update * 104729,
-                probes_per_kind=spec['probes_per_kind'], hard_smoothing=spec['hard_smoothing'],
-                hard_cycles=spec['hard_cycles'], teacher=teacher,
-                lambda_action=spec.get('lambda_action', 1.), lambda_operator=spec.get('lambda_operator', .1))
+            if _p_only(settings):
+                loss, metrics = frobenius_objective(example, model, cfg,
+                    probes=settings['objective']['probes'], seed=settings['seed']+update*104729,
+                    teacher=teacher, lambda_action=spec.get('lambda_action', 1.),
+                    lambda_operator=spec.get('lambda_operator', .1))
+            else:
+                loss, metrics = joint_objective(example, model, cfg, cycles=cycles,
+                    seed=settings['seed'] + update * 104729,
+                    probes_per_kind=spec['probes_per_kind'], hard_smoothing=spec['hard_smoothing'],
+                    hard_cycles=spec['hard_cycles'], teacher=teacher,
+                    lambda_action=spec.get('lambda_action', 1.), lambda_operator=spec.get('lambda_operator', .1))
             if not bool(torch.isfinite(loss)):
                 raise FloatingPointError('Nonfinite training loss')
             loss.backward()
@@ -313,6 +375,8 @@ def _run_training(out, name, initial, examples, cfg, baseline, settings, *, resu
         smoother_trained='smoother' in names, transfer_trained='transfer' in names,
         training_operator_digests=[e.group_digest for e in examples],
         offline_oracle_distillation=teachers is not None, final_test_seen=False)
+    if _p_only(settings):
+        model.metadata['objective'] = settings['objective']
     model.save(target / 'candidate.pt')
     write_json(target / 'training.json', history)
     write_json(target / 'status.json', dict(status='complete', updates=total, all_updates_completed=True,
@@ -326,7 +390,7 @@ def train(output, *, resume=False):
     with _lease(out):
         examples, _, _ = _development(out, settings, baseline)
         initial = _initial(out)
-        for name in ('learned_P', 'learned_S', 'joint'):
+        for name in (['learned_P'] if _p_only(settings) else ['learned_P', 'learned_S', 'joint']):
             _run_training(out, name, initial, examples, cfg, baseline, settings, resume=resume)
 
 
@@ -334,10 +398,12 @@ def _oracle_records(out):
     """Validate complete TRAIN coverage and lineage before loading oracle labels."""
     out, settings, cfg, baseline = load(out)
     examples, _, _ = load_development_data(out / 'data', baseline)
-    source = _checkpoint(out, 'joint', baseline)
-    expected_manifest = dict(version=VERSION, settings=settings['search'], source=source.signature(),
+    source = _checkpoint(out, _source_stage(settings), baseline)
+    expected_manifest = dict(version=settings.get('version', VERSION), settings=settings['search'], source=source.signature(),
         baseline_digest=baseline.digest(), operators=[e.group_digest for e in examples],
         target_rhs_count=settings['target_rhs_count'], training_only=True, fallback_allowed=False)
+    if _p_only(settings):
+        expected_manifest['objective'] = settings['objective']
     manifest = _read(out / 'search/manifest.json')
     if manifest != json_safe(expected_manifest):
         raise ValueError('Search source, training operators, or protocol changed')
@@ -401,11 +467,13 @@ def search(output, *, resume=False):
     _mutable(out)
     with _lease(out):
         examples, _, _ = _development(out, settings, baseline)
-        source = _checkpoint(out, 'joint', baseline)
+        source = _checkpoint(out, _source_stage(settings), baseline)
         spec = settings['search']
-        manifest = dict(version=VERSION, settings=spec, source=source.signature(),
+        manifest = dict(version=settings.get('version', VERSION), settings=spec, source=source.signature(),
             baseline_digest=baseline.digest(), operators=[e.group_digest for e in examples],
             target_rhs_count=settings['target_rhs_count'], training_only=True, fallback_allowed=False)
+        if _p_only(settings):
+            manifest['objective'] = settings['objective']
         path = out / 'search/manifest.json'
         if path.exists():
             if not resume or _read(path) != json_safe(manifest):
@@ -501,8 +569,8 @@ def search(output, *, resume=False):
                             heldout_seed=settings['seed'] + 900000007 + index,
                             target_rhs_count=settings['target_rhs_count'], cycles=settings['raw_cycles'],
                             repeats=spec['repeats'], probe_model=source,
-                            hard_smoothing=settings['training']['hard_smoothing'],
-                            hard_cycles=settings['training']['hard_cycles'])
+                            hard_smoothing=settings['training'].get('hard_smoothing', 4),
+                            hard_cycles=settings['training'].get('hard_cycles', 4))
                         return dict(label=label, timing=timing,
                             path=str(candidate_path.relative_to(out)), sha256=digest_file(candidate_path))
 
@@ -511,18 +579,23 @@ def search(output, *, resume=False):
                         measured.append(saved_initial)
                         write_json(initial_measurement, dict(identity=start_identity, candidate=saved_initial))
                     oracle = import_oracle(state['oracle']) if state is not None else initial
-                    params = [p for key in ('transfer', 'smoother') for p in getattr(oracle, key).parameters()]
+                    names = ('transfer',) if _p_only(settings) else ('transfer', 'smoother')
+                    params = [p for key in names for p in getattr(oracle, key).parameters()]
                     optimizer = torch.optim.Adam(params, lr=spec['learning_rate'])
                     if state is not None:
                         optimizer.load_state_dict(state['optimizer'])
                         completed, history = state['updates'], state['history']
                     for update in range(completed, spec['updates']):
                         optimizer.zero_grad(set_to_none=True)
-                        loss, metrics = joint_objective(example, oracle, cfg, cycles=spec['cycles'],
-                            seed=seed + update * 104729,
-                            probes_per_kind=settings['training']['probes_per_kind'],
-                            hard_smoothing=settings['training']['hard_smoothing'],
-                            hard_cycles=settings['training']['hard_cycles'])
+                        if _p_only(settings):
+                            loss, metrics = frobenius_objective(example, oracle, cfg,
+                                probes=settings['objective']['probes'], seed=seed+update*104729)
+                        else:
+                            loss, metrics = joint_objective(example, oracle, cfg, cycles=spec['cycles'],
+                                seed=seed + update * 104729,
+                                probes_per_kind=settings['training']['probes_per_kind'],
+                                hard_smoothing=settings['training']['hard_smoothing'],
+                                hard_cycles=settings['training']['hard_cycles'])
                         if not bool(torch.isfinite(loss)):
                             raise FloatingPointError('Nonfinite offline search loss')
                         loss.backward()
@@ -567,8 +640,49 @@ def distill(output, *, resume=False):
     with _lease(out):
         examples, _, _ = _development(out, settings, baseline)
         teachers = _oracle_records(out)
-        _run_training(out, 'distilled_joint', _checkpoint(out, 'joint', baseline), examples,
+        name = 'distilled_P' if _p_only(settings) else 'distilled_joint'
+        _run_training(out, name, _checkpoint(out, _source_stage(settings), baseline), examples,
                       cfg, baseline, settings, resume=resume, teachers=teachers)
+
+
+def diagnose(output, *, resume=False):
+    out, settings, cfg, baseline = load(output)
+    _ensure_development_open(out)
+    if not _p_only(settings):
+        raise ValueError('Fixed Frobenius diagnostics require a new P-only run')
+    training, validation, _ = _development(out, settings, baseline)
+    initial = _initial(out)
+    names = [name for name in _stages(settings)
+             if (out / 'checkpoints' / name / 'candidate.pt').exists()]
+    if not names:
+        raise ValueError('Train the P generator before running diagnose')
+    models = {name: _checkpoint(out, name, baseline) for name in names}
+    manifest = dict(version=P_VERSION, objective=settings['objective'],
+        models={name: model.signature() for name, model in models.items()}, initial=initial.signature(),
+        config=cfg.to_dict(), rhs_count=settings['target_rhs_count'], repeats=3, warmups=1)
+    path = out / 'diagnostics/p_frobenius.json'
+    if resume and path.exists():
+        result = _read(path)
+        if result['manifest'] != json_safe(manifest):
+            raise ValueError('Diagnostic protocol/weights changed; rerun without --resume')
+        return result
+    rows = []
+    for example in training + validation:
+        for name, model in models.items():
+            row = p_diagnostic(example, initial, model, cfg,
+                probes=settings['objective']['diagnostic_probes'],
+                seed=settings['seed']+800000011+int(example.group_digest[:8], 16),
+                rhs_count=settings['target_rhs_count'], repeats=manifest['repeats'], warmups=manifest['warmups'])
+            rows.append(dict(row, arm=name))
+    result = json_safe(dict(manifest=manifest, training=False, checkpoint_selection=False,
+        scope='same A and frozen error vectors for before/after; TRAIN+validation only', rows=rows))
+    write_json(path, result)
+    for name in models:
+        group = [r for r in rows if r['arm'] == name and r['split'] == 'validation']
+        print(f'[P DIAG {name}] Frobenius improved '
+              f'{sum(r["frobenius_improved"] is True for r in group)}/{len(group)}; '
+              f'time improved {sum(r["time_improved"] is True for r in group)}/{len(group)}', flush=True)
+    return result
 
 
 def _arms(out, settings, cfg, baseline):
@@ -577,8 +691,10 @@ def _arms(out, settings, cfg, baseline):
     arms = {'fixed_C': dict(model=None, branch='C', selector=False),
             'em5_C': dict(model=None, branch='C', selector=False, reference_only=True,
                           config=emcfg, rules=FixedClassicalBaseline.from_config(emcfg))}
-    for name, (branch, _) in STAGES.items():
+    for name, (branch, _) in _stages(settings).items():
         arms[name] = dict(model=_checkpoint(out, name, baseline), branch=branch, selector=False)
+        if _p_only(settings):
+            require_p_only(arms[name]['model'], cfg)
     return arms
 
 
@@ -596,7 +712,8 @@ def benchmark(output, *, resume=False, **protocol):
     report(result, target)
     write_json(target / 'raw_contractions.json', raw_contractions(examples, arms, cfg,
         cycles=settings['raw_cycles'], probes=settings['raw_probes']))
-    selection = select_measured_candidate(result, rhs_count=settings['target_rhs_count'])
+    selection = select_measured_candidate(result, rhs_count=settings['target_rhs_count'],
+        candidate_arms=tuple(_stages(settings)))
     write_json(target / 'selection.json', selection)
     files = {key: dict(path=str(target / key), sha256=digest_file(target / key))
         for key in ('raw_results.json', 'cycle_diagnostics.json', 'raw_contractions.json', 'selection.json')}
@@ -623,8 +740,10 @@ def freeze(output, **protocol):
         files[key] = record['path']
     files.update(configuration=out / 'configuration.json', manifest=out / 'joint_manifest.json',
         evidence=out / 'benchmark_evidence.json', search=out / 'search/report.json')
-    checkpoints = {name: out / 'checkpoints' / name / 'candidate.pt' for name in STAGES}
-    evaluation = dict(version=VERSION, solver=cfg.to_dict(), arms=list(arms),
+    if (out / 'diagnostics/p_frobenius.json').exists():
+        files['p_diagnostic'] = out / 'diagnostics/p_frobenius.json'
+    checkpoints = {name: out / 'checkpoints' / name / 'candidate.pt' for name in _stages(settings)}
+    evaluation = dict(version=settings['version'], solver=cfg.to_dict(), arms=list(arms),
         target_rhs_count=settings['target_rhs_count'], **protocol)
     return freeze_research(out / 'data', checkpoints, out / 'fixed_classical.json', files, _sources(), evaluation)
 
@@ -634,7 +753,7 @@ def final(output, *, resume=False):
     path = out / 'data/research_freeze.json'
     evaluation = _read(path)['config']
     arms = _arms(out, settings, cfg, baseline)
-    if (evaluation['version'] != VERSION or evaluation['solver'] != cfg.to_dict()
+    if (evaluation['version'] != settings['version'] or evaluation['solver'] != json_safe(cfg.to_dict())
             or evaluation['arms'] != list(arms) or evaluation['target_rhs_count'] != settings['target_rhs_count']):
         raise ValueError('Frozen joint evaluation changed')
     with claim_final_evaluation(out / 'data', path, evaluation, resume=resume) as claim:
@@ -654,13 +773,13 @@ def final(output, *, resume=False):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
-    for name in ('prepare', 'train', 'search', 'distill', 'benchmark', 'freeze', 'final'):
+    for name in ('prepare', 'train', 'diagnose', 'search', 'distill', 'benchmark', 'freeze', 'final'):
         p = sub.add_parser(name)
         p.add_argument('--run-dir', required=True)
         if name != 'freeze':
             p.add_argument('--resume', action='store_true')
         if name == 'prepare':
-            p.add_argument('--config', default='configs/v6_7_joint_transfer_research.json')
+            p.add_argument('--config', default='configs/v6_7_learned_p_research.json')
         if name in ('benchmark', 'freeze'):
             p.add_argument('--repeats', type=int, default=3)
             p.add_argument('--warmups', type=int, default=1)
@@ -672,7 +791,7 @@ def main(argv=None):
     a = parser.parse_args(argv)
     if a.command == 'prepare':
         return prepare(a.config, a.run_dir, resume=a.resume)
-    if a.command in ('train', 'search', 'distill', 'final'):
+    if a.command in ('train', 'diagnose', 'search', 'distill', 'final'):
         return globals()[a.command](a.run_dir, resume=a.resume)
     protocol = dict(repeats=a.repeats, warmups=a.warmups, rhs_counts=a.rhs_counts, regimes=a.regimes)
     if a.command == 'freeze':

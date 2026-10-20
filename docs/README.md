@@ -1,3 +1,7 @@
+> **추가된 독립 실험:** [light_smoother_study.md](light_smoother_study.md) — 완료된 EM-P를
+> 고정한 242-parameter MLP / 26-coefficient ridge 줄 smoother, 선택적 온라인 적응,
+> 실측 비용·출처·resume와 Mac 전체 명령. 아래 기존 EM-line·P-only 문서는 그대로 유지한다.
+
 # 문서 안내
 
 현재 브랜치: **`residual-u-net-teacher`**. 현재 주 실험은 **EM5 모방 P 사전학습 →

@@ -1,3 +1,7 @@
+> **새 독립 비교 경로:** [같은 P의 경량 줄 smoother와 Mac 실행 안내](docs/light_smoother_study.md).
+> 학습 완료 `em_P`를 고정하고 242개 파라미터 MLP와 26개 계수 회귀를 비교한다.
+> 온라인 적응은 기본 off이며 별도 비교군으로 평가한다. 아래 EM-line·P-only 경로는 유지한다.
+
 # EM 모방 P와 줄 smoother 학습
 
 현재 주 실험은 **EM5 모방 P 사전학습 → P 고정 줄 smoother 학습 → 전체 V-cycle

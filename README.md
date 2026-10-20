@@ -1,3 +1,8 @@
+> **New independent experiment:** [Fixed-P lightweight line smoothing](docs/light_smoother_study.md)
+> adds a 242-parameter MLP and 26-coefficient ridge predictor, with separately
+> measured optional online adaptation. All lightweight arms reuse the same
+> completed `em_P`. The EM-line and P-only paths below remain available for reproduction.
+
 # EM imitation and learned line smoothing
 
 The active branch is **`residual-u-net-teacher`**. The current experiment uses

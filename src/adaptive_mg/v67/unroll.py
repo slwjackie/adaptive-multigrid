@@ -25,6 +25,8 @@ class TLevel:
     dirs: object=None
     gains: object=None
     sparse_smoother: object=None
+    line_factors: object=None
+    line_gain: float=1.
     mask: object=None
     mask_hard: object=None
     raw_scipy: object=None
@@ -47,6 +49,13 @@ def make_graph(a,shape,components,cfg,*,learned=True,reference_root=None):
     device=resolve_device(cfg,cells=shape[0]*shape[1]); dtype=torch.float32 if cfg.inference_dtype=='float32' else torch.float64
     for net in (components.smoother,components.transfer):net.to(device=device,dtype=dtype)
     strategy=get_strategy(cfg.mg.strategy_name)
+    # The shared line generator sees the position in the complete hierarchy,
+    # including the terminal direct solve.  Depth is independent of P values.
+    total_levels=1; depth_shape=shape
+    while not terminal(depth_shape,cfg.mg.coarsest_n):
+        depth_shape=next_shape(depth_shape,strategy.coarsening,cfg.mg.coarsest_n,
+                               level_index=total_levels-1)
+        total_levels+=1
     frozen=learned and cfg.use_transfer and getattr(components.transfer,'reference','actual')=='frozen_parent'
     if frozen and reference_root is None:
         reference_root=make_graph(a,shape,components,cfg,learned=False)
@@ -97,7 +106,13 @@ def make_graph(a,shape,components,cfg,*,learned=True,reference_root=None):
             level.interpolation_weights=torch.tensor(base,dtype=torch.float64)
         ac=level.p.transpose().product(at.product(level.p)).symmetrize()
         if use_s and cfg.use_smoother:
-            if hasattr(components.smoother,'sparse_smoother_spec'):
+            if hasattr(components.smoother,'line_smoother_spec'):
+                if strategy.smoother!='line_alt' or cfg.spatial or cfg.gate_mode!='open':
+                    raise ValueError('Learned line factors require line_alt and whole-level open replacement')
+                level.line_factors=components.smoother.coefficients(
+                    at,sh,feat,index,total_levels)
+                level.line_gain=cfg.mg.smoother_gain_multiplier
+            elif hasattr(components.smoother,'sparse_smoother_spec'):
                 values=components.smoother.sparse_values(at)*cfg.mg.smoother_gain_multiplier
                 level.sparse_smoother=SparseTensor.from_coo(at.rows,at.cols,values,at.shape)
             else:
@@ -155,6 +170,10 @@ def _line_batches(level,direction,reverse=False):
 
 
 def neural_delta(level,r,reverse=False):
+    if level.line_factors is not None:
+        from .line_smoother import apply_line_smoother_torch
+        return level.line_gain*apply_line_smoother_torch(
+            level.a,level.shape,level.line_factors,r,reverse=reverse)
     if level.sparse_smoother is not None:
         return level.sparse_smoother.apply(r)
     diagonal=level.a.diagonal().abs().clamp_min(1e-14)
@@ -177,7 +196,8 @@ def neural_delta(level,r,reverse=False):
 
 def smooth(level,r,cfg,reverse=False,gate=None):
     if r.ndim==2 and gate is not None and not bool(gate.any()):gate=None
-    kind=level.strategy.smoother;has=gate is not None and (level.dirs is not None or level.sparse_smoother is not None)
+    kind=level.strategy.smoother;has=gate is not None and (
+        level.dirs is not None or level.sparse_smoother is not None or level.line_factors is not None)
     hard_mask=level.mask_hard if level.mask_hard is not None else (gate.detach()>=cfg.gate_on if has else None)
     if has and bool(hard_mask.all()):
         dn=neural_delta(level,r,reverse)
@@ -252,7 +272,7 @@ def graph_gate(level,r,components,cfg):
 def cycle(level,x,b,components,cfg,step=0):
     if level.coarse is None:return level.a.solve(b)
     gate=None
-    if level.dirs is not None or level.sparse_smoother is not None:
+    if level.dirs is not None or level.sparse_smoother is not None or level.line_factors is not None:
         if level.mask is None or step%cfg.gate_refresh==0:
             level.mask=graph_gate(level,b-level.a.apply(x),components,cfg)
         gate=level.mask

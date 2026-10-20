@@ -1,8 +1,16 @@
-# Line_alt 고정 + learned P 연구
+# EM 모방 P와 줄 smoother 학습
 
-현재 작업 브랜치는 **`residual-u-net-teacher`**다. 브랜치 이름은 이전 U-net teacher
-실험에서 이어졌지만, 현재 주 실험은 **classical `line_alt`를 고정하고 작은 CNN으로
-P만 학습**하는 구조다. 현재 경로에는 NN smoother·U-net teacher·TTT·GRU 정책이 없다.
+현재 주 실험은 **EM5 모방 P 사전학습 → P 고정 줄 smoother 학습 → 전체 V-cycle
+공동 미세조정**이다. [새 설계와 Mac 전체 실행 명령](docs/em_line_study.md)을 따른다.
+`scripts/run_v6_7_em_line_study.py`를 새 run에서 실행하며, 아래 P-only 경로와
+기존 실험 기록은 재현을 위해 유지한다. [영문 현재 README](README.md)
+
+## 이전 실험: line_alt 고정 + learned P
+
+작업 브랜치는 **`residual-u-net-teacher`**다. 아래 내용은 이전
+`run_v6_7_learned_p_study.py`의 **classical `line_alt`를 고정하고 작은 CNN으로
+P만 학습**하는 구조를 설명한다. 이하의 “현재”는 그 P-only 실험의 문맥이며,
+그 경로에는 NN smoother·U-net teacher·TTT·GRU 정책이 없다.
 
 - [현재 설계와 학습 목표](docs/learned_p_study.md)
 - [Mac 실행: smoke → 420개 A 학습 → 직접 P 평가 → 재개](docs/learned_p_runbook.md)

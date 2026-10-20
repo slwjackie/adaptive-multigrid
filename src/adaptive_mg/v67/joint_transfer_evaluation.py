@@ -25,6 +25,9 @@ from .spatial import SpatialState
 
 ARMS = ('fixed_C', 'em5_C', 'learned_P', 'learned_S', 'joint', 'distilled_joint')
 LEARNED_ARMS = ARMS[2:]
+# Additional opt-in candidates for the staged EM-imitation/line study.  Keep
+# historical defaults unchanged: each caller must explicitly name its stages.
+_STAGED_LINE_ARMS = ('em_P', 'frozen_P_line', 'joint_line')
 _METRICS = ('executed_cycles', 'accepted_neural_cycles', 'fallback_count',
             'rollback_count', 'setup_failures', 'wall_seconds',
             'total_setup_seconds', 'solve_seconds', 'operator_generation_seconds')
@@ -231,7 +234,7 @@ def select_measured_candidate(result, *, rhs_count=1, regime='multiple',
     candidates = tuple(candidate_arms)
     if not candidates or len(set(candidates)) != len(candidates):
         raise ValueError('Supply distinct learned candidate arms')
-    if set(candidates) - (set(LEARNED_ARMS) | {'distilled_P'}):
+    if set(candidates) - (set(LEARNED_ARMS) | set(_STAGED_LINE_ARMS) | {'distilled_P'}):
         raise ValueError('Only learned joint-study arms may be candidates')
     rows, repeats = result.get('rows', []), _repeats(result)
     if not rows:

@@ -180,9 +180,29 @@ def _features(level, stats):
     return result
 
 
-def generated_stencil(level, components, cfg, stats, device, dtype):
+def generated_stencil(level, components, cfg, stats, device, dtype, *, total_levels=None):
     stats.smoother_nn_calls += 1
     stats.neural_setup_calls += 1
+    if hasattr(components.smoother, 'line_smoother_spec'):
+        from .line_smoother import LineSmootherBank
+        if level.strategy.smoother != 'line_alt' or cfg.spatial or cfg.application != 'replace':
+            raise ValueError('Learned line factors require line_alt, whole-level replacement and no spatial gate')
+        if total_levels is None:
+            total_levels = level.index
+            item = level
+            while item is not None:
+                total_levels += 1
+                item = item.coarse
+        def generate_line(module, features):
+            factors = module.coefficients(level.a, level.shape, features, level.index, total_levels)
+            return (*factors['x'], *factors['y'])
+        lx, dx, ly, dy = _inference(components.smoother, _features(level, stats),
+                                   device, dtype, generate_line, stats)
+        if not all(np.isfinite(v).all() for v in (lx, dx, ly, dy)) or np.any(dx <= 0) or np.any(dy <= 0):
+            raise ValueError('Invalid generated line factors')
+        stats.smoother_stage_generations += 1
+        return LineSmootherBank(level.a, level.shape, {'x': (lx, dx), 'y': (ly, dy)},
+                                gain=cfg.mg.smoother_gain_multiplier)
     if hasattr(components.smoother, 'sparse_smoother_spec'):
         start = perf_counter()
         try:
@@ -290,6 +310,7 @@ def prepare_transfer_bank(base,components,cfg,stats):
         level._classical_p=classical_p
         level.cache=base_level.cache if same else LineSmootherCache(a,shape)
         sparse_only=(cfg.use_smoother and (hasattr(components.smoother,'sparse_smoother_spec')
+            or hasattr(components.smoother,'line_smoother_spec')
             or hasattr(components.smoother,'paired_directions_and_gains'))
             and selected_level(index,cfg,'smoother') and cfg.application=='replace'
             and (not cfg.spatial or cfg.gate_mode=='open') and cfg.mg.smoother_gain_multiplier>0
@@ -371,9 +392,13 @@ def prepare_smoother_bank(base,components,cfg,stats,operator_cache=None):
     start=perf_counter();device=resolve_device(cfg,cells=base.a.shape[0])
     dtype=torch.float32 if cfg.inference_dtype=='float32' else torch.float64
     from ..provenance import operator_digest
+    total_levels=0;item=base
+    while item is not None:
+        total_levels+=1;item=item.coarse
+    is_line=hasattr(components.smoother,'line_smoother_spec')
     generation_key=(components.expert_signature('smoother'),str(device),str(dtype),
         cfg.mg.smoother_gain_multiplier,cfg.mg.stencil_backend,cfg.mg.native_threads,
-        cfg.mg.native_min_cells,cfg.mg.native_parallel_min)
+        cfg.mg.native_min_cells,cfg.mg.native_parallel_min,total_levels if is_line else None)
     def build(level):
         result=copy(level)
         if level.coarse is not None:
@@ -381,7 +406,7 @@ def prepare_smoother_bank(base,components,cfg,stats,operator_cache=None):
             if selected_level(level.index,cfg,"smoother") and cfg.mg.smoother_gain_multiplier>0 and (cfg.replace_pre or cfg.replace_post):
                 if not hasattr(level,'_operator_digest'):
                     level._operator_digest=operator_digest(level.a)
-                indexed=(hasattr(components.smoother,'multistage_spec')
+                indexed=(is_line or hasattr(components.smoother,'multistage_spec')
                          or hasattr(components.smoother,'paired_directions_and_gains'))
                 key=(level._operator_digest,level.shape,level.index if indexed else None,generation_key)
                 if operator_cache is not None and key in operator_cache:
@@ -390,7 +415,8 @@ def prepare_smoother_bank(base,components,cfg,stats,operator_cache=None):
                     result.neural_stencil=cached;stats.smoother_operator_cache_hits+=1
                 else:
                     try:
-                        result.neural_stencil=generated_stencil(level,components,cfg,stats,device,dtype)
+                        result.neural_stencil=generated_stencil(level,components,cfg,stats,device,dtype,
+                                                                total_levels=total_levels)
                     except (ValueError,RuntimeError,FloatingPointError) as error:
                         if operator_cache is not None:operator_cache[key]=GenerationFailure.from_error(error)
                         raise
@@ -448,6 +474,11 @@ def replacement_step(level,r,mask,cfg,stats,reverse=False):
         return classical_step(level,r,cfg.mg,stats,reverse=reverse)
     stats.possible_rows+=r.size
     bank=level.neural_stencil
+    if getattr(bank,'is_line_smoother',False):
+        if not mask.all():
+            return classical_step(level,r,cfg.mg,stats,reverse=reverse)
+        stats.replacement_calls+=1;stats.active_rows+=r.size
+        return bank.apply(r,stats,reverse=reverse)
     if getattr(bank,'is_paired_smoother',False):
         bank=bank.for_phase(reverse)
     if cfg.application=='additive':

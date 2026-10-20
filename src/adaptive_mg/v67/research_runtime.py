@@ -37,6 +37,10 @@ def require_components_allowed(components, cfg, branch):
 
 
 def research_spec(module):
+    if hasattr(module, 'line_smoother_spec'):
+        return dict(family='line_factor_smoother', config=module.line_smoother_spec())
+    if hasattr(module, 'em_affine_transfer_spec'):
+        return dict(family='em_affine_transfer', config=module.em_affine_transfer_spec())
     if hasattr(module, 'fixed_smoother_spec'):
         return dict(family='no_neural_smoother', config=module.fixed_smoother_spec())
     if hasattr(module, 'paired_smoother_spec'):
@@ -57,6 +61,12 @@ def research_spec(module):
 
 
 def restore_expert(spec):
+    if spec['family'] == 'line_factor_smoother':
+        from .line_smoother import LineSmootherCNN
+        return LineSmootherCNN(**spec['config'])
+    if spec['family'] == 'em_affine_transfer':
+        from .em_line_models import AffineTransferCNN
+        return AffineTransferCNN(**spec['config'])
     if spec['family'] == 'no_neural_smoother':
         if spec['config'] != dict(strategy='line_alt', version=1):
             raise ValueError('Unsupported fixed smoother marker')

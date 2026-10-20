@@ -1,30 +1,32 @@
 # 문서 안내
 
-현재 브랜치: **`residual-u-net-teacher`**. 현재 주 실험: **line_alt 고정 + P-only
-Frobenius 학습**. 브랜치명에 U-net이 남아 있지만 현재 기본 경로에서 U-net teacher나
-NN smoother를 실행한다는 뜻은 아니다.
+현재 브랜치: **`residual-u-net-teacher`**. 현재 주 실험은 **EM5 모방 P 사전학습 →
+P 고정 줄 smoother 학습 → 전체 V-cycle 공동 미세조정**이다. 브랜치 이름은
+이전 U-net 실험에서 이어졌으며 현재 경로가 U-net teacher를 사용한다는 뜻은 아니다.
 
 ## 현재 실험에서 읽을 문서
 
 | 문서 | 내용 |
 | --- | --- |
-| [learned_p_study.md](learned_p_study.md) | PDE·CNN·P 제약·손실·fallback·재사용·평가 범위 |
-| [learned_p_runbook.md](learned_p_runbook.md) | 설치, smoke, 420개 A / 4,200 updates, 직접 P 세 비교군 평가, 재개 |
-| [ARCHITECTURE_KR.md](ARCHITECTURE_KR.md) | 현재 실행되는 코드와 데이터 흐름 |
+| [em_line_study.md](em_line_study.md) | 새 3단계 학습, 학생 coarse 행렬의 EM 정답, 줄 CNN, 재사용·실측 선택, Mac 전체 명령 |
+| [learned_p_study.md](learned_p_study.md) | 이전 P-only 경로의 PDE·P 제약·Frobenius 손실·fallback |
+| [learned_p_runbook.md](learned_p_runbook.md) | 이전 P-only의 설치, 확대 학습·평가·재개 |
+| [ARCHITECTURE_KR.md](ARCHITECTURE_KR.md) | 이전 P-only 및 공통 코드 위치와 데이터 흐름 |
 | [ALGORITHM_AND_REFERENCES.md](ALGORITHM_AND_REFERENCES.md) | P와 smoother의 역할, surrogate 손실과 조건부 수렴 논의 |
 | [../README.md](../README.md), [../README_KR.md](../README_KR.md) | 저장소 진입 안내 |
 
-420개 학습 / 140개 validation 구성은 실행 안내에서 만드는 확대 설정이다.
-저장소 research 기본 JSON은 여전히 84개 / 28개 / 336 updates의 예비 예산이다.
-현재 확대 실험의 실행 완료나 성능 우위를 보고한 문서는 아직 없다.
+새 `v6_7_em_line_research.json`은 420개 학습 / 140개 validation과
+4,200 / 1,400 / 1,400 updates를 명시한다. 이전 P-only research JSON과 별개다.
+이 예산은 시작 설정이며 연구 규모에서 속도 우위를 보장하거나 보고하는 수치가 아니다.
 
 ## 과거 실험과 독립 비교 경로
 
 아래 문서의 “새”, “주 경로”, “현재”, “기준 main”은 각 실험을 작성한 시점의 문맥이다.
-현재 P-only 설정에는 적용하지 않는다. 경로와 과거 결과는 재현을 위해 보존한다.
+현재 EM-line 설정에는 적용하지 않는다. 경로와 과거 결과는 재현을 위해 보존한다.
 
 | 경로 | 문서 |
 | --- | --- |
+| Line_alt 고정 + P-only Frobenius 학습 | [learned_p_study.md](learned_p_study.md), [learned_p_runbook.md](learned_p_runbook.md) |
 | EM5 기반 U-net teacher → CNN student | [RESIDUAL_UNET_TRANSFER_KR.md](RESIDUAL_UNET_TRANSFER_KR.md) |
 | Direct CNN pruning / TTT | [direct_pruning_ttt.md](direct_pruning_ttt.md) |
 | EM5 기반 direct CNN + sparse smoother | [direct_sparse_smoother.md](direct_sparse_smoother.md) |

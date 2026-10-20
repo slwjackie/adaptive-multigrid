@@ -1,5 +1,9 @@
 # Direct CNN + 학습한 희소 smoother
 
+> **과거 실험·구현 기록.** 아래의 기본값·명령·결과는 이 문서가 다루는 경로에 한정된다.
+> 현재 `residual-u-net-teacher`의 주 실험은 [line_alt 고정 + P-only 학습](learned_p_study.md)이다.
+> 현재 실행은 [Mac runbook](learned_p_runbook.md), 경로별 구분은 [문서 목록](README.md)을 따른다.
+
 기존 direct CNN이 만드는 P는 가져오되, 학습한 계층의 `line_alt` smoothing을
 **캐시한 희소 행렬 B(A)의 곱**으로 바꾸는 독립 실험이다. Teacher, distillation,
 pruning 및 TTT 실험의 checkpoint와 결과 파일은 수정하지 않는다.

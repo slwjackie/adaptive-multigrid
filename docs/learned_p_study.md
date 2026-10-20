@@ -1,5 +1,9 @@
 # Line_alt 고정 + learned P
 
+현재 작업 브랜치는 **`residual-u-net-teacher`**다. 이름은 이전 U-net 실험에서
+이어졌지만 현재 주 경로에서는 U-net teacher를 사용하지 않는다.
+[실행 안내](learned_p_runbook.md) · [구현 위치](ARCHITECTURE_KR.md) · [문서 목록](README.md)
+
 이 실험은 NN smoother를 제거하고 `line_alt` pre/post smoothing을 고정한다.
 새 기본 설정과 `run_v6_7_learned_p_study.py`가 이 경로를 사용한다. 이전 joint
 실험은 명시적인 이전 설정 파일을 사용할 때만 재현할 수 있다. 기존 run을
@@ -26,6 +30,37 @@ Galerkin으로 내려간 실제 Ac를 다음 level CNN에 입력하며 이를 �
 NN smoother 객체 대신 zero-parameter marker를 저장하므로 P-only checkpoint에는
 CNN smoother 가중치가 없다. 기존 Components 컨테이너의 비활성 detector/controller는
 호환성을 위해 남지만 학습·추론하지 않는다.
+
+## PDE와 학습 데이터
+
+대상은 단위 정사각형에서 homogeneous Dirichlet 경계를 갖는 합성 확산 문제다.
+
+\[
+-\nabla\cdot(K(x,y)\nabla u)=f,\qquad u|_{\partial\Omega}=0.
+\]
+
+양의 확산 tensor를 사용하는 P1 삼각형 유한요소법으로 SPD 행렬 A를 조립한다.
+n은 방향별 내부 자유도 수이고 미지수 수 N=n²다. 데이터 family는 near_isotropic,
+aligned_anisotropy, rotated_anisotropy, local_patch, checkerboard, channel,
+variable_coefficient의 7개다. 이방성·대비·각도·위치 등의 매개변수로 서로 다른 A를 만든다.
+`channel`은 계수장의 띠 모양을 뜻하며 유체 채널 시간 적분이 아니다.
+
+직접 학습에는 정답 P label이 없다. A에서 생성한 계층을 무작위 오차 probe에 적용해
+아래 손실로 P 생성기를 갱신한다. 평가에서는 이산 벡터 u_*와 b=A u_*를 만들어
+정확해를 아는 선형계를 푼다. RHS count 1/4/16은 **같은 A로 서로 다른 b를 몇 개
+푸는가**이며 b의 스칼라 값이 아니다. 분할 간 A 중복은 정규화된 연산자 digest로
+검사한다. Final/OOD는 개발 학습·선택에서 제외한다.
+
+| 구성 | 학습 격자 n / A 수 | Validation n / A 수 | 직접 P updates |
+| --- | --- | --- | ---: |
+| 저장소 smoke JSON | 7 / 7개 | 7 / 7개 | 14 |
+| 저장소 research JSON | 15,31,63 / 84개 | 15,31,63,127 / 28개 | 336 |
+| 확대 실행안: 별도 로컬 JSON | 15,31,63 / 420개 | 15,31,63,127 / 140개 | 4,200 |
+
+확대 실행안은 family·격자당 train 20개, validation 5개다. 저장소 research 기본값을
+바꾸지 않는다. 현재 요청은 직접 P 학습의 데이터를 늘려 먼저 평가하는 것이므로
+[runbook](learned_p_runbook.md)은 search/distill 없이도 가능한 평가 경로를 제공한다.
+격자 OOD n=255는 최종 평가용으로 남긴다. 이 예산이 충분하거나 빨라질지는 아직 미확인이다.
 
 ## Spectral radius를 목표로 Frobenius 손실을 쓰는 이유
 
@@ -96,6 +131,29 @@ EM은 em5_C에서만 계산한다. 학습 setup이나 fallback 준비에는 EM�
 최종 후보는 동일 tolerance에서 실측 setup+solve 시간으로 선택하고, 실패한 문제를
 버려서 성공 cohort만으로 순위를 매기지 않는다.
 
+일반 `benchmark` CLI는 위 네 비교군의 checkpoint를 요구하므로 `train`만 끝낸
+run에서는 아직 실행할 수 없다. 직접 학습 직후의 세 비교군 평가는
+[runbook의 기존 API 호출](learned_p_runbook.md#직접-p의-세-비교군-평가)을 사용한다.
+그 결과는 development validation이고 기존 네 비교군 `freeze/final` 증거를 대신하지 않는다.
+
+## 현재 fallback 조건
+
+현재 H_P 경로는 learned controller나 classical shadow trajectory를 사용하지 않는다.
+Stopping threshold는 τ=max(1e-12, 1e-8·||r₀||₂)다.
+
+- Learned 후보의 ||r_new||₂ / ||r_old||₂가 `1 + 1e-12` 이상이거나 비정상 값이면 거부한다.
+- 처리 가능한 learned setup/실행 오류도 같은 복구 경로로 들어간다.
+- 거부된 후보를 버리고 이전 승인 해에서 bilinear classical cycle을 시도한다.
+- 현재 잔차가 `10τ` 이하이면 classical로 마무리한다.
+- `CLASSICAL_LOCK` 이후 같은 RHS에는 learned branch로 돌아오지 않는다.
+
+느리지만 계속 감소하는 후보를 classical보다 느리다는 이유로 교체하지는 않는다.
+현재 명시적 H_P 실행에서는 일반 auto-policy의 stagnation/break-even 설정을 쓰지 않는다.
+최대 150 attempts 내에 못 풀면 실패이며, 거부된 시도와 복구 시간도 비용에 포함한다.
+따라서 fallback이 있다는 사실만으로 수렴이나 총시간 우위가 보장되지는 않는다.
+`rollback=0`이어도 near-tolerance classical tail이 있을 수 있으므로 accepted neural
+cycle과 classical 사용도 함께 읽는다. 학습·raw 고정-cycle 진단에는 fallback이 없다.
+
 ## 학습 전후 증거와 재사용
 
 `train` 뒤에 `diagnose`를 실행하면 search/distill 없이도 직접 학습의 효과를 확인한다.
@@ -104,11 +162,16 @@ TRAIN과 별도 validation의 같은 A·동일한 고정 error tensor·한 cycle
 진단 기본 probe 수는 16이다. 초기/학습 모델의 같은 RHS에서 실제 tolerance까지
 setup+solve 시간, cycle, rollback, accepted neural cycle, setup failure도 별도로 측정한다.
 `diagnostics/p_frobenius.json`에 저장하며 이 진단으로 checkpoint를 선택하지 않는다.
-최종/OOD를 이 과정에서 사용하지 않는다.
+최종/OOD를 이 과정에서 사용하지 않는다. 콘솔의 `[P DIAG]` improved 개수는
+validation만 집계하며, 통계적 유의성 판정 없이 수치가 감소한 사례 수다.
 
 여기서 before의 시간은 **초기 CNN이 bilinear P를 생성하는 P-only 경로**의 시간이다.
 순수 classical보다 빨라졌는지는 이 before/after 시간만으로 판단하지 않는다.
 순수 classical과의 공정한 총시간 비교는 benchmark의 fixed_C와 수행한다.
+초기 zero-head P가 정확히 bilinear이면 기존 Ac/factor를 재사용하는 빠른 경로를
+타지만 학습 P가 달라지면 새 Ac/factor가 필요하다. 진단 시간 차이가 모두 CNN
+추론 때문이라는 뜻은 아니다. 진단은 before 다음 after 순서로 측정하므로 작은
+차이의 의미는 반복 평가와 별도 benchmark로 확인한다.
 
 같은 A에서는 이미 적극적인 정확 재사용을 한다.
 
@@ -131,61 +194,15 @@ Smoother와 P를 각각 학습한 뒤 공동 미세조정하는 방법은 향후
 line_alt 대비 이득을 보인 뒤에 검토하는 것이 실험 원인을 분리하기 좋다.
 현재 기본 경로에 NN smoother나 joint fine-tuning을 다시 넣지 않는다.
 
-## Mac 실행
+## 실행과 결과 확인
 
-```bash
-git clone --single-branch --branch residual-u-net-teacher \
-  https://github.com/slwjackie/adaptive-multigrid.git \
-  "$HOME/Desktop/adaptive-multigrid-ponly"
-cd "$HOME/Desktop/adaptive-multigrid-ponly"
-python3.12 -m venv .venv
-source .venv/bin/activate
-python -m pip install -e '.[dev]'
-export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
-export VECLIB_MAXIMUM_THREADS=1 NUMEXPR_NUM_THREADS=1
-set -o pipefail
-SCRIPT="scripts/run_v6_7_learned_p_study.py"
-P_RUN="artifacts/learned_p_smoke_$(date +%Y%m%d_%H%M%S)"
-python "$SCRIPT" prepare --run-dir "$P_RUN" \
-  --config configs/v6_7_learned_p_smoke.json && \
-caffeinate -i python -u "$SCRIPT" train --run-dir "$P_RUN" \
-  2>&1 | tee "$P_RUN/train.log" && \
-caffeinate -i python -u "$SCRIPT" diagnose --run-dir "$P_RUN" \
-  2>&1 | tee "$P_RUN/diagnose.log"
-```
+전체 명령은 [Mac 실행 안내](learned_p_runbook.md)에 모았다.
 
-먼저 diagnose 결과를 읽는다. P-only 손실이나 cycle이 좋아지지 않으면 곧바로
-대규모 search/distill 비용을 쓰기보다 원인을 확인한다. 나머지 전체 pipeline은:
+1. 새 run을 prepare하고 `train → diagnose`로 직접 P를 확인한다.
+2. `fixed_C / em5_C / learned_P` 세 비교군을 같은 A·RHS·tolerance에서 평가한다.
+3. 손실·cycle·fallback 없는 raw contraction·총시간을 구분해서 읽는다.
+4. 직접 학습의 효과가 확인되면 선택적으로 P-only `search → distill`과 네 비교군 평가를 한다.
+5. 연구 run의 정식 validation 증거와 모델을 freeze한 후 final/OOD를 연다.
 
-```bash
-caffeinate -i python -u "$SCRIPT" search --run-dir "$P_RUN" \
-  2>&1 | tee "$P_RUN/search.log" && \
-caffeinate -i python -u "$SCRIPT" distill --run-dir "$P_RUN" \
-  2>&1 | tee "$P_RUN/distill.log" && \
-caffeinate -i python -u "$SCRIPT" diagnose --run-dir "$P_RUN" \
-  2>&1 | tee "$P_RUN/diagnose_after_distill.log" && \
-caffeinate -i python -u "$SCRIPT" benchmark --run-dir "$P_RUN" \
-  --repeats 3 --warmups 1 --rhs-counts 1 4 --regimes cold warm multiple \
-  2>&1 | tee "$P_RUN/benchmark.log"
-```
-
-본 학습은 새 run의 prepare에서 `configs/v6_7_learned_p_research.json`을 사용한다.
-Train n=15/31/63의 84개 A, validation n=15/31/63/127의 28개 A, size OOD n=255다.
-직접 P 학습 336 updates, P-only search 4×200/A, 증류 336 + P 미세조정 168 updates다.
-Smoke는 n=7, train/validation 각 7개 A, 직접 학습 14 updates, 탐색 2×4/A,
-증류 14 + 미세조정 7 updates다. 두 업데이트짜리 이전 smoke와 예산이 다르다.
-
-본 run에서 validation 후 freeze/final:
-
-```bash
-python "$SCRIPT" freeze --run-dir "$P_RUN" \
-  --repeats 5 --warmups 1 --rhs-counts 1 4 16 64 --regimes cold warm multiple
-caffeinate -i python -u "$SCRIPT" final --run-dir "$P_RUN" \
-  2>&1 | tee "$P_RUN/final.log"
-```
-
-Smoke는 freeze/final에 사용할 수 없다. 중단된 train/search/distill/benchmark/final은
-동일 환경·설정으로 `--resume`을 사용한다. `diagnose --resume`은 같은 checkpoint의
-기존 진단을 읽고, 증류 후 새 모델까지 진단할 때는 `--resume` 없이 실행한다.
-새 터미널에서는 SCRIPT와 P_RUN을 다시 설정해야 한다. 소스가 달라진 이전 run의
-hash를 고쳐 재개하지 않는다. 구현·smoke 성공은 연구 규모의 속도 개선 증거가 아니다.
+같은 checkpoint/설정/환경의 중단된 작업만 resume한다. 기존 run의 설정이나 manifest
+hash를 수정해 새 예산을 끼워 넣지 않는다. Smoke 성공은 연구 규모의 속도 개선 증거가 아니다.

@@ -1,5 +1,9 @@
 # Strong-aware Neural MG 변경 계획 — 2026-09-16
 
+> **과거 실험·구현 기록.** 아래의 기본값·명령·결과는 이 문서가 다루는 경로에 한정된다.
+> 현재 `residual-u-net-teacher`의 주 실험은 [line_alt 고정 + P-only 학습](learned_p_study.md)이다.
+> 현재 실행은 [Mac runbook](learned_p_runbook.md), 경로별 구분은 [문서 목록](README.md)을 따른다.
+
 기존 `strong.py`와 배포 시 사용한 `artifacts/my_v6_7_strong_baseline/calibration/selector_rules.json`을 고정한다. 이 규칙은 앞선 작은 tune에서 한 leaf만 보정된 후보이며 완전한 classical optimum으로 주장하지 않는다. 이번에는 규칙·threshold·strategy bank를 변경하지 않는다.
 
 현재 소스는 Git checkout이 아닌 로컬 프로젝트다. 변경 전 소스·문서 102개의 SHA256을 보존했고, 수정 전 실제 프로젝트의 `.venv/bin/python -m pytest -p no:cacheprovider`는 317개 통과했다. 원본 research, limited-fix, strong-baseline 결과/checkpoint는 읽기 전용이다. 새 결과는 `artifacts/my_v6_7_strong_aware/` 아래에만 만든다.

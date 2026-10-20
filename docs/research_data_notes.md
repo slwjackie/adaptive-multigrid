@@ -1,5 +1,10 @@
 # Strong-aware 연구 데이터와 final gate
 
+> **과거 실험·구현 기록.** 아래의 기본값·명령·결과는 이 문서가 다루는 경로에 한정된다.
+> 현재 `residual-u-net-teacher`의 주 실험은 [line_alt 고정 + P-only 학습](learned_p_study.md)이다.
+> 현재 실행은 [Mac runbook](learned_p_runbook.md), 경로별 구분은 [문서 목록](README.md)을 따른다.
+> 현재 P-only의 데이터 예산·bilinear 기준선은 현재 설계를 따른다. 아래 strong_C 요구사항을 적용하지 않는다.
+
 기존 selector는 수정하지 않는다. `research_data.py`는 기존 `select_strong_strategy(A,n,rules)`를 호출하고, 각 sample에 전략 이름·rule·operator feature·rules digest를 저장한다. 학습 시 `Example.strong_selection` 또는 development manifest의 `selection`을 사용한다. selector가 RHS·해답·family 이름을 읽는 경로는 없다.
 
 ## 기본 규모

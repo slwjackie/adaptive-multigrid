@@ -2,7 +2,8 @@
 
 현재 기본 실험은 [line_alt 고정·P-only Frobenius 학습](learned_p_study.md)으로
 변경되었다. 아래는 명시적인 이전 joint 설정 파일을 사용하는 과거 실험 재현용이다.
-새 P-only run에는 smoother NN과 공동 학습 단계가 없다.
+새 P-only run에는 smoother NN과 공동 학습 단계가 없다. 현재 명령은
+[Mac runbook](learned_p_runbook.md), 전체 경로 구분은 [문서 목록](README.md)을 따른다.
 
 이 실험은 작은 두 CNN이 각 level의 `P`, `B_pre`, `B_post`를 함께 생성하도록
 학습한다. 기존 U-net teacher, pruning, TTT, EM5 기반 sparse smoother 실험과는

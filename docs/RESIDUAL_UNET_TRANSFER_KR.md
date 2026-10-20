@@ -1,6 +1,10 @@
 # Residual U-net teacher → 작은 CNN student로 P 학습
 
-이 브랜치는 **희소 prolongation을 생성하는 NN**을 비교하는 독립 연구 경로다.
+> **과거 실험·구현 기록.** 아래의 기본값·명령·결과는 이 문서가 다루는 경로에 한정된다.
+> 현재 `residual-u-net-teacher`의 주 실험은 [line_alt 고정 + P-only 학습](learned_p_study.md)이다.
+> 현재 실행은 [Mac runbook](learned_p_runbook.md), 경로별 구분은 [문서 목록](README.md)을 따른다.
+
+이 독립 U-net 실험은 **희소 prolongation을 생성하는 NN**을 비교하는 독립 연구 경로다.
 Teacher가 validation에서 실제 수렴 개선을 보인 경우에만 증류한다.
 최종 목표는 student의 생성·Galerkin 구성까지 포함한 총 풀이 시간이 고정 classical
 MG보다 짧아지는 것이다. 구현이나 smoke 통과가 속도 향상 증거는 아니다.

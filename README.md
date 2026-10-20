@@ -1,134 +1,82 @@
-# Learned multigrid operator studies
+# Learned prolongation with fixed line smoothing
 
-The current [P-only study](docs/learned_p_study.md) fixes classical `line_alt`
-smoothing (2 pre + 2 post), full coarsening and a bilinear fallback parent. Only
-the sparse P generator is learned, using a stochastic estimate of the complete
-V-cycle error-propagation operator's squared Frobenius norm. No neural smoother
-is instantiated, trained, serialized or executed in this path. Generated P/R/Ac
-and line factors are reused across cycles and RHS for the same A. Use
-`scripts/run_v6_7_learned_p_study.py`; it is also the default configuration of the
-existing joint-study CLI. Fixed-probe before/after diagnostics precede optional
-P-only offline refinement and distillation. Online setup+solve determines success.
+The active branch is **`residual-u-net-teacher`**. Its current experiment trains
+only a small CNN that generates sparse prolongation matrices **P**, with classical
+`line_alt` smoothing fixed. The branch name comes from an earlier U-net experiment;
+the current P-only path does not train or run a U-net teacher or neural smoother.
 
-The earlier [joint P/pre/post smoother study](docs/joint_transfer_study.md) uses
-`line_alt + bilinear + full coarsening` as its fixed parent and fallback. Two
-small residual CNNs generate sparse interpolation and separate pre/post
-smoothers once per level. Its independent pipeline trains ablations and the
-joint model, refines numerical operators offline with multi-start Adam, then
-distills their operators and complete V-cycle actions. Six arms are compared
-using measured setup-plus-solve time; EM5 is an independent reference arm only.
-It remains available with its explicit legacy configuration for reproducibility.
-Use a new run directory for the current P-only study. This is
-an experiment implementation, not evidence of a speedup.
+[한국어 안내](README_KR.md) · [Documentation index](docs/README.md) ·
+[Current design](docs/learned_p_study.md) · [Mac runbook](docs/learned_p_runbook.md)
 
-## Residual U-net transfer teacher study (existing independent workflow)
+## Current numerical contract
 
-This branch focuses on learning sparse prolongation from synthetic 2D elliptic
-systems, using a residual U-net teacher and compact CNN student. The fixed reference
-is `line_alt + energy minimization + full coarsening` (EM 5, pre/post 2/2).
-See [the current Korean runbook](docs/RESIDUAL_UNET_TRANSFER_KR.md) for the training
-PDE, data generation, commands and evaluation protocol. Sloshing, shear mixing
-layers, Navier–Stokes time integration and external CFD bridges are not included.
+| Component | Current P-only experiment |
+| --- | --- |
+| PDE | Synthetic 2D SPD diffusion systems; no CFD time integrator |
+| Coarsening | Fixed full coarsening |
+| Pre / post smoothing | Classical `line_alt`, 2 sweeps each, every nonterminal level |
+| Learned component | Width-8 residual CNN, 3,208 trainable P-generator parameters |
+| Transfer | Bilinear-support-preserving P, R = P transpose |
+| Coarse operators | Actual Galerkin Ac = P transpose × A × P |
+| Terminal solve | LU at the 3 × 3 interior grid |
+| Parent and fallback | `line_alt + bilinear + full`, strategy `line_alt_bilinear_full__v22` |
+| Independent reference | `line_alt + EM5 + full`; EM is not part of learned setup |
+| Training objective | Stochastic estimate of the full V-cycle error operator's squared Frobenius norm, divided by the number of unknowns |
+| Performance criterion | Time to the same residual tolerance, including setup for cold / multiple RHS |
 
-The direct CNN can also be studied with a learned, cached sparse approximate-inverse
-smoother in place of line smoothing. See the [sparse smoother runbook](docs/direct_sparse_smoother.md)
-for frozen-P and joint P/smoother controls, cycle diagnostics, timing and Mac commands.
+The objective is a surrogate for spectral radius, not a differentiable wall clock
+or an exact cycle count. Same-A P/R/Ac, line factors and LU are cached across cycles
+and RHS. With the current explicit `H_P` branch, growing/nonfinite candidates or
+learned setup failures trigger classical recovery; near-tolerance finishing is
+also classical. There is no runtime comparison against a classical shadow solve
+and no speed-based switching policy in this path. See the design for exact criteria.
 
-## Legacy H_S workflow: C_tuned + H_S + solver world model
-
-Use [`run_v6_7_hs_world_study.py`](scripts/run_v6_7_hs_world_study.py), with the
-[complete Korean runbook](docs/HS_WORLD_THESIS_RUNBOOK_KR.md). One global classical
-plan is tuned offline, then kept fixed for the primary C/H_S comparison. H0, H1,
-H2 and H2_NH remain unchanged. The 88-plan PDE-adaptive strong_C is an optional,
-separately labelled robustness audit, not the primary reference or training parent.
-
-Temporal actions factor **classical P reuse/rebuild x classical/neural smoothing**.
-World_C, H_S with matched/tuned non-neural reuse, and World_HS are all evaluated.
-A changed A always gets current Galerkin coarse matrices and numeric factors;
-learned smoothing is regenerated, not silently reused with stale coefficients.
-The world model abstains to a tune-selected classical reuse policy.
-
-H_P/H_SP are retained below for historical ablations, but are not trained or
-called by this legacy workflow. These are synthetic elliptic solver studies.
-Application interfaces (external CFD LDU import/export and supplied GAMG comparison)
-have been removed from this branch; no sloshing or shear-layer flow solver is included.
-
-
-
-## New primary H_P workflow: EM + schedules + asymptotic affine transfer
-
-[EM_AFFINE_HP_RUNBOOK_KR.md](docs/EM_AFFINE_HP_RUNBOOK_KR.md) documents the new
-`run_v6_7_em_transfer_study.py` pipeline: warm-calibrated classical plans,
-vectorized constrained EM, batched differentiable V-cycles, all-level
-fixed-parent affine P, persistent slow probes and measured checkpoint selection,
-followed by an independently fitted **C/H_P** policy. Existing H_S architectures
-and old CLIs remain available. Start a NEW run after source changes.
-This is an implemented experiment, not a claim that the NN beats the new baseline.
-
-
-Standalone multigrid with **cached operator-generating neural networks**, a lightweight temporal break-even controller, optional block spatial selection, and a classical lock/recovery path.
-
-The new production API is `adaptive_mg.v67.PreparedAdaptiveMG`. The v6.6 exact-K API is retained only for legacy comparison/regression tests. No external Krylov solver is used by the new production path.
-
-## New: warm-first study (expert first, policy second)
-
-See [WARM_STUDY_RUNBOOK_KR.md](docs/WARM_STUDY_RUNBOOK_KR.md) for the new isolated
-`run_v6_7_warm_study.py` workflow: warm multi-RHS timing, tiny/multistage cached
-smoothers, no-harm/coarse-aware training, grouped replacement, and a continuous-size
-cost policy fitted only after expert selection. The old workflow below is retained.
-Use a NEW run; changed-source timing evidence is not resumable. Research candidates
-and empirical policy margins are not convergence or speedup certificates.
-
-H_P/H_SP research evidence and proposed next experiments are separately documented
-in [HP_HSP_RESEARCH_PLAN_KR.md](docs/HP_HSP_RESEARCH_PLAN_KR.md); these proposals are
-not claimed as implemented improvements in the warm-first H_S study.
-
-## Start here: optimized strong-aware workflow
-
-The new self-contained workflow fixes batched classical line relaxation, H_S
-replacement/setup costs, and support-preserving, parent-relative learned P.
-No historical checkpoints are needed. **Train P again** under the new projection;
-old speed measurements and v1 selector artifacts are not evidence for this build.
-
-See [the Korean runbook](docs/THREE_PILLARS_RUNBOOK_KR.md) for installation,
-full research calibration/training, real multiple-RHS benchmarks, resume,
-and the frozen single-use final/OOD evaluation.
+## Start the current experiment
 
 ```bash
 python -m pip install -e '.[dev]'
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
-python scripts/build_native_stencil.py --no-openmp  # optional C++ backend
-python -m pytest -ra
-RUN=artifacts/three_pillars_smoke
-python scripts/run_v6_7_three_pillars.py calibrate --config configs/v6_7_three_pillars_smoke.json --run-dir "$RUN"
-python scripts/run_v6_7_three_pillars.py train --run-dir "$RUN" --branches H_S H_P
-python scripts/run_v6_7_three_pillars.py benchmark --run-dir "$RUN" --branches H_S H_P --repeats 3 --rhs-counts 1 4
-python scripts/run_v6_7_three_pillars.py demo --run-dir "$RUN" --branch H_S --family channel --n 31
+export VECLIB_MAXIMUM_THREADS=1 NUMEXPR_NUM_THREADS=1
+SCRIPT="scripts/run_v6_7_learned_p_study.py"
+P_RUN="artifacts/learned_p_smoke_$(date +%Y%m%d_%H%M%S)"
+python "$SCRIPT" prepare --run-dir "$P_RUN" --config configs/v6_7_learned_p_smoke.json && \
+python -u "$SCRIPT" train --run-dir "$P_RUN" && \
+python -u "$SCRIPT" diagnose --run-dir "$P_RUN"
 ```
 
-This is a code/experimental-protocol update, **not a guarantee that Neural MG is
-faster**. Inspect success counts and incremental speedup over the *same* selected
-classical parent. Smoke is never an untouched final-test certificate.
+| Budget | Train A | Validation A | Direct training updates |
+| --- | ---: | ---: | ---: |
+| Checked-in smoke config | 7 at n=7 | 7 at n=7 | 14 |
+| Checked-in research config, preliminary budget | 84 at n=15/31/63 | 28 at n=15/31/63/127 | 336 |
+| Current expanded runbook recipe | **420 at n=15/31/63** | **140 at n=15/31/63/127** | **4,200** |
 
-## Legacy workflows
+The 420-operator recipe creates a new local config; it does not silently change the
+checked-in default or an existing run. Follow the [Mac runbook](docs/learned_p_runbook.md)
+for fresh-run setup, logs, resume and a **three-arm direct-P validation** against
+bilinear classical and EM5 classical. The normal `benchmark` CLI currently also
+requires `distilled_P`; the runbook provides an existing-API invocation that works
+immediately after direct training. Direct validation does not produce the evidence
+required by the four-arm `freeze` / `final` workflow.
 
-An isolated **residual U-net P teacher → compact CNN student** experiment is
-available via `scripts/run_v6_7_unet_transfer_study.py`. It compares the same
-small CNN trained directly and with full-V-cycle action distillation, admits KD
-only after measured teacher contraction gains, and evaluates setup-inclusive
-student time against fixed `line_alt + energy minimization + full coarsening` MG
-(EM budget 5, pre/post 2/2). This path uses `prepare`, has no classical selector,
-and includes EM setup and CNN inference in cold/multiple timings. Attention is not used.
-See [the Korean runbook](docs/RESIDUAL_UNET_TRANSFER_KR.md) for the smoke and
-research commands, sparse constraints, teacher gate and independent final/OOD protocol.
+Optional P-only `search` and `distill` refine P for each training A, then distill it
+into the small CNN. They are later experiments, not prerequisites for direct-P
+validation. Final/OOD data stay sealed during development. Smoke completion and
+unit tests establish execution correctness, not a speedup; research-scale performance
+of the expanded recipe has not yet been established.
 
-See [README_KR.md](README_KR.md) for setup, the six-stage resumable training pipeline, diagnostics, precision contracts, and the exact scope of stability/performance claims.
+## Earlier experiments
 
-```bash
-pip install -e '.[dev]'
-python scripts/build_native_stencil.py
-pytest -ra
-python scripts/run_v6_7_pipeline.py --config configs/v6_7_smoke.json --output-dir artifacts/my_smoke
-```
+Earlier workflows remain available with their own explicit configurations. Their
+baselines, losses and results do not describe the current P-only experiment.
 
-The included smoke checks do **not** establish speedup over a tuned classical MG solver. Full research training and independent performance auditing are runnable, but not represented as completed unless their generated records say so.
+| Earlier workflow | Documentation |
+| --- | --- |
+| Residual U-net teacher / student, EM5 parent | [U-net transfer](docs/RESIDUAL_UNET_TRANSFER_KR.md) |
+| Direct-CNN pruning and TTT | [Pruning / TTT](docs/direct_pruning_ttt.md) |
+| Cached learned sparse smoother | [Sparse smoother](docs/direct_sparse_smoother.md) |
+| Joint P and pre/post smoother training | [Joint experiment](docs/joint_transfer_study.md) |
+| Strong-aware, warm, EM-affine and world-model studies | [Historical document index](docs/README.md) |
+
+Implementation locations are listed in [the architecture guide](docs/ARCHITECTURE_KR.md).
+Run `python -m pytest -ra` for the test suite. The default P-only CPU/CSR path does
+not require the optional native stencil backend.

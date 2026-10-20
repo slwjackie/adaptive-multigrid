@@ -1,5 +1,9 @@
 # Direct CNN pruning + test-time training
 
+> **과거 실험·구현 기록.** 아래의 기본값·명령·결과는 이 문서가 다루는 경로에 한정된다.
+> 현재 `residual-u-net-teacher`의 주 실험은 [line_alt 고정 + P-only 학습](learned_p_study.md)이다.
+> 현재 실행은 [Mac runbook](learned_p_runbook.md), 경로별 구분은 [문서 목록](README.md)을 따른다.
+
 Teacher는 그대로 두고, 기존 `residual-u-net-teacher` 실험의 **direct CNN만** 가져오는 독립 실험이다. 기존 frozen run의 코드·파일·모델을 덮어쓰지 않는다. 이 실험은 빨라졌다고 가정하지 않으며, 실패와 느려진 결과도 그대로 기록한다.
 
 ## 비교 대상과 기본 설정

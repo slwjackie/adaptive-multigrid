@@ -1,5 +1,10 @@
 # Strong-aware 구현 완료 및 이어서 수행한 검증
 
+> **과거 실험·구현 기록.** 아래의 기본값·명령·결과는 이 문서가 다루는 경로에 한정된다.
+> 현재 `residual-u-net-teacher`의 주 실험은 [line_alt 고정 + P-only 학습](learned_p_study.md)이다.
+> 현재 실행은 [Mac runbook](learned_p_runbook.md), 경로별 구분은 [문서 목록](README.md)을 따른다.
+> 아래 artifacts 경로는 과거 로컬 실행 산출물이며 저장소에 포함된 다운로드 링크가 아니다.
+
 기존 프로젝트에 구현을 반영했고 **494개 테스트가 모두 통과**했습니다. 기존 smoke checkpoint를 재사용한 추가 검증도 완료했습니다. 새 Neural 모델의 strong Classical 대비 속도·정확도 우위는 아직 확인되지 않았으며, production 승격이나 final 인증은 하지 않았습니다.
 
 기존 selector/rules, numerical native kernel, 과거 checkpoint·결과·certificate를 보존했습니다. 102개 원본 파일을 반영 전 검사했고, 중요 historical artifact 47개의 hash가 반영 후에도 같았습니다. 수정된 기존 파일은 README와 models/banks/solver/unroll 연결부 다섯 개입니다.
@@ -32,7 +37,7 @@ Successful H_S의 manufactured L2/energy error가 strong C보다 `5% + 1e-12` �
 
 Adaptive는 이 표에서 neural을 사용하지 않았고 정책 검증/선택 비용이 추가됐습니다. 이를 Neural 가속으로 집계하거나 production에 승격하지 않았습니다. Smoother/P teacher가 direct student를 충분히 개선하지 못해 KD checkpoint를 만들지 않았고, joint 후보도 채택하지 않았습니다. [첫 smoke의 architecture·teacher 해석](STRONG_AWARE_RESULTS_KR.md)을 함께 보세요.
 
-근거: [raw/JSON·CSV 요약](../artifacts/my_v6_7_strong_aware/installed_validation/branches/comparison.json), [이어 한 검증 보고서](../artifacts/my_v6_7_strong_aware/installed_validation/verification_report.json).
+근거: raw/JSON·CSV 요약 — 로컬 결과 경로: `../artifacts/my_v6_7_strong_aware/installed_validation/branches/comparison.json`, 이어 한 검증 보고서 — 로컬 결과 경로: `../artifacts/my_v6_7_strong_aware/installed_validation/verification_report.json`.
 
 ## 실제 multiple RHS와 사후 classical reference
 
@@ -45,9 +50,9 @@ Adaptive는 이 표에서 neural을 사용하지 않았고 정책 검증/선택 
 | 16 | 0.802× | 0.797× | 0.771× | 0.846× | 0.860× |
 | 64 | 0.865× | 0.865× | 0.737× | 0.970× | 0.951× |
 
-RHS-blind는 동일 batch와 cache를 사용하면서 정책에 제공하는 expected RHS hint만 1로 고정합니다. 여기서는 둘 다 neural 사용이 없으므로 숫자 차이를 branch utility 학습의 효과로 해석하지 않습니다. Cold/warm의 별도 측정도 [전체 요약](../artifacts/my_v6_7_strong_aware/installed_validation/cold_warm_multiple_rhs/comparison.json)에 있습니다.
+RHS-blind는 동일 batch와 cache를 사용하면서 정책에 제공하는 expected RHS hint만 1로 고정합니다. 여기서는 둘 다 neural 사용이 없으므로 숫자 차이를 branch utility 학습의 효과로 해석하지 않습니다. Cold/warm의 별도 측정도 전체 요약 — 로컬 결과 경로: `../artifacts/my_v6_7_strong_aware/installed_validation/cold_warm_multiple_rhs/comparison.json`에 있습니다.
 
-Offline classical reference는 n=15 near-isotropic 한 문제의 controlled bank에서 실행했습니다. 사후 최선은 chebyshev_bilinear_full, 성공 median 2.210 ms였고 deployable strong selector는 jacobi_bilinear_full, 2.497 ms였습니다. 전체 검색은 warmup 포함 0.658 s를 소모했습니다. 한 문제의 경험적 사후 reference이며 deployable baseline이나 theoretical bound가 아닙니다. [후보별 원시 시간과 검색 비용](../artifacts/my_v6_7_strong_aware/installed_validation/classical_reference/offline_reference.json).
+Offline classical reference는 n=15 near-isotropic 한 문제의 controlled bank에서 실행했습니다. 사후 최선은 chebyshev_bilinear_full, 성공 median 2.210 ms였고 deployable strong selector는 jacobi_bilinear_full, 2.497 ms였습니다. 전체 검색은 warmup 포함 0.658 s를 소모했습니다. 한 문제의 경험적 사후 reference이며 deployable baseline이나 theoretical bound가 아닙니다. 후보별 원시 시간과 검색 비용 — 로컬 결과 경로: `../artifacts/my_v6_7_strong_aware/installed_validation/classical_reference/offline_reference.json`.
 
 ## 실제 CPU/MPS generation
 
@@ -69,7 +74,7 @@ Offline classical reference는 n=15 near-isotropic 한 문제의 controlled bank
 
 성공한 모든 cached bank lookup에서 추가 heavy generation 호출은 0이었습니다. n=15 near-isotropic GNN/edge/teacher P는 양 장치에서 fill cap으로 거부됐고, 실패를 성공 시간으로 집계하지 않았습니다. CUDA/A100은 사용할 수 없어 `not_measured`로 남겼습니다.
 
-근거: [smoother CPU/MPS](../artifacts/my_v6_7_strong_aware/device_generation/smoother/generation.json), [transfer CPU/MPS](../artifacts/my_v6_7_strong_aware/device_generation/transfer/generation.json).
+근거: smoother CPU/MPS — 로컬 결과 경로: `../artifacts/my_v6_7_strong_aware/device_generation/smoother/generation.json`, transfer CPU/MPS — 로컬 결과 경로: `../artifacts/my_v6_7_strong_aware/device_generation/transfer/generation.json`.
 
 ## 아직 실행하지 않은 연구와 비용
 
@@ -79,4 +84,4 @@ Offline classical reference는 n=15 near-isotropic 한 문제의 controlled bank
 
 최종 architecture/OOD 비교와 certification은 [실행 안내](../STRONG_AWARE_README_KR.md)의 명시적인 full development → freeze → final 명령으로만 실행합니다. 이번 작업에서는 해당 full 학습이나 final/OOD를 시작하지 않았습니다. O2의 실제 rotation-OOD 개선, graph P의 병목 해소, KD 이득은 충분한 학습 후 이 검증을 통과해야 주장할 수 있습니다.
 
-테스트 근거: [설치 위치 JUnit: 494 tests, 0 failures/errors/skips](../artifacts/my_v6_7_strong_aware/inspection/installed_tests.xml).
+테스트 근거: 설치 위치 JUnit: 494 tests, 0 failures/errors/skips — 로컬 결과 경로: `../artifacts/my_v6_7_strong_aware/inspection/installed_tests.xml`.

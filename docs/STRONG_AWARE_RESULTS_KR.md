@@ -1,5 +1,10 @@
 # Strong-aware smoke_01: 확인된 결과와 해석 범위
 
+> **과거 실험·구현 기록.** 아래의 기본값·명령·결과는 이 문서가 다루는 경로에 한정된다.
+> 현재 `residual-u-net-teacher`의 주 실험은 [line_alt 고정 + P-only 학습](learned_p_study.md)이다.
+> 현재 실행은 [Mac runbook](learned_p_runbook.md), 경로별 구분은 [문서 목록](README.md)을 따른다.
+> 아래 artifacts 경로는 과거 로컬 실행 산출물이며 저장소에 포함된 다운로드 링크가 아니다.
+
 이 문서는 `artifacts/my_v6_7_strong_aware/smoke_01`의 완료된 development 기록을
 읽어 작성했습니다. `progress.json`은 `development_complete`이고 final test는
 사용하지 않았습니다. 이 기록은 첫 소규모 smoke의 결과이며, 설치 후 추가 hardware
@@ -26,8 +31,8 @@ forward/backward·sparse projection·checkpoint 저장이 실제로 실행됐다
 똑같이 일곱 번만 갱신했으므로, 여기서 얻은 teacher 결과를 capacity upper bound로
 해석할 수 없습니다.
 
-근거: [학습·단계 상태](../artifacts/my_v6_7_strong_aware/smoke_01/progress.json),
-[development 보고서](../artifacts/my_v6_7_strong_aware/smoke_01/development_report.json).
+근거: 학습·단계 상태 — 로컬 결과 경로: `../artifacts/my_v6_7_strong_aware/smoke_01/progress.json`,
+development 보고서 — 로컬 결과 경로: `../artifacts/my_v6_7_strong_aware/smoke_01/development_report.json`.
 
 ## 첫 cold branch 비교
 
@@ -62,8 +67,8 @@ H_S는 성공한 세 문제에서 manufactured L2/energy error 비교의 `5% + 1
 악화 사례가 없다는 사실도, neural work나 속도 개선이 없을 때 독립적인 neural
 정확도 우위의 증거가 되지는 않습니다.
 
-근거: [branch 원시 결과](../artifacts/my_v6_7_strong_aware/smoke_01/validation/branches/raw_results.json),
-[branch 요약](../artifacts/my_v6_7_strong_aware/smoke_01/validation/branches/comparison.json).
+근거: branch 원시 결과 — 로컬 결과 경로: `../artifacts/my_v6_7_strong_aware/smoke_01/validation/branches/raw_results.json`,
+branch 요약 — 로컬 결과 경로: `../artifacts/my_v6_7_strong_aware/smoke_01/validation/branches/comparison.json`.
 
 ## Smoother architecture 비교
 
@@ -93,9 +98,9 @@ generalization 잠재력이나 충분히 학습한 큰 teacher 성능을 결론 
 이번 결과는 '현재 smoke checkpoint에는 추가 generation 비용을 상쇄할 cold solve
 개선이 나타나지 않았다'는 범위에서 읽어야 합니다.
 
-근거: [smoother ablation](../artifacts/my_v6_7_strong_aware/smoke_01/validation/smoother_architectures/comparison.json),
-[선택 기록](../artifacts/my_v6_7_strong_aware/smoke_01/smoother_selection.json),
-[generation 원시 기록](../artifacts/my_v6_7_strong_aware/smoke_01/generation/generation.json).
+근거: smoother ablation — 로컬 결과 경로: `../artifacts/my_v6_7_strong_aware/smoke_01/validation/smoother_architectures/comparison.json`,
+선택 기록 — 로컬 결과 경로: `../artifacts/my_v6_7_strong_aware/smoke_01/smoother_selection.json`,
+generation 원시 기록 — 로컬 결과 경로: `../artifacts/my_v6_7_strong_aware/smoke_01/generation/generation.json`.
 
 ## Graph-aware P가 아직 개선으로 채택되지 않은 이유
 
@@ -122,8 +127,8 @@ weight, support/projection, 실제 coarse fill 제한이 함께 영향을 준 �
 동일한 사전 고정 cap 아래 실제 neural 적용·fill·setup·total time이 함께 개선되는지
 판단해야 합니다.
 
-근거: [P ablation](../artifacts/my_v6_7_strong_aware/smoke_01/validation/p_architectures/comparison.json),
-[generation 실패 비용](../artifacts/my_v6_7_strong_aware/smoke_01/generation/generation.json).
+근거: P ablation — 로컬 결과 경로: `../artifacts/my_v6_7_strong_aware/smoke_01/validation/p_architectures/comparison.json`,
+generation 실패 비용 — 로컬 결과 경로: `../artifacts/my_v6_7_strong_aware/smoke_01/generation/generation.json`.
 
 ## Teacher, KD, joint 결정
 
@@ -141,9 +146,9 @@ Joint candidate는 independent pair 대비 H_S 보존 조건을 통과했으나,
 개선은 약 `0.9972×`로 기준 `1.03093×`를 충족하지 못해 거부했습니다. 더 복잡한
 teacher/KD/joint를 무조건 넣지 않는 선택 절차가 실제로 작동한 결과입니다.
 
-근거: [teacher 결정](../artifacts/my_v6_7_strong_aware/smoke_01/teacher_decisions.json),
-[KD 결정](../artifacts/my_v6_7_strong_aware/smoke_01/distillation_decisions.json),
-[joint 결정](../artifacts/my_v6_7_strong_aware/smoke_01/joint_decision.json).
+근거: teacher 결정 — 로컬 결과 경로: `../artifacts/my_v6_7_strong_aware/smoke_01/teacher_decisions.json`,
+KD 결정 — 로컬 결과 경로: `../artifacts/my_v6_7_strong_aware/smoke_01/distillation_decisions.json`,
+joint 결정 — 로컬 결과 경로: `../artifacts/my_v6_7_strong_aware/smoke_01/joint_decision.json`.
 
 ## 회전 진단과 hardware 기록을 읽을 때의 한계
 
@@ -164,8 +169,8 @@ CPU만 측정했습니다. 이는 **Mac hardware에 MPS가 없다는 주장과 �
 smoke_01의 `not_measured` 기록을 측정값으로 덮어쓰지 않습니다. A100 성능은 이
 smoke에서 측정하지 않았습니다.
 
-근거: [회전 진단](../artifacts/my_v6_7_strong_aware/smoke_01/validation_rotation_resampling.json),
-[device availability 기록](../artifacts/my_v6_7_strong_aware/smoke_01/generation/generation_manifest.json).
+근거: 회전 진단 — 로컬 결과 경로: `../artifacts/my_v6_7_strong_aware/smoke_01/validation_rotation_resampling.json`,
+device availability 기록 — 로컬 결과 경로: `../artifacts/my_v6_7_strong_aware/smoke_01/generation/generation_manifest.json`.
 
 이 smoke로 확인한 것은 연구 경로와 보수적인 거부 절차의 작동, 그리고 현재 짧게
 학습한 후보들이 strong baseline보다 cold time에서 빠르지 않다는 사실입니다.

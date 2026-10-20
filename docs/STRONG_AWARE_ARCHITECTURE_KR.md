@@ -1,5 +1,9 @@
 # Strong Classical 기준 Neural MG 연구 아키텍처
 
+> **과거 실험·구현 기록.** 아래의 기본값·명령·결과는 이 문서가 다루는 경로에 한정된다.
+> 현재 `residual-u-net-teacher`의 주 실험은 [line_alt 고정 + P-only 학습](learned_p_study.md)이다.
+> 현재 실행은 [Mac runbook](learned_p_runbook.md), 경로별 구분은 [문서 목록](README.md)을 따른다.
+
 이 경로의 연구 질문은 **기존 deployable strong Classical MG의 견고함을 유지하면서,
 학습한 대체 연산자가 setup 포함 time-to-tolerance를 줄이는가**입니다.
 모델을 구현하거나 smoke 학습을 끝낸 사실은 이 질문에 대한 긍정적 답이 아닙니다.

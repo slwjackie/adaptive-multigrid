@@ -1,5 +1,9 @@
 # H_P headroom-first 연구 경로
 
+> **과거 실험·구현 기록.** 아래의 기본값·명령·결과는 이 문서가 다루는 경로에 한정된다.
+> 현재 `residual-u-net-teacher`의 주 실험은 [line_alt 고정 + P-only 학습](learned_p_study.md)이다.
+> 현재 실행은 [Mac runbook](learned_p_runbook.md), 경로별 구분은 [문서 목록](README.md)을 따른다.
+
 이 경로는 `947e4f5` 이후의 main에 **추가**하는 development 전용 진단이다.
 기존 H0/H1/H2/H2_NH 학습, continuous-size policy, classical fast path와 P2를 변경하지 않는다.
 목적은 먼저 P 개선 여지와 고전 보간법을 측정한 뒤 NN/LWLS/공동학습 투자 여부를 판단하는 것이다.

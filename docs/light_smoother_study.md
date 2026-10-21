@@ -140,6 +140,9 @@ Research 기본값은 pass 최대 2회, 최적화 RHS 3개, 별도 확인 RHS 3�
 제거하거나 그 기본값을 성공한 탐색 정답으로 학습하지 않는다. 탐색 범위·예산 등을
 변경하려면 기록을 보존한 채 새 설정과 새 run으로 시작한다.
 
+완료된 좌표 탐색에서 실패한 A만 추가 탐색하려면 아래 **실패 A의 joint 재탐색**을
+사용한다. 성공한 학습 A의 탐색을 다시 실행하거나 실패 정답을 강제로 승인하지 않는다.
+
 `search/<case>/result.json`에 모든 계수 조합, 성공 여부, cycle 수, 잔차 이력,
 측정 시간, 최종 선택과 기본값 대비 비교를 남긴다. `progress.json`은 완료된 **각 측정**을
 기록한다. 재개하면 완료된 측정을 다시 재지 않으며, 중단 순간 실행 중이던 측정은
@@ -259,6 +262,98 @@ gate-closed 결정을 센다. `classical_safety_cycles` 및 `fallback_count`는 
 고르지 않는다. `fixed_C`가 더 빠르면 classical을 권고하고, 어떤 후보도 조건을 만족하지
 못하면 비선택을 기록한다. Final/OOD에서는 validation 선택을 다시 바꾸지 않는다.
 Smoke는 실행 경로 검증이며 속도 향상 증거가 아니다.
+
+## 실패 A의 joint 재탐색 (기존 검색 결과 보존)
+
+`scripts/run_v6_7_light_smoother_retry.py`는 완료된 원본 search를 검증하고 **별도 run**을
+만든다. 원본의 `search/summary.json`에서 `label_eligible=false`인 학습 A만 골라
+모든 nonterminal level의 x/y 계수를 동시에 지정하는 후보를 시험한다. 사용자 지정
+case 목록으로 편한 문제만 고르지 않는다. 420개 중 8개가 실패했다면 그 8개만 재탐색하고,
+나머지 412개의 정답 파일은 바이트 그대로 복사해 재사용한다.
+
+기본 추가 탐색 설정은 `configs/v6_7_light_smoother_retry.json`이다.
+
+| 단계 | 기본 예산과 판정 |
+| --- | --- |
+| 후보 생성 | 최대 128개. `(1,1)`과 모든 level에 같은 x/y 쌍을 적용하는 9개 조합을 포함하고, 나머지는 전체 `{0.8,1.0,1.2}^(2L)` 격자에서 seed 기반 중복 없는 표본 추출 |
+| Screening | 원래 최적화 RHS 3개에서 최대 12 cycle. 가장 나쁜 RHS의 `final/initial` 잔차 비율로 순위 결정. 이는 후보를 줄이는 대리 지표이며 정답 판정 아님 |
+| 전체 solve | 기본 `(1,1)` + 최대 12개 후보. 원래 tolerance·150-cycle 제한·최적화 RHS·3반복 유지 |
+| 확인 | 최적화 측정을 모두 통과한 후보 중 실측 시간이 빠른 최대 3개 + 기본값. 원래 별도 확인 RHS 3개 × 3반복 |
+| 최종 채택 | 확인까지 모두 성공한 계수만 허용. 원본에서 같은 전체 계수 조합으로 실패한 이력도 유지하며, 이를 재측정 성공으로 덮지 않음 |
+
+공통 learned P, 실제 Galerkin 계층과 줄 factor는 A당 setup 한 번 후 재사용한다.
+Search 후보 검사에는 fallback과 온라인 적응이 없다. 중단 후 재시작할 때는 계층을
+다시 준비하며 그 시간과 setup 횟수도 기록한다. 이미 완료해 저장한 측정은 다시 실행하지
+않고, 중단 시 실행 중이던 측정은 재실행할 수 있다. 후보별 실패·잔차 이력·시간을 모두 남긴다.
+
+이 추가 탐색도 전역 최적해를 보장하지 않는다. 3-level 전체 격자는 729개,
+4-level은 6,561개이고 기본 예산은 그중 최대 128개다. Screening이 늦게 수렴하기
+시작하는 유망 후보를 놓칠 수 있다. 실패 8개만 추가 탐색했다는 학습 정답 생성 정책과
+추가 offline 비용을 별도로 보고한다. `success_recovery`는 기존 실패를 성공으로
+바꾼 것이며, 성공한 기본 solve 대비 몇 % 빨라졌다는 뜻은 아니다.
+
+**재현성:** 기존 `src/`와 원래 실행 파일을 변경하지 않아 원래 source/environment 검사를
+그대로 수행한다. 추가 실행 파일의 SHA256, 추가 설정, 원본 파일 전체 hash 목록을
+`retry/manifest.json`에 별도로 저장하고, 합쳐진 search summary와 새 정답에도 연결한다.
+원본 `light_manifest.json`이나 freeze hash를 새 소스로 재작성하지 않는다. 현재 소스나
+환경이 원본과 다르면 거부하며 manifest 수동 편집으로 우회하지 않는다. 원본에서
+validation/freeze/final이 시작됐다면 이 재탐색 경로는 거부한다.
+
+새 run의 실제 구조:
+
+```text
+configuration.json, light_manifest.json, import_manifest.json  # 원본 그대로
+imported/, data/                                             # 같은 P, 같은 분할
+search/<case>/result.json, progress.json                      # 원본 420개 전체 기록
+search/summary.json                                         # 412개 재사용 + 8개 새 결과
+retry/manifest.json, source_summary.json, status.json          # 출처 및 재탐색 상태
+retry/cases/<failed-case>/progress.json, result.json           # 추가 후보와 잔차·시간
+```
+
+아래 명령은 원본 run 경로가 `artifacts/light_research_current.txt`에 저장되어 있다고
+가정한다. 원본과 같은 가상환경·스레드 설정에서 실행한다. 기존 경량 run에 `prepare`를
+다시 실행할 필요가 없다.
+
+```bash
+cd "$HOME/Desktop/adaptive-multigrid-light"
+source .venv/bin/activate
+git pull --ff-only origin residual-u-net-teacher
+export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
+export VECLIB_MAXIMUM_THREADS=1 NUMEXPR_NUM_THREADS=1
+```
+
+새 run 경로는 **처음 한 번만** 만든다. 재개 때 timestamp를 다시 만들지 않는다.
+
+```bash
+SOURCE_RUN="$(cat artifacts/light_research_current.txt)"
+RETRY_RUN="artifacts/light_retry_$(date +%Y%m%d_%H%M%S)"
+printf '%s\n' "$RETRY_RUN" > artifacts/light_retry_current.txt
+caffeinate -i python -u scripts/run_v6_7_light_smoother_retry.py --source-run "$SOURCE_RUN" --run-dir "$RETRY_RUN"
+```
+
+완료 출력은 `Recovered X/8; remaining failures: [...]`다. 추가 탐색에서도 실패가 남으면
+그대로 기록하고 fit은 계속 거부한다. **모든 정답이 유효해진 경우에만** 기존 학습·평가를
+새 run에서 진행한다. 두 모델 모두 같은 합쳐진 정답과 bounds를 사용한다.
+
+```bash
+LIGHT_RUN="$(cat artifacts/light_retry_current.txt)"
+SCRIPT="scripts/run_v6_7_light_smoother_study.py"
+caffeinate -i python -u "$SCRIPT" fit --run-dir "$LIGHT_RUN"
+```
+
+재탐색 중단 후 재개:
+
+```bash
+RETRY_RUN="$(cat artifacts/light_retry_current.txt)"
+caffeinate -i python -u scripts/run_v6_7_light_smoother_retry.py --run-dir "$RETRY_RUN" --resume
+```
+
+이후 benchmark/freeze/final은 원래 절차를 따르되 `LIGHT_RUN`에 위 새 경로를 사용한다.
+새 run에 원래 `search` 명령을 실행하면 좌표 탐색을 다시 하게 되므로 사용하지 않는다.
+새 summary의 `original_offline_seconds`, `retry_offline_seconds`, `offline_seconds`는
+각각 원래 탐색 비용, 추가 탐색 비용, 두 비용의 합이다. Snapshot 파일 복사 시간은 이
+수치 탐색 비용에 포함하지 않는다. 실제 배포의 setup/solve 시간에는 어떤 offline 탐색도
+넣지 않는다.
 
 ## 7. Mac M2 Pro: 새 폴더와 환경
 

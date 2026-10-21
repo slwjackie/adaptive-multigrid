@@ -1,0 +1,9 @@
+{
+  "version": "light-smoother-joint-retry-v1",
+  "grid": [0.8, 1.0, 1.2],
+  "candidate_count": 128,
+  "screen_cycles": 12,
+  "finalist_count": 12,
+  "confirmation_count": 3,
+  "seed": 2026102191
+}

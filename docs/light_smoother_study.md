@@ -355,6 +355,95 @@ caffeinate -i python -u scripts/run_v6_7_light_smoother_retry.py --run-dir "$RET
 수치 탐색 비용에 포함하지 않는다. 실제 배포의 setup/solve 시간에는 어떤 offline 탐색도
 넣지 않는다.
 
+## 유효한 정답만 지도학습에 사용하는 별도 정책
+
+`scripts/run_v6_7_light_smoother_subset.py`는 **학습 정답 생성에 실패한 A를 지도학습과
+표준화에서 제외**하는 명시적인 대안이다. 원래 엄격한 `fit`과 retry 경로는 변경하지
+않는다. 새 실행 파일에서 `prepare → fit → benchmark → freeze → final`을 진행한다.
+이미 끝난 search/P 학습을 다시 실행하지 않는다.
+
+- 완료된 원본 search 또는 완료된 retry를 출처로 사용할 수 있다. 진행 중인 search/retry를
+  미완료 사례의 제외 근거로 사용하지 않는다. 원본 search가 완료됐다면 별도의 retry가
+  진행 중이거나 중단되어 있어도 **원본 run**을 출처로 바로 진행할 수 있다.
+- 새 run에는 원래 420개 전체 search 기록과 P checkpoint, 개발 데이터 및 final 계획을
+  그대로 복사한다. 실패 기록을 삭제하거나 `label_eligible`을 바꾸지 않는다.
+- 실제 기록을 검증한 뒤 포함/제외 목록을 고정한다. 원본이 412개 성공·8개 실패이면
+  MLP와 ridge 모두 동일한 412개 A의 level 정답으로 학습한다. 모든 정답이 실패했거나,
+  기록·완료 상태·hash·P·solver provenance가 불일치하면 제외로 우회하지 않고 거부한다.
+- 두 모델의 표준화 통계는 **포함된 training level 행에서만** 계산한다. 제외한 A와
+  validation/final/OOD를 표준화에 사용하지 않는다. P의 기존 별도 학습 데이터도 그대로다.
+- Validation은 원래 140개 전체, final/OOD는 원래 계획 전체를 사용한다. 평가 실패,
+  fallback, 거부된 시도, 온라인 적응 비용은 원래 평가 구현대로 포함한다.
+- Family·격자별 개수와 제외 이유, 실패 원인별 측정 수, 잔차·시간 원본 파일 경로를
+  `subset/training_selection.json`에 저장한다. 포함/제외 목록과 원본 파일 hash를
+  fit provenance, validation evidence, final freeze에 연결한다. 평가를 시작한 뒤 학습
+  목록을 변경하거나 final에서 모델을 재선택하지 않는다.
+
+기본 research의 두 학습 집합은 각각 420개지만 **서로 다른 A**다. P 학습은 EM-line의
+420개이고 smoother 계수 정답은 별도로 생성한 420개다. 제공된 실패 목록 기준으로
+후자는 near_isotropic 60, aligned_anisotropy 60, rotated_anisotropy 58,
+variable_coefficient 59, checkerboard 59, local_patch 57, channel 59개가 남는다.
+집계는 이름을 하드코딩하지 않고 실제 데이터에서 계산한다. 원래 학습 데이터 plan에서
+8개를 지우는 것이 아니라 지도학습의 포함 목록만 별도로 관리한다.
+
+### Mac: 기존 search로부터 412개 학습 및 전체 평가
+
+기존과 같은 환경에서 업데이트한다. 아래 작업에는 추가 retry 완료가 필요 없다.
+진행 중인 retry를 생략하려면 해당 터미널에서 `Ctrl+C`로 중단할 수 있으며, 저장된
+retry 기록은 남는다. 원래 연구용 run을 출처로 지정한다.
+
+```bash
+cd "$HOME/Desktop/adaptive-multigrid-light"
+source .venv/bin/activate
+git pull --ff-only origin residual-u-net-teacher
+export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
+export VECLIB_MAXIMUM_THREADS=1 NUMEXPR_NUM_THREADS=1
+```
+
+```bash
+SCRIPT="scripts/run_v6_7_light_smoother_subset.py"
+SOURCE_RUN="$(cat artifacts/light_research_current.txt)"
+LIGHT_RUN="artifacts/light_subset_$(date +%Y%m%d_%H%M%S)"
+printf '%s\n' "$LIGHT_RUN" > artifacts/light_subset_current.txt
+python -u "$SCRIPT" prepare --source-run "$SOURCE_RUN" --run-dir "$LIGHT_RUN"
+```
+
+원래 기록이 412/420이면 `train 412/420; excluded 8; validation ALL 140`이 출력된다.
+완료된 retry 결과를 선택하면 복구된 문제도 유효한 정답으로 포함하므로 이 숫자는 달라질 수 있다.
+
+```bash
+caffeinate -i python -u "$SCRIPT" fit --run-dir "$LIGHT_RUN"
+caffeinate -i python -u "$SCRIPT" benchmark --run-dir "$LIGHT_RUN" --include-online --repeats 3 --warmups 1 --rhs-counts 1 4 16 64 --regimes cold warm multiple
+```
+
+이 비교에는 `fixed_C`, `em5_C`, `learned_P_line`, `learned_P_MLP`,
+`learned_P_regression`, 온라인 적응 2개가 포함된다. 원본 import에서 P 동일성을 확인한
+`frozen_P_line` CNN smoother도 계속 포함된다. 보고서의
+`benchmarks/validation/training_policy.md`와 `training_policy.json`에는
+“420개 중 유효한 탐색 정답을 얻은 412개로 지도학습했고 8개는 정답 생성 실패로 제외했다”는
+실제 집계를 명시한다. 각 final/OOD 보고서에도 같은 학습 정책을 기록한다.
+
+Validation 완료 뒤 같은 새 실행 파일로 freeze/final을 진행한다.
+
+```bash
+python -u "$SCRIPT" freeze --run-dir "$LIGHT_RUN" --repeats 3 --warmups 1 --rhs-counts 1 4 16 64 --regimes cold warm multiple
+caffeinate -i python -u "$SCRIPT" final --run-dir "$LIGHT_RUN"
+```
+
+재개할 때 새 timestamp를 만들지 않는다. 중단된 단계의 명령에 `--resume`을 붙인다.
+
+```bash
+SCRIPT="scripts/run_v6_7_light_smoother_subset.py"
+LIGHT_RUN="$(cat artifacts/light_subset_current.txt)"
+caffeinate -i python -u "$SCRIPT" fit --run-dir "$LIGHT_RUN" --resume
+```
+
+`prepare` 복사 도중 중단되었다면 `prepare --run-dir "$LIGHT_RUN" --resume`으로 이어간다.
+`benchmark`는 같은 옵션에 `--resume`, `final`도 `--resume`으로 재개한다. 완료된 final을
+다시 평가하지 않으며 freeze는 한 번만 실행한다. 이 새 run의 이후 단계에 원래
+`run_v6_7_light_smoother_study.py`를 사용하지 않는다. 원래 실행 파일의 strict fit 정책은
+여전히 실패 정답이 있으면 거부한다.
+
 ## 7. Mac M2 Pro: 새 폴더와 환경
 
 기존 실험 폴더·가상환경은 그대로 둔다. 아래는 Python 3.12가 설치된 Mac에서의 명령이다.

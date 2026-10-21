@@ -270,13 +270,18 @@ def search(output, *, resume=False):
                               resume=resume and (folder/'progress.json').exists())
             rows.append(dict(case=example.name, normalized_operator_digest=example.group_digest,
                 path=str((folder/'result.json').relative_to(out)), sha256=digest_file(folder/'result.json'),
-                confirmed_improvement=row['confirmed_improvement'], offline_seconds=row['offline_seconds']))
+                confirmed_improvement=row['confirmed_improvement'],
+                label_eligible=row['label_eligible'],
+                selection_outcome=row['selection_outcome'],
+                offline_seconds=row['offline_seconds']))
             write_json(out/'search/progress.json', dict(status='running', completed_cases=index+1,
                                                       total_cases=len(training)))
             print(f'[SEARCH light] {index+1}/{len(training)} {example.name}: '
                   f'confirmed_improvement={row["confirmed_improvement"]}', flush=True)
         summary = dict(version=VERSION, status='complete', rows=rows,
             improved_cases=sum(r['confirmed_improvement'] for r in rows), total_cases=len(rows),
+            eligible_cases=sum(r['label_eligible'] for r in rows),
+            failed_cases=[r['case'] for r in rows if not r['label_eligible']],
             offline_seconds=sum(r['offline_seconds'] for r in rows),
             fallback_allowed=False, use='training-only restricted-search oracle, not a deployable model')
         write_json(out/'search/summary.json', summary)
@@ -296,6 +301,14 @@ def _search_data(out, training):
         record = _read(out/row['path'])
         if record['status'] != 'complete' or record['fallback_allowed']:
             raise ValueError('Search labels must be completed without fallback')
+        confirmation = record['confirmation']
+        selected = confirmation['selected_index']
+        if (record.get('label_eligible') is not True
+                or record.get('selected_candidate_success') is not True
+                or not confirmation['summaries'][selected]['eligible']):
+            raise ValueError(f'No successful search label for {example.name}; '
+                'failed operator and trials remain recorded. Use a new search '
+                'configuration/run; do not drop this case or fit its failed baseline.')
         xs.extend(record['features'])
         ys.extend(record['selected_coefficients'])
         operators.append(example.group_digest)

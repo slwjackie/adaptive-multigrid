@@ -96,11 +96,14 @@ def measure_raw_solve(prepared, rhs, cfg):
     initial = stable_norm(rhs)
     threshold = max(cfg.mg.absolute_tolerance, cfg.mg.tolerance*initial)
     history = [initial]
-    reason, error, cycles = 'max_cycles', None, 0
+    reason, error, cycles, completed_cycles = 'max_cycles', None, 0, 0
     try:
         while history[-1] > threshold and cycles < cfg.mg.max_cycles:
-            x = prepared.raw_cycle(x, rhs)
+            # Count work when it is attempted, including a cycle which raises.
+            # A partial/failed cycle has no fabricated residual-history entry.
             cycles += 1
+            x = prepared.raw_cycle(x, rhs)
+            completed_cycles += 1
             norm = stable_norm(rhs - prepared.a @ x)
             history.append(norm)
             if not np.isfinite(norm):
@@ -116,7 +119,8 @@ def measure_raw_solve(prepared, rhs, cfg):
         success = False
         reason, error = 'raw_cycle_exception', f'{type(exc).__name__}: {exc}'
     wall = perf_counter() - started
-    return json_safe(dict(success=success, cycles=cycles, residual_history=history,
+    return json_safe(dict(success=success, cycles=cycles, completed_cycles=completed_cycles,
+        residual_history=history,
         stopping_threshold=threshold, final_true_residual=history[-1],
         wall_seconds=wall, stop_reason=reason, error=error,
         fallback_used=False, online_adaptation_used=False))
@@ -296,8 +300,32 @@ def search_case(example, components, cfg, settings, output, *, resume=False):
         proposed = current.copy()
         candidates = [ones] if np.array_equal(ones, current) else [ones, current]
         confirmation_scores = evaluate('confirmation', candidates, 'confirmation')
+        for candidate, score in zip(candidates, confirmation_scores):
+            # Confirmation success cannot erase an earlier failed solve of
+            # this exact full coefficient vector on optimization RHS.
+            key = _coefficient_key(candidate)
+            earlier = [trial for trial in state['trials']
+                       if trial['partition'] == 'optimization'
+                       and _coefficient_key(trial['coefficients']) == key]
+            phases = sorted({trial['phase'] for trial in earlier})
+            evidence = [candidate_summary([trial for trial in earlier if trial['phase'] == phase],
+                         repeats=spec['repeats'], rhs_count=spec['rhs_count']) for phase in phases]
+            optimization_eligible = bool(evidence and all(item['eligible'] for item in evidence))
+            score['confirmation_eligible'] = score['eligible']
+            score['optimization_eligible'] = optimization_eligible
+            score['optimization_measurement_count'] = len(earlier)
+            score['eligible'] = bool(score['eligible'] and optimization_eligible)
         winner, reason = choose_candidate(confirmation_scores, 0, spec['minimum_improvement'])
         selected = candidates[winner].copy()
+        selected_success = bool(confirmation_scores[winner]['eligible'])
+        # Keeping the baseline when everything fails is a safe representation
+        # of "no new coefficients", not a successful oracle label. Retain the
+        # case and its full ledger, but explicitly prevent downstream fitting
+        # from claiming that the failed coefficient vector is an optimum.
+        outcome = ('confirmed_time_improvement' if winner != 0 and reason == 'measured_time_improvement'
+                   else 'success_recovery' if winner != 0 and reason == 'success_recovery'
+                   else 'baseline_retained' if selected_success
+                   else 'no_successful_candidate')
         prepared.set_coefficients(selected)
         result = json_safe(dict(version=VERSION, status='complete', manifest=manifest,
             features=np.asarray(prepared.features).tolist(),
@@ -305,6 +333,8 @@ def search_case(example, components, cfg, settings, output, *, resume=False):
             optimization_selected_coefficients=proposed.tolist(),
             confirmed_improvement=winner != 0,
             timing_improvement_confirmed=winner != 0 and reason == 'measured_time_improvement',
+            selected_candidate_success=selected_success, label_eligible=selected_success,
+            selection_outcome=outcome,
             optimization_rounds=rounds,
             confirmation=dict(candidates=[c.tolist() for c in candidates], summaries=confirmation_scores,
                               selected_index=winner, reason=reason),

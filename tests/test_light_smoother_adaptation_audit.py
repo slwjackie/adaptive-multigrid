@@ -6,6 +6,7 @@ import time
 import numpy as np
 import scipy.sparse as sp
 import torch
+import pytest
 
 from adaptive_mg.data import make_examples
 from adaptive_mg.v67.config import AdaptiveConfig
@@ -100,3 +101,35 @@ def test_first_ttt_graph_preparation_is_inside_warm_solve_time(monkeypatch):
     assert record['total_setup_seconds'] == 0.
     assert record['solve_seconds'] == record['wall_seconds']
     assert record['online_adaptation_accepted']+record['online_adaptation_rejected'] == 1
+
+
+@pytest.mark.parametrize('failure', ['probe', 'gradient'])
+def test_failed_online_work_is_counted_and_previous_coefficients_restored(failure, monkeypatch):
+    example, p, cfg, predictor, online = inputs()
+    prepared = runtime.PreparedLightMG(example.a, example.n, p, cfg, predictor, online)
+    before = prepared.get_coefficients()
+
+    def failed(*args, **kwargs):
+        raise RuntimeError('injected partial cycle failure')
+
+    monkeypatch.setattr(prepared, 'raw_cycle' if failure == 'probe' else 'differentiable_cycle', failed)
+    prepared._adapt(np.zeros_like(example.b), example.b)
+    event = prepared.online_events[-1]
+    counters = event['counters']
+    assert not event['accepted']
+    assert counters['online_adaptation_rejected'] == 1
+    assert event['seconds'] > 0
+    np.testing.assert_array_equal(prepared.get_coefficients(), before)
+    assert counters['online_probe_cycles'] == 1
+    if failure == 'probe':
+        assert counters['online_probe_completed_cycles'] == 0
+        trial = event['trials'][0]
+        assert trial['attempted_cycles'] == 1 and trial['completed_cycles'] == 0
+        assert not trial['success'] and trial['residual'] is None
+        assert 'injected partial cycle failure' in trial['error']
+        assert trial['seconds'] > 0
+    else:
+        assert counters['online_probe_completed_cycles'] == 1
+        assert counters['online_gradient_vcycles'] == 1
+        assert counters['online_gradient_completed_vcycles'] == 0
+        assert counters['online_gradient_steps'] == 0

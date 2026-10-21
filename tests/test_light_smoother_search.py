@@ -69,6 +69,8 @@ def test_full_coefficient_search_and_confirmed_labels(monkeypatch, tmp_path):
     monkeypatch.setattr(search, 'measure_raw_solve', recorded_time)
     result = search.search_case(*data(), settings(), tmp_path/'case')
     assert result['confirmed_improvement'] and result['timing_improvement_confirmed']
+    assert result['selected_candidate_success'] and result['label_eligible']
+    assert result['selection_outcome'] == 'confirmed_time_improvement'
     np.testing.assert_allclose(result['selected_coefficients'], [[.8, 1.], [.8, 1.]])
     assert len(result['optimization_rounds']) == 2
     assert len(result['trials']) == (9*2 + 2)*2*2
@@ -114,6 +116,43 @@ def test_confirmation_rejects_overfit_coefficients(monkeypatch, tmp_path):
     assert not result['confirmed_improvement']
     np.testing.assert_array_equal(result['selected_coefficients'], np.ones((2, 2)))
     assert any(not row['success'] for row in result['trials'])
+
+
+def test_all_failed_candidates_remain_recorded_but_cannot_be_training_labels(monkeypatch, tmp_path):
+    monkeypatch.setattr(search, 'PreparedLightMG', FakePrepared)
+
+    def failed(prepared, b, config):
+        value = recorded_time(prepared, b, config)
+        value.update(success=False, final_true_residual=1., stop_reason='max_cycles')
+        return value
+
+    monkeypatch.setattr(search, 'measure_raw_solve', failed)
+    result = search.search_case(*data(), settings(), tmp_path/'failed')
+    assert result['status'] == 'complete'  # The search completed, the solve did not.
+    assert not result['selected_candidate_success'] and not result['label_eligible']
+    assert result['selection_outcome'] == 'no_successful_candidate'
+    assert not result['confirmed_improvement']
+    np.testing.assert_array_equal(result['selected_coefficients'], np.ones((2, 2)))
+    assert result['trials'] and all(not row['success'] for row in result['trials'])
+    assert search.search_case(*data(), settings(), tmp_path/'failed', resume=True) == result
+
+
+def test_confirmation_success_cannot_hide_optimization_failure(monkeypatch, tmp_path):
+    example, components, cfg = data()
+    optimize = search.search_rhs(example, count=2, seed=9, partition='optimization')
+    monkeypatch.setattr(search, 'PreparedLightMG', FakePrepared)
+
+    def measured(prepared, b, config):
+        value = recorded_time(prepared, b, config)
+        if any(np.array_equal(b, rhs) for rhs in optimize):
+            value.update(success=False, final_true_residual=1., stop_reason='max_cycles')
+        return value
+
+    monkeypatch.setattr(search, 'measure_raw_solve', measured)
+    result = search.search_case(example, components, cfg, settings(), tmp_path/'failed')
+    baseline = result['confirmation']['summaries'][0]
+    assert baseline['confirmation_eligible'] and not baseline['optimization_eligible']
+    assert not result['label_eligible'] and not result['selected_candidate_success']
 
 
 def test_measurement_resume_keeps_completed_timings(monkeypatch, tmp_path):
@@ -168,6 +207,22 @@ def test_raw_tolerance_measurement_never_calls_safe_solver():
     assert result['success'] and 2 <= result['cycles'] <= 3
     assert not result['fallback_used']
     assert len(result['residual_history']) == result['cycles']+1
+
+
+def test_failed_raw_cycle_is_counted_as_executed_work():
+    _, _, cfg = data()
+
+    class FailingRaw:
+        a = np.eye(2)
+
+        def raw_cycle(self, x, b):
+            raise FloatingPointError('attempted cycle failed')
+
+    result = search.measure_raw_solve(FailingRaw(), np.ones(2), cfg)
+    assert not result['success'] and result['cycles'] == 1
+    assert result['completed_cycles'] == 0
+    assert len(result['residual_history']) == 1
+    assert result['wall_seconds'] > 0 and not result['fallback_used']
 
 
 def test_real_n7_search_smoke_reuses_raw_hierarchy(tmp_path):

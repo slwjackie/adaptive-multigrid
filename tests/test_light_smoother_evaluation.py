@@ -122,6 +122,8 @@ def test_deployment_setup_failure_uses_and_reports_classical_recovery():
     assert record['setup_fallback'] and record['setup_fallback_reason']
     assert record['setup_failures'] == 1
     assert record['fallback_count'] > 0
+    assert record['fallback_count'] == record['classical_safety_cycles']
+    assert record['fallback_event_count'] == 1
     assert not record['actual_neural_used']
     assert record['total_setup_seconds'] > 0
     assert record['wall_seconds'] >= record['total_setup_seconds']
@@ -237,3 +239,88 @@ def test_selection_refuses_excluded_setup():
     result['rows'][0]['runs']['learned_P_MLP']['multiple']['1'][0]['setup_scope'] = 'excluded_prepared_operator'
     with pytest.raises(ValueError, match='exclude setup'):
         ev.select_light_candidate(result)
+
+
+@pytest.mark.parametrize('arm_name', ['fixed_C', 'frozen_P_line'])
+def test_reference_warm_uses_same_independent_prime_protocol(arm_name):
+    cfg, baseline, example, arms = setup()
+    arms['frozen_P_line'] = dict(model=arms['learned_P_line']['model'],
+                                branch='H_SP', selector=False)
+    validated, _ = ev._validated_arms(arms, cfg, baseline)
+    arm = validated[arm_name]
+    record = ev.measured_light(example, arm, arm['config'], baseline, regime='warm')
+    assert record['successful']
+    assert record['independent_warm_prime']
+    assert record['warm_prime_results'][0]['rhs_digest'] not in record['rhs_digests']
+    assert record['total_setup_seconds'] == 0.
+    assert record['wall_seconds'] == record['solve_seconds']
+    assert record['online_adaptation_calls'] == 0
+    assert record['solver_executed_cycles'] == record['executed_cycles'] > 0
+    if arm_name == 'fixed_C':
+        assert record['fallback_count'] == record['fallback_event_count'] == 0
+    else:
+        assert record['fallback_count'] == record['counters']['classical_cycles']
+
+
+def test_cnn_reference_separately_reports_smoother_and_p_size():
+    cfg, baseline, _, arms = setup()
+    model = arms['learned_P_line']['model']
+    arms['frozen_P_line'] = dict(model=model, branch='H_SP', selector=False)
+    _, meta = ev._validated_arms(arms, cfg, baseline)
+    cnn, scalar = meta['frozen_P_line'], meta['learned_P_line']
+    assert cnn['smoother_parameter_count'] == sum(p.numel() for p in model.smoother.parameters())
+    assert cnn['smoother_parameter_count'] == cnn['smoother_nn_parameter_count'] > 242
+    assert scalar['smoother_parameter_count'] == 0
+    assert cnn['p_parameter_count'] == scalar['p_parameter_count']
+    assert cnn['parameter_count'] == cnn['p_parameter_count'] + cnn['smoother_parameter_count']
+
+
+@pytest.mark.parametrize('branch,model_present', [('H_P', True), ('C', False)])
+def test_frozen_cnn_label_cannot_silently_use_another_arm(branch, model_present):
+    cfg, baseline, _, arms = setup()
+    arms['frozen_P_line'] = dict(model=arms['learned_P_line']['model'] if model_present else None,
+                                branch=branch, selector=False)
+    with pytest.raises(ValueError, match='CNN-line H_SP'):
+        ev._validated_arms(arms, cfg, baseline)
+
+
+
+def test_failed_constructor_time_remains_setup_time(monkeypatch):
+    cfg, baseline, example, arms = setup()
+    clock = [0.]
+    def fail(*args):
+        clock[0] += 7.
+        raise RuntimeError('constructor failed')
+    monkeypatch.setattr(ev, 'perf_counter', lambda: clock[0])
+    monkeypatch.setattr(ev, '_construct_light', fail)
+    record = ev.measured_light(example, arms['learned_P_line'], cfg, baseline)
+    assert not record['successful']
+    assert record['wall_seconds'] == record['total_setup_seconds'] == 7.
+    assert record['solve_seconds'] == 0.
+    assert 'constructor failed' in record['error']
+
+
+def test_reference_lazy_bank_setup_is_partitioned_without_double_count(monkeypatch):
+    cfg, baseline, example, arms = setup()
+    clock = [0.]
+    class Prepared:
+        config = cfg
+        classical = learned = None
+        def solve(self, b, x):
+            clock[0] += 7.  # Two seconds of lazy bank setup plus five solving.
+            return dict(verified_success=True, convergence_factor=.2,
+                cycles=2, executed_cycles=2, stats=dict(branch_setup_seconds=2.), setup_stats={})
+    def construct(*args):
+        clock[0] += 3.
+        return Prepared()
+    monkeypatch.setattr(ev, 'perf_counter', lambda: clock[0])
+    monkeypatch.setattr(ev, '_construct', construct)
+    monkeypatch.setattr(ev, '_result_record', lambda result, *args: result)
+    record = ev.measured_light(example, arms['fixed_C'], cfg, baseline)
+    assert record['successful']
+    assert record['wall_seconds'] == 10.
+    assert record['constructor_seconds'] == 3.
+    assert record['neural_setup_seconds'] == 2.
+    assert record['total_setup_seconds'] == record['solve_seconds'] == 5.
+    assert record['all_executed_cycles'] == record['accepted_cycles'] == 2
+    assert record['solver_executed_cycles'] == 2

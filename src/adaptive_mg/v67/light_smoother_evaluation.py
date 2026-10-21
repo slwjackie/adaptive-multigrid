@@ -22,10 +22,10 @@ from .limited import initialize_timing_runtime, vector_digest
 from .research_data import HOLDOUT, _check_claim, _hash, _write_json
 from .research_evaluation import (
     _arm_config, _counter_sum, _independent_em_reference, _model_metadata,
-    _result_record, aggregate_research, manufactured_rhs, measured_research,
+    _result_record, aggregate_research, manufactured_rhs, _construct,
 )
 
-VERSION = 'light-smoother-measured-v1'
+VERSION = 'light-smoother-measured-v2'
 REGIMES = ('cold', 'warm', 'multiple', 'warm_multiple')
 LIGHT_ARMS = ('learned_P_line', 'learned_P_MLP', 'learned_P_regression',
               'learned_P_MLP_TTT', 'learned_P_regression_online')
@@ -35,7 +35,9 @@ EXTRA_METRICS = ('online_adaptation_seconds', 'online_adaptation_calls',
     'feature_seconds', 'mlp_inference_calls', 'coefficient_generation_count',
     'coefficient_change_count', 'coefficient_delta_l2', 'accepted_cycles',
     'hierarchy_rebuilds', 'factor_rebuilds', 'all_executed_cycles',
-    'online_gradient_vcycles', 'online_gradient_steps')
+    'online_gradient_vcycles', 'online_gradient_steps',
+    'online_probe_completed_cycles', 'online_gradient_completed_vcycles',
+    'fallback_event_count', 'classical_safety_cycles')
 
 
 def _construct_light(example, arm, cfg):
@@ -51,14 +53,13 @@ def measured_light(example, arm, cfg, baseline, *, regime='cold', rhs_count=1):
     """One directly timed workload; exact solutions are used only afterwards."""
     if regime not in REGIMES or (regime not in ('multiple', 'warm_multiple') and rhs_count != 1):
         raise ValueError('Cold/warm use RHS=1; multiple uses an actual RHS batch')
-    if not arm.get('light', False):
-        record = measured_research(example, arm, cfg, baseline,
-                                   regime=regime, rhs_count=rhs_count)
-        record.update({key: 0 for key in EXTRA_METRICS})
-        record['accepted_cycles'] = sum(row.get('cycles', 0) for row in record['rhs_results'])
-        record['all_executed_cycles'] = record['executed_cycles']
-        record['online_timing_scope'] = 'online adaptation disabled'
-        return record
+    light = bool(arm.get('light', False))
+    def construct():
+        # One measurement protocol for every arm. In particular a classical
+        # or CNN reference must not prime on the timed RHS while scalar arms
+        # prime on a distinct one. Legacy evaluators remain unchanged.
+        return (_construct_light(example, arm, cfg) if light else
+                _construct(example, arm, cfg, baseline, rhs_count))
     rhs, exacts = manufactured_rhs(example, rhs_count)
     warm = regime in ('warm', 'warm_multiple')
     prepared = None
@@ -68,12 +69,14 @@ def measured_light(example, arm, cfg, baseline, *, regime='cold', rhs_count=1):
     if warm:
         prime_start = perf_counter()
         try:
-            prepared = _construct_light(example, arm, cfg)
-            prepared.prepare_warm()
-            configured_online = prepared.online_enabled
+            prepared = construct()
+            if hasattr(prepared, 'prepare_warm'):
+                prepared.prepare_warm()
+            configured_online = prepared.online_enabled if light else False
             # The priming solve cannot consume the adaptation budget or tune
             # coefficients for the measured RHS. It uses a distinct RHS too.
-            prepared.online_enabled = False
+            if light:
+                prepared.online_enabled = False
             prime_rhs, prime_exact = manufactured_rhs(example, rhs_count + 1)
             prime_b, prime_u = prime_rhs[-1], prime_exact[-1]
             if vector_digest(prime_b) in {vector_digest(b) for b in rhs}:
@@ -81,8 +84,9 @@ def measured_light(example, arm, cfg, baseline, *, regime='cold', rhs_count=1):
             prime = prepared.solve(prime_b, np.zeros_like(prime_b))
             prime_seconds = perf_counter() - prime_start
             prime_records = [_result_record(prime, example, prime_b, prime_u, prepared.config)]
-            prepared.reset_online()
-            prepared.online_enabled = configured_online
+            if light:
+                prepared.reset_online()
+                prepared.online_enabled = configured_online
         except (ValueError, RuntimeError, FloatingPointError, np.linalg.LinAlgError) as exc:
             prime_seconds = perf_counter() - prime_start
             failure = f'{type(exc).__name__}: {exc}'
@@ -91,8 +95,11 @@ def measured_light(example, arm, cfg, baseline, *, regime='cold', rhs_count=1):
         if failure is not None:
             raise RuntimeError('Warm preparation failed: ' + failure)
         if prepared is None:
-            prepared = _construct_light(example, arm, cfg)
-            construction = perf_counter() - start
+            try:
+                prepared = construct()
+            finally:
+                # A constructor that fails still consumes setup time.
+                construction = perf_counter() - start
         if regime in ('multiple', 'warm_multiple'):
             results = prepared.solve_many(rhs, np.zeros_like(rhs))
         else:
@@ -127,14 +134,25 @@ def measured_light(example, arm, cfg, baseline, *, regime='cold', rhs_count=1):
     last_stats = checked[-1].get('stats', {}) if checked else {}
     extra['coefficient_delta_l2'] = last_stats.get('coefficient_distance_from_ones', 0.)
     extra['accepted_cycles'] = sum(row.get('cycles', 0) for row in checked)
+    # Legacy and scalar banks assign their raw fallback_cycles differently.
+    # Use shared primitive counters so reference and light arms report the
+    # same safety work, including the lock tail, excluding ordinary C solves.
+    extra['classical_safety_cycles'] = max(0, counters.get('classical_cycles', 0)
+        - counters.get('classical_bypass_cycles', 0))
+    extra['fallback_event_count'] = (counters.get('lock_count', 0)
+        + counters.get('gate_closed_fallback_cycles', 0))
+    # Light banks are eager; reference CNN banks can be built lazily in the
+    # first solve. Their instrumented setup is already inside elapsed.
+    neural_setup = counters.get('light_setup_seconds', 0.) if light else counters.get('branch_setup_seconds', counters.get('nn_setup_seconds', 0.))
+    total_setup = construction if light else construction + neural_setup
     record = dict(regime=regime, rhs_count=rhs_count, wall_seconds=elapsed,
         seconds_per_rhs=elapsed/rhs_count, success=success, successful=success,
         error=failure, convergence_factor=contraction,
-        constructor_seconds=construction, total_setup_seconds=construction,
-        classical_setup_seconds=counters.get('classical_setup_seconds', 0.),
-        neural_setup_seconds=counters.get('light_setup_seconds', 0.),
-        solve_seconds=max(0., elapsed-construction),
-        solve_seconds_scope='observed wall minus constructor; adaptation/guards/rejected trials are included',
+        constructor_seconds=construction, total_setup_seconds=total_setup,
+        classical_setup_seconds=counters.get('classical_setup_seconds', 0.) if light else construction,
+        neural_setup_seconds=neural_setup,
+        solve_seconds=max(0., elapsed-total_setup),
+        solve_seconds_scope='observed wall minus constructor and any lazy bank setup; adaptation/guards/rejected trials are included',
         online_timing_scope='online_adaptation_seconds is a subset of solve_seconds, not added to wall_seconds',
         warm_prime_seconds=prime_seconds, warm_prime_results=prime_records,
         warm_prime_counters=_counter_sum(prime_records),
@@ -146,14 +164,16 @@ def measured_light(example, arm, cfg, baseline, *, regime='cold', rhs_count=1):
         operator_digest=example.digest, normalized_operator_digest=example.group_digest,
         rhs_digests=[vector_digest(b) for b in rhs],
         exact_digests=[vector_digest(x) for x in exacts],
-        requested_branch=arm['branch'], selection=baseline.selection_record(),
+        requested_branch=arm['branch'], selection=(arm.get('rules') or baseline).selection_record(),
         selector_in_wall_time=False, classical_hierarchy=classical, learned_hierarchy=learned,
         operator_complexity=sum(row['operator_nnz'] for row in hierarchy)/example.a.nnz if hierarchy else None,
         transfer_complexity=sum(row['prolongation_nnz'] for row in hierarchy)/example.a.shape[0] if hierarchy else None,
         executed_cycles=sum(row.get('executed_cycles', 0) for row in checked),
         accepted_neural_cycles=accepted_neural, actual_neural_used=accepted_neural > 0,
         rollback_count=counters.get('rollback_count', 0),
-        fallback_count=counters.get('fallback_cycles', 0),
+        fallback_count=extra['classical_safety_cycles'],
+        fallback_count_scope='all classical safety cycles including recovery and lock tail; excludes ordinary classical baseline',
+        fallback_event_count_scope='safety lock entries (setup failure, rejection, near-tolerance) plus gate-closed decisions',
         setup_failures=counters.get('setup_failures', 0),
         operator_generation_seconds=counters.get('operator_generation_seconds', 0.),
         controller_seconds=0., detector_seconds=0., teacher_evaluation_seconds=0.,
@@ -165,7 +185,7 @@ def measured_light(example, arm, cfg, baseline, *, regime='cold', rhs_count=1):
         ttt_updates_applied=counters.get('online_gradient_steps', 0),
         ttt_adopted=extra['online_adaptation_accepted'] > 0,
         measurement_config=actual_cfg.to_dict(), **extra)
-    record.update(solver_executed_cycles=counters.get('solver_executed_cycles', 0),
+    record.update(solver_executed_cycles=record['executed_cycles'],
         setup_fallback=bool(getattr(prepared, 'setup_failure', None)),
         setup_fallback_reason=getattr(prepared, 'setup_failure', None),
         coefficient_delta_from_prediction_l2=last_stats.get('coefficient_distance_from_prediction', 0.))
@@ -186,6 +206,14 @@ def _metadata(arm, cfg, baseline):
             bounds=list(arm.get('bounds', (.8, 1.2))), online=arm.get('online'),
             p_signature=arm['model'].expert_signature('transfer'))
         value['parameter_count'] += count
+    elif arm.get('model') is not None:
+        value.update(smoother_parameter_count=sum(p.numel() for p in arm['model'].smoother.parameters()),
+            smoother_nn_parameter_count=sum(p.numel() for p in arm['model'].smoother.parameters()),
+            p_signature=arm['model'].expert_signature('transfer'))
+    else:
+        value.update(smoother_parameter_count=0, smoother_nn_parameter_count=0)
+    value['p_parameter_count'] = (sum(p.numel() for p in arm['model'].transfer.parameters())
+                                  if arm.get('model') is not None else 0)
     return {**value, 'light': bool(arm.get('light')), 'branch': arm['branch'],
         'selector': False, 'config': cfg.to_dict(),
         'baseline_digest': (arm.get('rules') or baseline).digest(),
@@ -228,7 +256,10 @@ def _validated_arms(arm_specs, cfg, baseline):
                     raise ValueError('Online arm must explicitly enable its matching adaptation method')
             elif online.get('enabled', False):
                 raise ValueError('Basic arms must keep online adaptation disabled')
-        elif spec.get('branch') != 'C' and name != 'frozen_P_line':
+        elif name == 'frozen_P_line':
+            if spec.get('branch') != 'H_SP' or spec.get('model') is None:
+                raise ValueError('frozen_P_line requires an actual CNN-line H_SP checkpoint')
+        elif spec.get('branch') != 'C':
             raise ValueError('Only frozen_P_line is an optional non-light learned arm')
         if spec.get('model') is not None:
             signatures.add(spec['model'].expert_signature('transfer'))
@@ -250,11 +281,14 @@ def _validated_arms(arm_specs, cfg, baseline):
     return arms, metadata
 
 
-def _extra_table(report, rows, regimes, rhs_counts):
+def _extra_table(report, rows, regimes, rhs_counts, metadata):
     lookup = {row['example']['name']: row for row in rows}
     for entry in report['table']:
         runs = lookup[entry['case']]['runs'][entry['arm']][entry['regime']][str(entry['rhs_count'])]
         entry.update({key: _median(runs, key) for key in EXTRA_METRICS})
+        meta = metadata[entry['arm']]
+        entry.update({key: meta.get(key, 0) for key in
+            ('p_parameter_count', 'smoother_parameter_count', 'smoother_nn_parameter_count')})
 
 
 def paired_effects(result):
@@ -399,7 +433,7 @@ def evaluate_light(examples, arm_specs, cfg, baseline, out, *, repeats=3, warmup
                 _write_json(output/'progress.json', dict(status='running', completed_measurements=completed, total_measurements=total))
     report = aggregate_research(rows, metadata, repeats=repeats, regimes=regimes,
                                 rhs_counts=rhs_counts, reference_arm='fixed_C')
-    _extra_table(report, rows, regimes, rhs_counts)
+    _extra_table(report, rows, regimes, rhs_counts, metadata)
     report.update(rows=rows, manifest=manifest, output_dir=str(output), reference_arm='fixed_C',
                   warmup_wall_seconds_this_invocation=warmup_wall)
     report['paired_effects'] = paired_effects(report)

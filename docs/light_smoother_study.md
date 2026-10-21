@@ -133,6 +133,13 @@ Research 기본값은 pass 최대 2회, 최적화 RHS 3개, 별도 확인 RHS 3�
 확인되지 않으면 전체 `(1,1)`을 유지한다. 기본값이 실패했고 후보가 모두 성공했다면
 성공 복구로 별도 표시한다. 실패한 후보·문제·걸린 시간도 저장한다.
 
+최종 후보는 확인 RHS뿐 아니라 동일한 전체 계수 조합으로 이미 수행한 최적화 RHS
+측정도 모두 성공해야 한다. 모든 후보가 실패하면 `(1,1)`은 단지 보존할 기본값이며,
+`label_eligible=false`, `selection_outcome=no_successful_candidate`로 기록한다.
+`search/summary.json`의 `failed_cases`에 문제를 남기고 **fit을 중단**한다. 실패한 A를
+제거하거나 그 기본값을 성공한 탐색 정답으로 학습하지 않는다. 탐색 범위·예산 등을
+변경하려면 기록을 보존한 채 새 설정과 새 run으로 시작한다.
+
 `search/<case>/result.json`에 모든 계수 조합, 성공 여부, cycle 수, 잔차 이력,
 측정 시간, 최종 선택과 기본값 대비 비교를 남긴다. `progress.json`은 완료된 **각 측정**을
 기록한다. 재개하면 완료된 측정을 다시 재지 않으며, 중단 순간 실행 중이던 측정은
@@ -221,6 +228,9 @@ NN 없는 온라인 적응은 현재 계수에 ±step을 주는 소수 후보를
 온라인 적응 arm의 warm priming은 적응을 끈 상태에서 별도 RHS로 수행한다. Timed solve는
 원래 predictor 계수와 새 적응 예산에서 시작한다. 이미 적응한 계층을 공짜로 사용하는
 warm 결과와 혼합하지 않는다.
+Classical 및 기존 CNN 비교군에도 같은 별도 RHS priming 규칙을 적용한다. 기존 실험의
+평가 함수는 변경하지 않고, 새 경량 실험의 평가 프로토콜만 `light-smoother-measured-v2`로
+구분한다. 따라서 v1 평가 결과에 v2 측정을 resume로 추가할 수 없다.
 
 Fallback용 classical 계층, learned P CNN, 실제 Galerkin 계층, 줄 factor, 특징,
 MLP/회귀 예측은 setup 시간에 포함한다. 온라인 adaptation, 후보 검증, 거부한 시도,
@@ -236,6 +246,13 @@ Predictor 호출·계수 변경·온라인 채택/거부·factor 재생성 등�
 `all_executed_cycles`는 온라인 후보 및 gradient forward V-cycle까지 포함한다.
 Backward 계산비용은 시간에 포함하며 별도 V-cycle 수로 환산하지 않는다.
 `accepted_cycles`는 실제 해에 채택한 cycle 수다.
+도중에 예외가 난 후보·gradient V-cycle도 실행 시도로 센다. 완료 횟수는
+`online_probe_completed_cycles`, `online_gradient_completed_vcycles`로 구분하고,
+실패한 후보의 오류와 시간도 온라인 event에 보존한다.
+`fallback_event_count`는 safety lock 진입(setup 실패·수치적 거절·near-tolerance)과
+gate-closed 결정을 센다. `classical_safety_cycles` 및 `fallback_count`는 실제 classical
+복구와 이후 lock tail의 cycle 수이며, `fixed_C`/`em5_C`의 정상 계산은 제외한다.
+이 정의를 CNN과 경량 비교군에 동일하게 적용한다.
 
 선택은 설정의 `target_rhs_count`(기본 1)에 해당하는 **multiple setup+solve**로 한다.
 모든 평가 문제·RHS·반복의 성공을 먼저 요구하며, 실패를 제거한 속도 평균만으로 우승자를
@@ -446,22 +463,33 @@ python -m pytest -q tests/test_light_smoother_*.py
 가까우면 예측 overhead만 추가될 수 있고, 온라인 적응은 추가 계산을 회수하지 못해
 총시간을 늘릴 수 있다.
 
-구현 검증용 `n=7`, train/validation 각각 7개, fit 4 updates의 CLI smoke에서
-8개 비교군의 224개 측정이 완료되고 모두 7/7 성공했다. 이 실행의 탐색에서는 확인용
-RHS에서 시간 개선된 조합이 0/7이어서 정답 계수를 `(1,1)`로 유지했고, MLP/ridge도
-기본값을 출력했다. 기본 온라인 trigger는 발동하지 않았다. 따라서 이 smoke로 모델의
-학습 효과나 TTT 속도 이득을 주장할 수 없으며, setup+solve 선택은 `fixed_C`였다.
-실제 trigger·두 방식의 적응·거부·checkpoint 불변·warm 비용 집계는 별도 테스트로 검사한다.
+2026-10-21 재검증에서는 `n=7`, train/validation 각각 7개, fit 4 updates의
+CLI smoke를 실행했다. 동일 P의 기존 CNN을 포함한 **8개 비교군, 224개 workload 측정,
+392개 RHS 풀이가 모두 성공**했다. 탐색에서 확인용 RHS까지 통과한 조합은 1/7이었으나,
+배포 setup+solve 선택은 **`fixed_C`**였다. 따라서 속도 향상이 확인됐다고 보고하지 않는다.
+한 반복의 작은 smoke timing은 통계적 성능 증거가 아니다.
+
+기본 온라인 trigger는 0회였고 계층/factor 재생성도 0회였다. 따라서 이 smoke로 TTT의
+추가 효과를 평가할 수 없다. 강제 trigger를 사용한 별도 테스트에서 두 방식의 적응,
+거부·실패한 후보의 비용, checkpoint 불변, warm의 graph 생성/forward/backward 비용을
+검사했다. Benchmark `--resume`는 기존 224개 측정을 검증해 재사용했다.
 
 배포 setup 중 P/특징/계수 생성이 실패하면 이미 준비한 classical 계층으로 복구하고
 실패 비용과 이유를 기록한다. 오프라인 탐색은 이를 허용하지 않으며 setup 실패가 나면
 해당 A를 기록하고 중단한다. 그 A를 제거하거나 허위 학습 label로 대체하지 않는다.
 
-이번 구현의 신규 테스트 74개가 통과했다. 전체 suite는 **978 passed, 7 skipped,
-1 failed**다. 실패는 기존 `test_headroom_source_manifest`이며, 작업 전 `61c154d`에서도
+최종 경량 실험 테스트는 **87 passed**다. 전체 회귀 확인은 **991 passed, 7 skipped,
+1 failed**였고, 이후 최종 비용/counter 보완에 대해 경량 테스트 87개를 다시 통과했다.
+실패는 기존 `test_headroom_source_manifest`다. 작업 전 `cf95031`의 git 객체에서도
 `P_HEADROOM_SOURCE.sha256`와 두 과거 runbook
 (`docs/HS_WORLD_THESIS_RUNBOOK_KR.md`, `docs/P_HEADROOM_RUNBOOK_KR.md`)의 hash가
-불일치함을 확인했다. 이번 기능 때문에 기존 provenance 파일을 다시 쓰지는 않았다.
-Skipped 항목은 선택적 native backend 관련이다. Mac M2 Pro의 전체 연구 실험과
-실제 final/OOD 성능은 여기서 실행하지 않았다. Final 봉인·중단·resume·재평가 금지의
-코드 경로는 별도의 작은 테스트 데이터로 검증했다.
+불일치함을 확인했다. 기존 provenance를 다시 쓰지 않았다. Skipped 항목은 선택적
+native backend 관련이다. Linux CPU 환경에서 확인했으며 Mac M2 Pro의 본 탐색/학습,
+실제 final/OOD 성능은 실행하지 않았다. Final 봉인·중단·resume·재평가 금지 경로는
+별도의 작은 테스트 데이터로 검증했다. Smoke 설정 자체의 final 진입은 의도적으로 금지된다.
+
+이번 후속 수정은 기존 `cf95031` 작업을 이어서 **새 light-smoother 모듈·테스트·이 문서만**
+보완했다. 모두 실패한 탐색 label 차단, 실패 시도 집계, warm priming 공정성, 비교군별
+파라미터 수와 일관된 fallback 지표가 범위다. 기존 EM-line/P-only solver, 설정, manifest,
+freeze hash는 변경하지 않았다. 소스 변경으로 과거 run의 resume fingerprint가 달라지면
+원래 checkout을 사용해야 하며, 완료된 em_P는 새 run으로 검증하여 import할 수 있다.

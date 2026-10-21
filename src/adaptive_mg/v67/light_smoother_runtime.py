@@ -161,6 +161,7 @@ def _online_counters():
     return dict(online_adaptation_seconds=0., online_adaptation_calls=0,
         online_adaptation_accepted=0, online_adaptation_rejected=0,
         online_probe_cycles=0, online_gradient_vcycles=0, online_gradient_steps=0,
+        online_probe_completed_cycles=0, online_gradient_completed_vcycles=0,
         online_graph_builds=0, online_budget_exhausted=0, coefficient_changes=0)
 
 
@@ -377,14 +378,29 @@ class PreparedLightMG:
         def score(values):
             self.set_coefficients(values)
             y = x.copy()
-            for _ in range(spec['candidate_cycles']):
-                if not within_budget():
-                    raise TimeoutError('Online cooperative time budget exhausted')
-                y = self.raw_cycle(y, b)
-                counters['online_probe_cycles'] += 1
-            residual = stable_norm(b-self.a@y)
-            event['trials'].append(dict(coefficients=values.tolist(), residual=residual))
-            return residual
+            trial_started = perf_counter()
+            trial = dict(coefficients=values.tolist(), residual=None,
+                         attempted_cycles=0, completed_cycles=0, success=False)
+            event['trials'].append(trial)
+            try:
+                for _ in range(spec['candidate_cycles']):
+                    if not within_budget():
+                        raise TimeoutError('Online cooperative time budget exhausted')
+                    # Count launched work before invoking it, just as a failed
+                    # deployed cycle consumes the solver's trial-cycle budget.
+                    counters['online_probe_cycles'] += 1
+                    trial['attempted_cycles'] += 1
+                    y = self.raw_cycle(y, b)
+                    counters['online_probe_completed_cycles'] += 1
+                    trial['completed_cycles'] += 1
+                residual = stable_norm(b-self.a@y)
+                trial.update(residual=residual, success=bool(np.isfinite(residual)))
+                return residual
+            except (ValueError, RuntimeError, FloatingPointError, np.linalg.LinAlgError, TimeoutError) as exc:
+                trial['error'] = f'{type(exc).__name__}: {exc}'
+                raise
+            finally:
+                trial['seconds'] = perf_counter()-trial_started
         best, best_score = original.copy(), math.inf
         try:
             baseline = score(original)
@@ -423,8 +439,9 @@ class PreparedLightMG:
                     for _ in range(spec['candidate_cycles']):
                         if not within_budget():
                             raise TimeoutError('Online cooperative time budget exhausted')
-                        y = self.differentiable_cycle(y, bt, gains)
                         counters['online_gradient_vcycles'] += 1
+                        y = self.differentiable_cycle(y, bt, gains)
+                        counters['online_gradient_completed_vcycles'] += 1
                         if graph_was_missing:
                             counters['online_graph_builds'] += 1
                             graph_was_missing = False

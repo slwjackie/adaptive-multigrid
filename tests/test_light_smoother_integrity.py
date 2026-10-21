@@ -3,6 +3,7 @@ from copy import deepcopy
 import json
 from pathlib import Path
 import shutil
+from types import SimpleNamespace
 
 import pytest
 
@@ -135,3 +136,22 @@ def test_deployment_paths_and_online_controls_are_frozen(source_em, tmp_path):
     with pytest.raises(ValueError, match='Smoke'):
         study.freeze(out, repeats=1, warmups=0, rhs_counts=[1],
                      regimes=['multiple'], splits=['final'])
+
+
+def test_failed_search_case_is_retained_but_cannot_become_fit_label(tmp_path):
+    example = SimpleNamespace(name='failed_train_operator', group_digest='a'*64)
+    result_path = tmp_path/'search/failed_train_operator/result.json'
+    record = dict(status='complete', fallback_allowed=False,
+        label_eligible=False, selected_candidate_success=False,
+        selection_outcome='no_successful_candidate',
+        features=[[0.]*12], selected_coefficients=[[1., 1.]],
+        confirmation=dict(selected_index=0, summaries=[dict(eligible=False)]),
+        trials=[dict(success=False, stop_reason='max_cycles')])
+    write(result_path, record)
+    write(tmp_path/'search/summary.json', dict(status='complete', rows=[dict(
+        case=example.name, normalized_operator_digest=example.group_digest,
+        path=str(result_path.relative_to(tmp_path)), sha256=digest_file(result_path))]))
+    before = result_path.read_bytes()
+    with pytest.raises(ValueError, match='No successful search label'):
+        study._search_data(tmp_path, [example])
+    assert result_path.read_bytes() == before

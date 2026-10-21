@@ -91,14 +91,15 @@ def test_fixed_torch_graph_matches_runtime_and_gradient_without_refactoring():
     loss.backward()
     step = 1e-6
     for level in range(2):
-        high, low = coefficients.copy(), coefficients.copy()
-        high[level, 0] += step
-        low[level, 0] -= step
-        prepared.set_coefficients(high)
-        fhigh = np.sum(prepared.raw_cycle(x, b)**2)
-        prepared.set_coefficients(low)
-        flow = np.sum(prepared.raw_cycle(x, b)**2)
-        np.testing.assert_allclose(gains.grad[level, 0], (fhigh-flow)/(2*step), rtol=3e-5, atol=1e-6)
+        for axis in range(2):
+            high, low = coefficients.copy(), coefficients.copy()
+            high[level, axis] += step
+            low[level, axis] -= step
+            prepared.set_coefficients(high)
+            fhigh = np.sum(prepared.raw_cycle(x, b)**2)
+            prepared.set_coefficients(low)
+            flow = np.sum(prepared.raw_cycle(x, b)**2)
+            np.testing.assert_allclose(gains.grad[level, axis], (fhigh-flow)/(2*step), rtol=3e-5, atol=1e-6)
     assert prepared._factor_count() == factors
     assert [id(level.p) for level in prepared.levels] == pids
     assert all(parameter.grad is None for parameter in model.transfer.parameters())

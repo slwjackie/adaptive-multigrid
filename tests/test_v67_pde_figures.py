@@ -185,7 +185,7 @@ def test_undeclared_grid_is_rejected_before_operator_assembly(monkeypatch):
 
 
 def test_isotropic_material_has_no_preferred_axis_drawn():
-    import matplotlib
+    matplotlib = pytest.importorskip('matplotlib')
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
     _, example = record_for('local_patch')
@@ -203,6 +203,7 @@ def test_isotropic_material_has_no_preferred_axis_drawn():
 
 
 def test_both_rhs_pipeline_retains_mg_failure_and_correct_numeric_fields(tmp_path, monkeypatch):
+    pytest.importorskip('matplotlib')
     from adaptive_mg.v67 import solver
     original = solver.PreparedAdaptiveMG
     constructions = []

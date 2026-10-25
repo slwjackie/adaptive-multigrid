@@ -19,7 +19,8 @@ import numpy as np
 import scipy.sparse as sp
 
 from ..data import Example
-from ..pde import DiffusionCase, assemble_stiffness
+from ..pde import (DiffusionCase, assemble_stiffness, assemble_q1_stiffness,
+                   validate_discretization)
 from ..provenance import json_safe, operator_digest
 from .data import VariableCase, variable_stiffness
 from .fixed_classical import (FixedClassicalBaseline, baseline_metadata,
@@ -69,12 +70,15 @@ def _write_json(path, value, *, exclusive=False):
             os.unlink(temporary)
 
 
-def make_research_plan(*, smoke=False, seed=2026091601):
+def make_research_plan(*, smoke=False, seed=2026091601, discretization='p1'):
     """Return metadata only; full train=280, validation=56, final/OOD=126.
 
     Smoke has 7 training and 14 validation operators and cannot run final tests.
     A caller may reduce sizes/counts in tests before committing this plan.
+    P1 omits the selector to preserve historical plan hashes. Q1 records it in
+    both the plan and each split so independently materialized splits retain it.
     """
+    validate_discretization(discretization)
     if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
         raise ValueError('seed must be a nonnegative integer')
     specs = {
@@ -89,17 +93,26 @@ def make_research_plan(*, smoke=False, seed=2026091601):
     }
     for index, (name, spec) in enumerate(specs.items()):
         spec.update(seed=seed + 1000003 * index, count=len(spec['sizes']) * len(spec['families']) * spec['per_family'])
-    return dict(version=VERSION, smoke=bool(smoke), master_seed=seed, splits=specs,
+        if discretization != 'p1':
+            spec['discretization'] = discretization
+    plan = dict(version=VERSION, smoke=bool(smoke), master_seed=seed, splits=specs,
                 train_angles=list(TRAIN_ANGLES), rotation_ood_angles=list(OOD_ANGLES),
                 final_materialization_requires_freeze=True,
                 selector_mutation=False, selection_input='A and structured grid shape only')
+    if discretization != 'p1':
+        plan['discretization'] = discretization
+    return plan
 
 
 def _validate_plan(plan):
     if plan.get('version') != VERSION or set(plan.get('splits', {})) != set(DEVELOPMENT + HOLDOUT):
         raise ValueError('Unsupported or incomplete research plan')
+    discretization = plan.get('discretization', 'p1')
+    validate_discretization(discretization)
     seeds = []
     for name, spec in plan['splits'].items():
+        if spec.get('discretization', 'p1') != discretization:
+            raise ValueError('Split discretization differs from research plan')
         sizes, families = spec['sizes'], spec['families']
         if not sizes or len(set(sizes)) != len(sizes) or any(isinstance(n, bool) or not isinstance(n, int) or n < 3 or (n + 1) & n for n in sizes):
             raise ValueError('Grid sizes must be distinct 2**L-1 integers >=3')
@@ -191,15 +204,51 @@ class ResearchCase:
     frequency: float = 1.
     phase: float = 0.
     geometry_phase: float = 0.
+    discretization: str = 'p1'
+
+
+def _ood_tensor_field(case, x, y):
+    """Evaluate the existing OOD tensor fields at Q1 quadrature points.
+
+    This changes the topology of K, never the structured mesh or boundary.
+    The formulas intentionally match the legacy P1 path below.
+    """
+    x, y = np.asarray(x), np.asarray(y)
+    theta = np.deg2rad(case.angle_deg)
+    rotation = np.array([[np.cos(theta), -np.sin(theta)],
+                         [np.sin(theta), np.cos(theta)]])
+    tensor = rotation @ np.diag([1., case.epsilon]) @ rotation.T
+    if case.pattern == 'local_patch':
+        c = .04 * np.sin(case.geometry_phase)
+        hard = (((x - .30 - c) / .20) ** 2 + ((y - .36) / .13) ** 2 < 1) | (((x - .72) / .12) ** 2 + ((y - .65 - c) / .23) ** 2 < 1)
+    elif case.pattern == 'checkerboard':
+        row = np.floor(y * (case.checker_cells + 1)).astype(int)
+        col = np.floor(x * case.checker_cells + .5 * (row % 2) + case.geometry_phase / (2 * np.pi)).astype(int)
+        hard = (row + col) % 2 == 0
+    elif case.pattern == 'channel':
+        curve = .20 * np.sin(2 * np.pi * x + case.geometry_phase)
+        hard = (np.abs(y - .32 - curve) < case.channel_width) | (np.abs(y - .74 + .5 * curve) < .65 * case.channel_width)
+    elif case.pattern == 'variable_coefficient':
+        exponent = case.amplitude * (.65 * np.sin(2 * np.pi * case.frequency * x + case.phase) * np.cos(4 * np.pi * y)
+                    + .35 * np.cos(6 * np.pi * x - 2 * np.pi * y + case.geometry_phase))
+        return np.exp(exponent)[..., None, None] * tensor
+    else:
+        raise ValueError('Topology OOD is only meaningful for heterogeneous families')
+    return np.where(hard[..., None, None], case.contrast * tensor, np.eye(2))
 
 
 def _assemble_case(case):
+    validate_discretization(case.discretization)
     if case.topology == 'standard':
         if case.pattern == 'variable_coefficient':
             return variable_stiffness(VariableCase(case.n, case.epsilon, case.angle_deg,
-                                                  case.amplitude, case.frequency, case.phase))
+                                                  case.amplitude, case.frequency, case.phase,
+                                                  discretization=case.discretization))
         return assemble_stiffness(DiffusionCase(case.n, case.epsilon, case.angle_deg, case.contrast,
-            case.pattern, case.patch_bounds, case.checker_cells, case.channel_width))
+            case.pattern, case.patch_bounds, case.checker_cells, case.channel_width,
+            discretization=case.discretization))
+    if case.discretization == 'q1':
+        return assemble_q1_stiffness(case.n, lambda x, y: _ood_tensor_field(case, x, y))
     # OOD topology only.  The mesh, Dirichlet elimination and P1 element formula
     # are unchanged; only the positive coefficient field/tensor topology varies.
     n = case.n
@@ -269,8 +318,12 @@ def _specification(split, spec, n, family, index, retry):
         tuple(map(float, (center_x-width_x, center_x+width_x, center_y-width_y, center_y+width_y))),
         int(rng.choice([3, 4, 5])), float(rng.uniform(.06, .13)),
         float(np.log(contrast) / 2), float(rng.uniform(.7, 2.5)),
-        float(rng.uniform(0, 2*np.pi)), float(rng.uniform(0, 2*np.pi)))
-    return dict(name=f'{split}_{family}_n{n}_{index}_r{retry}', case=asdict(case),
+        float(rng.uniform(0, 2*np.pi)), float(rng.uniform(0, 2*np.pi)),
+        discretization=spec.get('discretization', 'p1'))
+    case_parameters = asdict(case)
+    if case.discretization == 'p1':
+        case_parameters.pop('discretization')  # Preserve historical P1 specifications.
+    return dict(name=f'{split}_{family}_n{n}_{index}_r{retry}', case=case_parameters,
                 seed=sample_seed, scale=float(10 ** rng.uniform(-.5, .5)), split=split,
                 family=family, retry=retry)
 
@@ -325,6 +378,8 @@ def _generate_split(name, spec, forbidden, rules):
                     record.update(example.manifest(), selection=selection,
                                   rhs_digest=hashlib.sha256(example.b.tobytes()).hexdigest(),
                                   exact_digest=hashlib.sha256(example.exact.tobytes()).hexdigest())
+                    if example.case.discretization == 'p1':
+                        record['case'].pop('discretization', None)
                     examples.append(example)
                     records.append(record)
                     break
@@ -394,6 +449,8 @@ def load_development_data(output_dir, rules):
         if len(records) != plan['splits'][name]['count']:
             raise ValueError('Development split is incomplete')
         for record in records:
+            if record['case'].get('discretization', 'p1') != plan.get('discretization', 'p1'):
+                raise ValueError('Stored case discretization differs from research plan')
             if record['normalized_operator_digest'] in seen:
                 raise ValueError('Normalized-operator leakage in stored development data')
             seen.add(record['normalized_operator_digest'])
@@ -537,6 +594,8 @@ def materialize_final_data(output_dir, claim, rules):
             if len(records) != plan['splits'][name]['count']:
                 raise ValueError('Final data are incomplete')
             for record in records:
+                if record['case'].get('discretization', 'p1') != plan.get('discretization', 'p1'):
+                    raise ValueError('Stored case discretization differs from research plan')
                 if record['normalized_operator_digest'] in seen:
                     raise ValueError('Normalized-operator leakage in final data')
                 seen.add(record['normalized_operator_digest'])

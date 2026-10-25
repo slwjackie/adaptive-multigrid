@@ -16,6 +16,7 @@ import numpy as np
 import torch
 
 from ..provenance import hardware_environment, json_safe
+from ..pde import validate_discretization
 from .config import AdaptiveConfig
 from .direct_pruning_study import _ensure_development_open, _validate_protocol
 from .em_line_models import make_em_line_components
@@ -41,6 +42,7 @@ MODULES = ('smoother', 'transfer', 'detector', 'controller')
 
 
 def validate_settings(settings):
+    validate_discretization(settings.get('discretization', 'p1'))
     if settings.get('version') != VERSION:
         raise ValueError('Require a new EM/shared-line study configuration')
     cfg = AdaptiveConfig.from_dict(settings['solver'])

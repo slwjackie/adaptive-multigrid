@@ -17,6 +17,7 @@ import numpy as np
 import torch
 
 from ..provenance import hardware_environment, json_safe, write_json
+from ..pde import validate_discretization
 from .config import AdaptiveConfig
 from .models import Components
 from .strong import StrongRules, PreparedStrongMG, load_strong_rules
@@ -47,6 +48,7 @@ def _source_digest():
 
 
 def _validate_settings(settings):
+    validate_discretization(settings.get('discretization', 'p1'))
     if settings.get('version')!=VERSION:
         raise ValueError('unsupported three-pillar config')
     cfg=AdaptiveConfig.from_dict(settings['solver'])
@@ -119,6 +121,8 @@ def calibrate(config_path, output, *, resume=False):
         for index,name in enumerate(('selector_train','selector_tune')):
             spec=dict(sizes=settings['calibration_sizes'],per_family=int(settings['calibration_per_family']),
                       families=list(FAMILIES),seed=int(settings['seed'])+100003*index)
+            if settings.get('discretization', 'p1') != 'p1':
+                spec['discretization'] = settings['discretization']
             examples,records,_=_generate_split(name,spec,forbidden,initial)
             groups[name]=examples;spec_records[name]=records
         write_json(manifest_path,dict(rules=initial.to_dict(),historical_index=history,
@@ -157,7 +161,7 @@ def _development(out,settings,rules):
     data=out/'data'
     if (data/'development_manifest.json').exists():
         return load_development_data(data,rules)
-    plan=make_research_plan(smoke=bool(settings['smoke']),seed=int(settings['seed'])+700001)
+    plan=make_research_plan(smoke=bool(settings['smoke']),seed=int(settings['seed'])+700001, discretization=settings.get('discretization', 'p1'))
     for name,key,per in (('train','training_sizes','training_per_family'),
                           ('validation','validation_sizes','validation_per_family')):
         spec=plan['splits'][name]
@@ -235,6 +239,8 @@ def benchmark(output,branches,*,tag='validation',repeats=5,warmups=1,rhs_counts=
 def demo(output,branch,*,family='channel',n=31):
     out,settings,cfg=_load_run(output);rules=load_strong_rules(out/'selector_rules.json')
     spec=dict(sizes=[n],per_family=1,families=[family],seed=int(settings['seed'])+9900001)
+    if settings.get('discretization','p1')!='p1':
+        spec['discretization']=settings['discretization']
     examples,_,_=_generate_split('demo',spec,set(),rules);e=examples[0]
     model=None if branch=='C' else _arms(out,[branch],rules)[branch]['model']
     chosen=replace(cfg,branch=branch,mode='classical' if branch=='C' else 'research')

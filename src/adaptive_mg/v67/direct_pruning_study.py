@@ -16,6 +16,7 @@ import numpy as np
 import torch
 
 from ..provenance import write_json, json_safe, hardware_environment
+from ..pde import validate_discretization
 from .config import AdaptiveConfig
 from .direct_pruning import prune_direct
 from .evaluation_metrics import _speed_summary
@@ -40,6 +41,7 @@ def _read(path):
 
 
 def validate_settings(settings):
+    validate_discretization(settings.get('discretization', 'p1'))
     if settings.get('version') != VERSION:
         raise ValueError('Use a direct-CNN pruning/TTT study configuration')
     cfg = AdaptiveConfig.from_dict(settings['solver'])
@@ -191,7 +193,7 @@ def _development(out, settings, baseline):
     data = out / 'data'
     if (data / 'development_manifest.json').exists():
         return load_development_data(data, baseline)
-    plan = make_research_plan(smoke=bool(settings['smoke']), seed=int(settings['seed']) + 1700003)
+    plan = make_research_plan(smoke=bool(settings['smoke']), seed=int(settings['seed']) + 1700003, discretization=settings.get('discretization', 'p1'))
     for name, key, per in (('train', 'training_sizes', 'training_per_family'),
                             ('validation', 'validation_sizes', 'validation_per_family')):
         spec = plan['splits'][name]

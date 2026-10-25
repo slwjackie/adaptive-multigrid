@@ -223,9 +223,9 @@ def test_small_non_smoke_freeze_final_contract_and_no_final_selection(tmp_path, 
     # freeze/claim lifecycle without repurposing a smoke run or seeing final A.
     original_plan = study.make_research_plan
 
-    def compact_plan(*, smoke, seed):
+    def compact_plan(*, smoke, seed, discretization="p1"):
         assert smoke is False
-        plan = original_plan(smoke=False, seed=seed)
+        plan = original_plan(smoke=False, seed=seed, discretization=discretization)
         for split in plan['splits'].values():
             # Keep a family valid for each declared OOD mechanism (topology
             # requires heterogeneous coefficients).

@@ -10,6 +10,7 @@ import torch
 
 from ..provenance import write_json, json_safe, hardware_environment
 from .models import Components
+from ..pde import validate_discretization
 from .config import AdaptiveConfig
 from .limited import read_settings, initialize_timing_runtime, digest_file
 from .strong import load_strong_rules
@@ -425,6 +426,7 @@ def _frozen_final(project,out,settings,cfg,rules,phase,resume):
 def pipeline(config_path,output,*,phase=None,resume=False):
     project=Path(__file__).resolve().parents[3]
     settings=_read(config_path)
+    validate_discretization(settings.get('discretization', 'p1'))
     if settings.get('version')!=1:raise ValueError('Unsupported strong-aware configuration')
     phase=phase or settings.get('phase','develop')
     if phase not in PHASES+('develop','freeze','final'):raise ValueError('Unknown research phase')
@@ -457,7 +459,8 @@ def pipeline(config_path,output,*,phase=None,resume=False):
     if (out/'final_claim.json').exists():raise ValueError('Final test has been consumed/claimed; development cannot resume')
     if (out/'development_manifest.json').exists():train,validation,manifest=load_development_data(out,rules)
     else:
-        plan=make_research_plan(smoke=bool(settings['smoke']),seed=int(settings['seed']))
+        plan=make_research_plan(smoke=bool(settings['smoke']),seed=int(settings['seed']),
+                                discretization=settings.get('discretization', 'p1'))
         train,validation,manifest=prepare_development_data(out,rules,plan=plan,historical_roots=[research.parent])
     run=DevelopmentRun(project,settings,out,cfg,rules,research,train,validation,manifest,resume)
     completed=['data'];run.save_progress(completed)

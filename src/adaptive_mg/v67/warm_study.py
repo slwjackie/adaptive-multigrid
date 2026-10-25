@@ -55,7 +55,14 @@ def _tag(value):
 def prepare_data(output):
     out,settings,cfg,rules=_load(output)
     train,validation,development=_development(out,settings,rules)
-    path=out/'study_split_manifest.json';specs=settings['study']['policy_splits']
+    path=out/'study_split_manifest.json'
+    specs=deepcopy(settings['study']['policy_splits'])
+    discretization=settings.get('discretization','p1')
+    for spec in specs.values():
+        if spec.get('discretization',discretization)!=discretization:
+            raise ValueError('Policy split discretization differs from study settings')
+        if discretization!='p1':
+            spec['discretization']=discretization
     if path.exists():
         saved=_read(path)
         if saved['plan_digest']!=_hash(specs) or saved['rules_digest']!=rules.digest():
@@ -74,6 +81,8 @@ def prepare_data(output):
     seen=_digests(development['splits'])|_digests(_read(out/'calibration_manifest.json'))
     for records in saved['splits'].values():
         for row in records:
+            if row['case'].get('discretization','p1')!=discretization:
+                raise ValueError('Stored policy discretization differs from study settings')
             group=row['normalized_operator_digest']
             if group in seen:raise ValueError('study split overlap')
             seen.add(group)
@@ -306,6 +315,8 @@ def policy_overhead(output,*,sizes=(7,15,31,63),repeats=20,rhs_count=4):
     forbidden|=_digests(calibration)
     spec=dict(sizes=[int(n) for n in sizes],per_family=1,families=['near_isotropic'],
               seed=int(settings['seed'])+918273645)
+    if settings.get('discretization','p1')!='p1':
+        spec['discretization']=settings['discretization']
     examples,records,_=_generate_split('policy_overhead',spec,forbidden,rules)
     manifest=dict(version=VERSION,spec=spec,rules_digest=rules.digest(),records=records,
                   diagnostic_only=True,never_policy_training=True,never_final=True)

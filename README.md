@@ -78,6 +78,22 @@ pruning, or frozen experiment manifests are incompatible with this workflow.
 Smoke and unit tests establish execution correctness; research speedup must be
 measured separately.
 
+## Optional Q1 quadrilateral discretization
+
+P1 remains the default. The research data paths also accept the top-level study
+setting `"discretization": "q1"`: bilinear four-node squares, 2x2 Gauss quadrature,
+and the same homogeneous Dirichlet nodes. All seven PDE families and their OOD
+topologies are supported. Start a separate run with
+`configs/v6_7_em_line_q1_smoke.json` or
+`configs/v6_7_unet_transfer_q1_smoke.json`; matching `_research.json` files provide
+the original full training budgets. Existing checkpoints and frozen runs are not
+converted by changing this setting.
+
+See [Q1 implementation and mathematical derivation (Korean)](docs/Q1_FEM_KR.md)
+for commands, element matrices, coefficient fields, quadrature limits, and the
+distinction between the discrete manufactured RHS `b=A*u_star` and a continuous
+FEM load vector. Coarse operators continue to use Galerkin products.
+
 ## Earlier experiments
 
 Earlier entry points, configurations, and records remain for reproducibility.

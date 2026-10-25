@@ -1,24 +1,33 @@
-"""Structured-grid P1 finite-element model for anisotropic elliptic diffusion.
+"""Structured-grid P1/Q1 finite elements for anisotropic elliptic diffusion.
 
 The physical model is
 
     -div(K(x, y) grad u) = f  in (0, 1)^2,
     u = 0                       on the boundary.
 
-The square grid is logically structured.  Each square is split into two P1
-triangles, which gives an SPD stiffness matrix for every symmetric positive
-definite diffusion tensor K.
+The default splits each square into two P1 triangles.  The optional Q1 method
+uses four bilinear shape functions on each square and 2x2 Gauss quadrature.
+Both eliminate zero-Dirichlet boundary nodes and preserve the same ordering.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Callable, Literal
 
 import numpy as np
 import scipy.sparse as sp
 
 Pattern = Literal["uniform", "local_patch", "checkerboard", "channel"]
+Discretization = Literal["p1", "q1"]
+TensorField = Callable[[np.ndarray | float, np.ndarray | float], np.ndarray]
+
+
+def validate_discretization(value: str) -> Discretization:
+    """Validate a discretization selector without silently changing its case."""
+    if not isinstance(value, str) or value not in ("p1", "q1"):
+        raise ValueError(f"unsupported discretization: {value!r}")
+    return value
 
 
 @dataclass(frozen=True)
@@ -45,6 +54,9 @@ class DiffusionCase:
         Number of checkerboard blocks per coordinate direction.
     channel_width:
         Half-width of the diagonal high-conductivity channel.
+    discretization:
+        ``p1`` (default): two centroid-integrated triangles per square.
+        ``q1``: one bilinear square with 2x2 Gauss quadrature.
     """
 
     n: int = 31
@@ -55,6 +67,7 @@ class DiffusionCase:
     patch_bounds: tuple[float, float, float, float] = (0.30, 0.70, 0.30, 0.70)
     checker_cells: int = 4
     channel_width: float = 0.08
+    discretization: Discretization = "p1"
 
     def validate(self) -> None:
         if self.n < 3:
@@ -65,6 +78,7 @@ class DiffusionCase:
             raise ValueError("contrast must be positive")
         if self.pattern not in {"uniform", "local_patch", "checkerboard", "channel"}:
             raise ValueError(f"unsupported pattern: {self.pattern}")
+        validate_discretization(self.discretization)
 
 
 def _rotation(angle_deg: float) -> np.ndarray:
@@ -145,6 +159,9 @@ def assemble_stiffness_reference(case: DiffusionCase) -> sp.csr_matrix:
     """Assemble the sparse SPD stiffness matrix."""
 
     case.validate()
+    if case.discretization == "q1":
+        return assemble_q1_stiffness_reference(
+            case.n, lambda x, y: diffusion_tensor(case, x, y))
     n = case.n
     h = 1.0 / (n + 1)
     rows: list[int] = []
@@ -186,12 +203,14 @@ def assemble_stiffness_reference(case: DiffusionCase) -> sp.csr_matrix:
 
 
 def assemble_stiffness(case: DiffusionCase) -> sp.csr_matrix:
-    """Vectorized assembly of exactly the same two P1 triangles per cell.
+    """Assemble the selected structured-grid stiffness matrix.
 
-    Retained scalar reference is used by parity tests, not large-grid runs.
-    No discretization or tensor convention was changed to obtain speedups.
+    P1 retains the original centroid-integrated, vectorized implementation.
+    Q1 evaluates the same coefficient field at four Gauss points per square.
     """
     case.validate();n=case.n
+    if case.discretization == "q1":
+        return assemble_q1_stiffness(n, lambda x, y: _diffusion_tensor_array(case, x, y))
     ii,jj=np.meshgrid(np.arange(n+1),np.arange(n+1),indexing="ij")
     ii=ii.ravel();jj=jj.ravel();count=len(ii)
     all_rows=[];all_cols=[];all_vals=[]
@@ -221,6 +240,116 @@ def assemble_stiffness(case: DiffusionCase) -> sp.csr_matrix:
     a=sp.coo_matrix((np.concatenate(all_vals),(np.concatenate(all_rows),np.concatenate(all_cols))),shape=(n*n,n*n)).tocsr()
     a.sum_duplicates();a=(.5*(a+a.T)).tocsr();a.eliminate_zeros()
     return a
+
+
+def _diffusion_tensor_array(case: DiffusionCase, x, y) -> np.ndarray:
+    """Vectorized counterpart of ``diffusion_tensor`` with identical regions."""
+    x, y = np.broadcast_arrays(x, y)
+    anisotropic = _base_tensor(case.epsilon, case.angle_deg)
+    if case.pattern == "uniform":
+        return np.broadcast_to(anisotropic, x.shape + (2, 2))
+    if case.pattern == "local_patch":
+        xmin, xmax, ymin, ymax = case.patch_bounds
+        hard = (x >= xmin) & (x <= xmax) & (y >= ymin) & (y <= ymax)
+    elif case.pattern == "checkerboard":
+        ix = np.minimum((x * case.checker_cells).astype(int), case.checker_cells - 1)
+        iy = np.minimum((y * case.checker_cells).astype(int), case.checker_cells - 1)
+        hard = (ix + iy) % 2 == 0
+    else:
+        hard = np.abs(y - x) <= case.channel_width
+    return np.where(hard[..., None, None], case.contrast * anisotropic, np.eye(2))
+
+
+def _validate_q1_size(n: int) -> None:
+    if isinstance(n, (bool, np.bool_)) or not isinstance(n, (int, np.integer)) or n < 1:
+        raise ValueError("n must be a positive integer")
+
+
+def assemble_q1_stiffness(n: int, tensor_field: TensorField) -> sp.csr_matrix:
+    """Assemble Q1 stiffness on the unit square with homogeneous Dirichlet data.
+
+    ``tensor_field(x, y)`` receives arrays of cell quadrature coordinates and
+    returns symmetric positive-definite tensors of shape ``(..., 2, 2)``;
+    a constant ``(2, 2)`` tensor may also be returned.  The caller owns the SPD
+    contract.  Local node order is bottom-left, bottom-right, top-right,
+    top-left; global interior index is ``(i - 1) * n + (j - 1)``.
+
+    For reference coordinates (xi, eta) in [0,1]^2, physical gradients scale
+    by 1/h and area weights by h**2.  These cancel on this square mesh, so the
+    formula below uses reference gradients and Gauss weights 1/4 directly.
+    Quadrature is exact for cellwise constant K; interfaces cutting a cell
+    and general variable coefficients are sampled approximately.
+    """
+    _validate_q1_size(n)
+    ii, jj = np.meshgrid(np.arange(n + 1), np.arange(n + 1), indexing="ij")
+    ii, jj = ii.ravel(), jj.ravel()
+    count = len(ii)
+    local = np.zeros((count, 4, 4), dtype=np.float64)
+    gauss = (0.5 - 0.5 / np.sqrt(3.0), 0.5 + 0.5 / np.sqrt(3.0))
+    for xi in gauss:
+        for eta in gauss:
+            grads = np.array([
+                [-(1.0 - eta), -(1.0 - xi)],
+                [1.0 - eta, -xi],
+                [eta, xi],
+                [-eta, 1.0 - xi],
+            ])
+            tensors = np.broadcast_to(
+                np.asarray(tensor_field((ii + xi) / (n + 1),
+                                        (jj + eta) / (n + 1)), dtype=np.float64),
+                (count, 2, 2))
+            local += 0.25 * np.einsum("ik,nkl,jl->nij", grads, tensors, grads)
+    offsets = np.array([[0, 0], [1, 0], [1, 1], [0, 1]])
+    gi = ii[:, None] + offsets[None, :, 0]
+    gj = jj[:, None] + offsets[None, :, 1]
+    valid = (gi >= 1) & (gi <= n) & (gj >= 1) & (gj <= n)
+    idx = (gi - 1) * n + (gj - 1)
+    mask = valid[:, :, None] & valid[:, None, :]
+    rows = np.broadcast_to(idx[:, :, None], (count, 4, 4))[mask]
+    cols = np.broadcast_to(idx[:, None, :], (count, 4, 4))[mask]
+    a = sp.coo_matrix((local[mask], (rows, cols)), shape=(n * n, n * n)).tocsr()
+    a.sum_duplicates()
+    a = (0.5 * (a + a.T)).tocsr()
+    a.eliminate_zeros()
+    return a
+
+
+def assemble_q1_stiffness_reference(n: int, tensor_field: TensorField) -> sp.csr_matrix:
+    """Independent scalar Q1 reference using [-1,1]^2 and an explicit Jacobian.
+
+    ``tensor_field`` must also accept scalar coordinates.  This implementation
+    is intended for small-grid parity checks, not production data generation.
+    """
+    _validate_q1_size(n)
+    h = 1.0 / (n + 1)
+    jacobian = np.diag([h / 2.0, h / 2.0])
+    inverse_jacobian = np.linalg.inv(jacobian)
+    determinant = np.linalg.det(jacobian)
+    signs = np.array([[-1., -1.], [1., -1.], [1., 1.], [-1., 1.]])
+    rows, cols, values = [], [], []
+    for i in range(n + 1):
+        for j in range(n + 1):
+            local = np.zeros((4, 4))
+            for xi in (-1.0 / np.sqrt(3.0), 1.0 / np.sqrt(3.0)):
+                for eta in (-1.0 / np.sqrt(3.0), 1.0 / np.sqrt(3.0)):
+                    gradients = np.column_stack((
+                        signs[:, 0] * (1.0 + signs[:, 1] * eta),
+                        signs[:, 1] * (1.0 + signs[:, 0] * xi))) / 4.0
+                    gradients = gradients @ inverse_jacobian
+                    tensor = tensor_field((i + (xi + 1.0) / 2.0) * h,
+                                          (j + (eta + 1.0) / 2.0) * h)
+                    local += determinant * (gradients @ tensor @ gradients.T)
+            nodes = [(i, j), (i + 1, j), (i + 1, j + 1), (i, j + 1)]
+            mapped = [_interior_index(gi, gj, n) for gi, gj in nodes]
+            for a, row in enumerate(mapped):
+                for b, col in enumerate(mapped):
+                    if row is not None and col is not None:
+                        rows.append(row)
+                        cols.append(col)
+                        values.append(local[a, b])
+    matrix = sp.coo_matrix((values, (rows, cols)), shape=(n * n, n * n)).tocsr()
+    matrix.sum_duplicates()
+    return (0.5 * (matrix + matrix.T)).tocsr()
 
 
 def manufactured_solution(n: int) -> np.ndarray:

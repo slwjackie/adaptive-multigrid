@@ -14,6 +14,7 @@ import shutil
 import numpy as np
 
 from ..provenance import hardware_environment, json_safe
+from ..pde import validate_discretization
 from .config import AdaptiveConfig
 from .direct_pruning_study import _ensure_development_open, _validate_protocol
 from .em_line_study import _checkpoint as em_checkpoint, validate_settings as validate_em
@@ -41,6 +42,7 @@ ONLINE_ARMS = ('learned_P_MLP_TTT', 'learned_P_regression_online')
 
 
 def validate_settings(settings):
+    validate_discretization(settings.get('discretization', 'p1'))
     if settings.get('version') != VERSION:
         raise ValueError('Require a separate light-smoother configuration')
     cfg = AdaptiveConfig.from_dict(settings['solver'])

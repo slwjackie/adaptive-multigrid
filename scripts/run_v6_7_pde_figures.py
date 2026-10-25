@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reproducible P1 diffusion field figures; never alters a study or checkpoint.
+"""Reproducible P1/Q1 diffusion field figures; never alters a study or checkpoint.
 
 The original study load is b=A*u_star, not point samples of a smooth f.
 An optional f=1 problem is a separate illustration on the same operators.
@@ -31,7 +31,7 @@ from adaptive_mg.v67.research_data import (
     FAMILIES, _example, _hash, _specification, make_research_plan,
 )
 
-VERSION = 'p1-diffusion-figures-v1'
+VERSION = 'p1-q1-diffusion-figures-v2'
 LABELS = dict(zip(FAMILIES, ('Near isotropic', 'Aligned anisotropy',
     'Rotated anisotropy', 'Local patch', 'Checkerboard', 'Channel',
     'Variable coefficient')))
@@ -103,7 +103,8 @@ def load_cases(run_dir, config_path, split, n, sample_index):
         config = Path(config_path or ROOT / 'configs/v6_7_light_smoother_research.json').resolve()
         settings = json.loads(config.read_text())
         # Same development seed schedule as joint_transfer_study._development.
-        plan = make_research_plan(smoke=settings['smoke'], seed=settings['seed'] + 7100003)
+        plan = make_research_plan(smoke=settings['smoke'], seed=settings['seed'] + 7100003,
+                                  discretization=settings.get('discretization', 'p1'))
         spec = plan['splits'][split]
         spec.update(sizes=settings['training_sizes' if split == 'train' else 'validation_sizes'],
                     per_family=settings['training_per_family' if split == 'train' else 'validation_per_family'])
@@ -121,6 +122,12 @@ def load_cases(run_dir, config_path, split, n, sample_index):
             records.append(record)
     if n not in spec['sizes'] or sample_index >= spec['per_family']:
         raise ValueError('Requested grid/index is outside the declared development split')
+    discretization = settings.get('discretization', 'p1')
+    if (discretization not in ('p1', 'q1') or
+            plan.get('discretization', 'p1') != discretization or
+            any(record['case'].get('discretization', 'p1') != discretization
+                for record in records)):
+        raise ValueError('Configuration/plan/case discretization mismatch')
     return records, settings, origin
 
 
@@ -157,23 +164,46 @@ def tensor_at(case, scale, xy):
 
 
 def constant_load(n):
-    """Exact interior P1 load integral for f=1 on this triangulation: h**2."""
+    """Exact interior P1 or Q1 load integral for f=1 on this grid: h**2."""
     return np.full(n*n, 1. / (n+1)**2)
 
 
+def quadrilateral_mesh(n):
+    """Full nodal coordinates and counterclockwise Q1 cell connectivity."""
+    h = 1. / (n+1)
+    x, y = np.meshgrid(np.arange(n+2)*h, np.arange(n+2)*h, indexing='ij')
+    points = np.column_stack((x.ravel(), y.ravel()))
+    i, j = np.meshgrid(np.arange(n+1), np.arange(n+1), indexing='ij')
+    start = i.ravel()*(n+2)+j.ravel()
+    cells = np.column_stack((start, start+n+2, start+n+3, start+1))
+    return points, cells
+
+
 def element_fields(case, scale, u):
-    points, triangles, gradients = triangle_mesh(case.n)
     values = np.zeros((case.n+2, case.n+2))
     values[1:-1, 1:-1] = np.asarray(u).reshape(case.n, case.n)
     values = values.ravel()
-    centroids = points[triangles].mean(axis=1)
+    discretization = getattr(case, 'discretization', 'p1')
+    if discretization == 'q1':
+        points, cells = quadrilateral_mesh(case.n)
+        # Diagnostic fields at the cell center. Assembly instead evaluates K
+        # and these position-dependent gradients at all four Gauss points.
+        gradients = (case.n+1)*np.array([[-.5, -.5], [.5, -.5], [.5, .5], [-.5, .5]])
+        gradient = values[cells] @ gradients
+        geometry = dict(cells=cells, discretization='q1')
+    elif discretization == 'p1':
+        points, cells, gradients = triangle_mesh(case.n)
+        gradient = np.einsum('ti,tij->tj', values[cells], gradients)
+        geometry = dict(triangles=cells, discretization='p1')
+    else:
+        raise ValueError('Unknown discretization')
+    centroids = points[cells].mean(axis=1)
     tensors = tensor_at(case, scale, centroids)
-    gradient = np.einsum('ti,tij->tj', values[triangles], gradients)
     flux = -np.einsum('tij,tj->ti', tensors, gradient)
     eigvals, eigvecs = np.linalg.eigh(tensors)
     if not np.isfinite(tensors).all() or np.min(eigvals) <= 0:
         raise ValueError('Coefficient field is not finite SPD')
-    return dict(points=points, triangles=triangles, centroids=centroids,
+    return dict(points=points, centroids=centroids, **geometry,
         tensors=tensors, gradient=gradient, flux=flux, u_full=values,
         lambda_max=eigvals[:, 1], anisotropy=eigvals[:, 1]/eigvals[:, 0],
         principal_direction=eigvecs[:, :, 1])
@@ -200,12 +230,34 @@ def _axes(ax):
 
 
 def _draw(ax, fields, values, *, nodal=False, norm=None, cmap='viridis'):
-    p, t = fields['points'], fields['triangles']
     kwargs = dict(cmap=cmap, norm=norm, rasterized=True)
-    if nodal:
-        artist = ax.tripcolor(p[:, 0], p[:, 1], t, values, shading='gouraud', **kwargs)
+    if fields.get('discretization', 'p1') == 'q1':
+        width = int(np.sqrt(len(fields['points'])))
+        if nodal:
+            # Evaluate the Q1 function at display subcell centers; do not
+            # replace the bilinear field by a fixed triangular interpolant.
+            subdivisions = 4
+            side = (width-1)*subdivisions
+            coords = (np.arange(side)+.5)/subdivisions
+            cell = np.floor(coords).astype(int)
+            fraction = coords-cell
+            full = np.asarray(values).reshape(width, width)
+            bottom = ((1-fraction[:, None])*full[cell[:, None], cell[None, :]]
+                      + fraction[:, None]*full[cell[:, None]+1, cell[None, :]])
+            top = ((1-fraction[:, None])*full[cell[:, None], cell[None, :]+1]
+                   + fraction[:, None]*full[cell[:, None]+1, cell[None, :]+1])
+            colors = (1-fraction[None, :])*bottom+fraction[None, :]*top
+        else:
+            side = width-1
+            colors = np.asarray(values).reshape(side, side)
+        edges = np.linspace(0, 1, side+1)
+        artist = ax.pcolormesh(edges, edges, colors.T, shading='flat', **kwargs)
     else:
-        artist = ax.tripcolor(p[:, 0], p[:, 1], t, facecolors=values, shading='flat', **kwargs)
+        p, t = fields['points'], fields['triangles']
+        if nodal:
+            artist = ax.tripcolor(p[:, 0], p[:, 1], t, values, shading='gouraud', **kwargs)
+        else:
+            artist = ax.tripcolor(p[:, 0], p[:, 1], t, facecolors=values, shading='flat', **kwargs)
     _axes(ax)
     return artist
 
@@ -274,8 +326,11 @@ def overview(items, folder, stem, kind, rhs_label, origin, dpi):
     extra = ('White segments: principal diffusion axes\nDirection has no preferred sign.'
         if kind in ('lambda_max', 'anisotropy') else 'White arrows: flux direction only\nArrow lengths are normalized.'
         if kind == 'flux' else 'Reference solution: sparse LU\nNo neural speed comparison.')
+    element_label = ('Q1 quadrilateral finite elements\nCoefficients/flux: cell-center samples'
+        if getattr(items[0]['example'].case, 'discretization', 'p1') == 'q1'
+        else 'P1 triangular finite elements')
     note_ax.text(0, .95, f'{label}\n\nUnit square; $u=0$ on boundary\n'
-        f'Interior grid: {items[0]["example"].n} × {items[0]["example"].n}\nP1 triangular finite elements\n\n{extra}',
+        f'Interior grid: {items[0]["example"].n} × {items[0]["example"].n}\n{element_label}\n\n{extra}',
         va='top', fontsize=10, linespacing=1.6, transform=note_ax.transAxes)
     fig.suptitle(f'Seven diffusion PDE families | {titles[kind]}', fontsize=17, y=.97)
     fig.text(.5, .905, rhs_label, ha='center', fontsize=11)
@@ -319,9 +374,11 @@ def detail(item, folder, mode, dpi):
         last.axis('off')
         if item['mg'] is not None:
             last.set_title('fixed_C FAILED ('+item['mg'].get('stage', 'solve')+')', color='darkred', fontsize=10)
+        sampling = ('Q1 flux: cell-center samples.\n' if f['discretization'] == 'q1'
+                    else 'Flux is elementwise -K grad(u).\n')
         last.text(0, .95, f'Direct residual / ||b||: {item["metrics"]["relative_residual"]:.3e}\n'
             f'Stopping threshold: {item["metrics"]["stopping_threshold"]:.3e}\n\n'
-            'Fields use the LU reference.\nFlux is elementwise -K grad(u).\nThis is not fluid velocity.\n'
+            f'Fields use the LU reference.\n{sampling}This is not fluid velocity.\n'
             'No continuum error is claimed.', va='top', fontsize=10, linespacing=1.8)
     fig.suptitle(f'{LABELS[case.family]} | {e.name}\n'
         + ('Original study load: $b=A u_*$' if mode == 'study' else 'Supplemental constant source: $f=1$'), fontsize=14)
@@ -331,6 +388,8 @@ def detail(item, folder, mode, dpi):
 def run(args):
     output = validate_output(args.output, args.run_dir)
     records, settings, origin = load_cases(args.run_dir, args.config, args.split, args.n, args.sample_index)
+    discretization = settings.get('discretization', 'p1')
+    q1 = discretization == 'q1'
     config = MGConfig(**settings['solver']['mg'])
     if args.with_mg and config.strategy_name != 'line_alt_bilinear_full__v22':
         raise ValueError('--with-mg requires the recorded fixed_C bilinear strategy')
@@ -353,13 +412,20 @@ def run(args):
         revision = None
     manifest = dict(version=VERSION, origin=origin, source_commit=revision, source_sha256=source_hashes,
         protocol=dict(split=args.split, n=args.n, sample_index=args.sample_index, rhs_modes=modes,
-            with_mg=args.with_mg, dpi=args.dpi, numerical_settings=asdict(config)),
+            with_mg=args.with_mg, dpi=args.dpi, numerical_settings=asdict(config),
+            discretization=discretization),
         records=records, pde='-div(s*K*grad(u))=f on (0,1)^2; u=0 on boundary',
-        discretization='P1 triangles, tensor at element centroids, eliminated boundary DOFs',
+        discretization=('Q1 quadrilaterals, 2x2 Gauss integration, eliminated boundary DOFs'
+                        if q1 else 'P1 triangles, tensor at element centroids, eliminated boundary DOFs'),
         field_solver='Full fine-grid scipy.sparse.linalg.splu reference; not a deployment benchmark',
         study_rhs='Original dataset RHS #0: b=A*u_star; u_star is a discrete manufactured target, not a continuum accuracy certificate',
         unit_source_rhs='Supplemental f=1: b_i=integral(phi_i)=h^2; not original benchmark forcing',
-        flux='q_T=-s*K(centroid_T)*grad(u_h)|_T; broken P1 gradient, no interface smoothing, not velocity',
+        flux=('q(c_E)=-s*K(c_E)*grad(u_h)(c_E); Q1 bilinear gradient at cell centers, '
+              'diagnostic samples only; not cell-constant flux or assembly quadrature, not velocity'
+              if q1 else 'q_T=-s*K(centroid_T)*grad(u_h)|_T; broken P1 gradient, no interface smoothing, not velocity'),
+        field_sampling=('Q1 coefficients/flux at cell centers; may miss subcell interfaces. '
+                        'Solution sampled bilinearly on 4x4 display subcells per element.'
+                        if q1 else 'P1 tensor/flux at triangle centroids; nodal triangular interpolation'),
         diagnostic_only=True, model_selection=False, final_ood_accessed=False,
         source_run_mutated=False)
     write_json(output/'manifest.json', manifest)
@@ -439,7 +505,7 @@ def run(args):
         '# Figure captions and interpretation\n\n'
         + ('Actual cases imported from the recorded development split.\n\n' if imported else
            '**Configuration-generated illustrations, not verified cases from the user\'s existing run.**\n\n')
-        + '각 family의 사전 지정 sample index에서 선택한 확산 텐서와 P1 유한요소 수치해이다. '
+        + f'각 family의 사전 지정 sample index에서 선택한 확산 텐서와 {discretization.upper()} 유한요소 수치해이다. '
           '영역은 무차원 단위 정사각형이며 모든 경계에 u=0을 적용하였다.\n\n'
           '- coefficients: 최대 고유값(확산 강도)과 주 확산축. 흰 선분은 방향축이며 유속이 아니다.\n'
           '- anisotropy: 최대/최소 고유값 비와 주 확산축. 모든 family에 같은 색상 범위를 사용하였다.\n'
@@ -447,6 +513,12 @@ def run(args):
           '- unit_source_solutions/flux (선택): 같은 A에 공통 f=1을 가한 보조 문제. 기존 평가 RHS와 구분한다.\n'
           '- flux: 요소별 q=-K_tilde grad(u_h). 화살표 길이는 정규화했으며 색상은 flux 크기이다. '
           '불연속 계수 경계에서 flux를 평활화하거나 유체 속도로 해석하지 않는다.\n\n'
+        + ('Q1 계수·flux 그림은 사각형 중심에서 평가한 진단 표본이다. '
+           '실제 행렬 조립의 2×2 Gauss점과 다르며 요소 내부 경계를 놓칠 수 있다. '
+           'Q1 기울기와 flux는 셀 전체에서 일정하지 않다. '
+           '해는 각 요소를 표시용 4×4 부분 셀로 나누고 그 중심에서 bilinear 함수를 평가해 그렸다.\n\n'
+           if q1 else '')
+        +
           '수치해 그림은 fine-grid LU reference이며 NN 성능 개선의 증거가 아니다. '
           '선택적 fixed_C 진단은 실제 잔차 이력과 실패를 그대로 보존한다. '
           'LU와 제조해 사이의 오차는 선형계 풀이 오차이며 연속 PDE의 이산화 오차가 아니다. '

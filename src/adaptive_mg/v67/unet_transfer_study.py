@@ -20,6 +20,7 @@ from .banks import Stats, hybrid_cycle
 from ..hierarchy import classical_cycle
 from .models import Components
 from .solver import PreparedAdaptiveMG
+from ..pde import validate_discretization
 from .config import AdaptiveConfig
 from .fixed_classical import FixedClassicalBaseline, load_baseline
 from .spatial import SpatialState
@@ -40,6 +41,7 @@ ARMS = {'direct': 'direct_CNN', 'teacher': 'teacher', 'distilled': 'distilled_CN
 
 
 def validate_settings(settings):
+    validate_discretization(settings.get('discretization', 'p1'))
     if settings.get('version') != VERSION:
         raise ValueError('Use a new fixed-classical U-net configuration/run')
     removed = {'bank', 'calibration_sizes', 'calibration_per_family', 'calibration_repeats',
@@ -142,7 +144,7 @@ def _development(out, settings, baseline):
     data = out / 'data'
     if (data / 'development_manifest.json').exists():
         return load_development_data(data, baseline)
-    plan = make_research_plan(smoke=bool(settings['smoke']), seed=int(settings['seed']) + 700001)
+    plan = make_research_plan(smoke=bool(settings['smoke']), seed=int(settings['seed']) + 700001, discretization=settings.get('discretization', 'p1'))
     for name, key, per in (('train', 'training_sizes', 'training_per_family'),
                             ('validation', 'validation_sizes', 'validation_per_family')):
         spec = plan['splits'][name]

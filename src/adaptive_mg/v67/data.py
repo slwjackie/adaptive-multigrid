@@ -3,7 +3,7 @@ from dataclasses import dataclass
 import numpy as np
 import scipy.sparse as sp
 from ..data import Example,make_examples,split_manifest
-from ..pde import DiffusionCase,assemble_stiffness
+from ..pde import DiffusionCase,assemble_stiffness,assemble_q1_stiffness,validate_discretization
 from ..provenance import operator_digest
 
 @dataclass(frozen=True)
@@ -15,10 +15,26 @@ class VariableCase:
     frequency:float
     phase:float
     pattern:str='variable_coefficient'
+    discretization:str='p1'
 
 
 def variable_stiffness(case):
-    """P1 FE assembly of -div(a(x,y)*K*grad u), a>0, same mesh/boundary."""
+    """P1 or Q1 assembly of -div(a(x,y)*K*grad u), a>0, same boundary.
+
+    The legacy P1 path samples each triangle centroid. Q1 samples the smooth
+    coefficient separately at all four Gauss points of every square.
+    """
+    validate_discretization(case.discretization)
+    if case.discretization == 'q1':
+        angle = np.deg2rad(case.angle_deg)
+        rotation = np.array([[np.cos(angle), -np.sin(angle)],
+                             [np.sin(angle), np.cos(angle)]])
+        tensor = rotation @ np.diag([1., case.epsilon]) @ rotation.T
+        def tensor_field(x, y):
+            coeff = np.exp(case.amplitude * np.sin(2*np.pi*case.frequency*x + case.phase)
+                           * np.cos(2*np.pi*y - case.phase))
+            return coeff[..., None, None] * tensor
+        return assemble_q1_stiffness(case.n, tensor_field)
     n=case.n;i,j=np.meshgrid(np.arange(n+1),np.arange(n+1),indexing='ij');i=i.ravel();j=j.ravel()
     angle=np.deg2rad(case.angle_deg);r=np.array([[np.cos(angle),-np.sin(angle)],[np.sin(angle),np.cos(angle)]])
     k=r@np.diag([1.,case.epsilon])@r.T

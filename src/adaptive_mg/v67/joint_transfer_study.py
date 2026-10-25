@@ -21,6 +21,7 @@ import torch
 from threadpoolctl import threadpool_limits
 
 from ..provenance import hardware_environment, json_safe
+from ..pde import validate_discretization
 from .config import AdaptiveConfig
 from .direct_pruning_study import _ensure_development_open, _validate_protocol
 from .fixed_classical import (BilinearClassicalBaseline, FixedClassicalBaseline,
@@ -88,6 +89,7 @@ def _initialize(settings):
 
 
 def validate_settings(settings):
+    validate_discretization(settings.get('discretization', 'p1'))
     p_only = _p_only(settings)
     if settings.get('version') not in (VERSION, P_VERSION):
         raise ValueError('Use a joint bilinear study configuration')
@@ -179,7 +181,7 @@ def load(output):
 def _development(out, settings, baseline):
     if (out / 'data/development_manifest.json').exists():
         return load_development_data(out / 'data', baseline)
-    plan = make_research_plan(smoke=settings['smoke'], seed=settings['seed'] + 7100003)
+    plan = make_research_plan(smoke=settings['smoke'], seed=settings['seed'] + 7100003, discretization=settings.get('discretization', 'p1'))
     for name, key, count in (('train', 'training_sizes', 'training_per_family'),
                               ('validation', 'validation_sizes', 'validation_per_family')):
         spec = plan['splits'][name]

@@ -15,6 +15,7 @@ import numpy as np
 from ..hierarchy import classical_cycle
 from ..provenance import write_json, json_safe, hardware_environment
 from .banks import Stats, hybrid_cycle
+from ..pde import validate_discretization
 from .config import AdaptiveConfig
 from .direct_pruning_study import (_read, _initialize, _source_snapshot, _verify_import,
     _development, _ensure_development_open, _validate_protocol, _verified_checkpoint)
@@ -35,6 +36,7 @@ ARMS = ('fixed_C', 'direct_CNN', 'direct_CNN_sparse', 'direct_CNN_sparse_joint')
 
 
 def validate_settings(settings):
+    validate_discretization(settings.get('discretization', 'p1'))
     if settings.get('version') != VERSION:
         raise ValueError('Use a sparse smoother study configuration')
     cfg = AdaptiveConfig.from_dict(settings['solver'])

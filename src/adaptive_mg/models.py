@@ -53,6 +53,32 @@ class ResidualConvBody(nn.Module):
         return hidden + self.refine(self.refine_activation(hidden))
 
 
+class PlainConvBody(nn.Module):
+    """Five spatial convolutions matching residual5 without skip additions.
+
+    Widths, kernels, padding and the four GELU locations match the longest
+    residual5 path.  The output head remains the caller's responsibility.
+    Use ordinary Conv2d initialization: the zero-initialized residual branch
+    endings would block learning if copied into a sequential body.
+    """
+
+    spatial_convolutions = SPATIAL_BODY_CONVOLUTIONS
+    receptive_radius = SPATIAL_BODY_CONVOLUTIONS
+
+    def __init__(self, in_channels: int, hidden: int) -> None:
+        super().__init__()
+        layers: list[nn.Module] = []
+        for index in range(self.spatial_convolutions):
+            layers.append(nn.Conv2d(in_channels if index == 0 else hidden,
+                                    hidden, kernel_size=3, padding=1))
+            if index < self.spatial_convolutions - 1:
+                layers.append(nn.GELU())
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+
+
 class CompactConvBody(nn.Module):
     """Three spatial convolutions for distillation, with an optional DW/PW body.
 
@@ -82,6 +108,8 @@ def make_spatial_body(kind: str, in_channels: int, hidden: int) -> nn.Module:
         raise ValueError("hidden width must be positive")
     if kind == "residual5":
         return ResidualConvBody(in_channels, hidden)
+    if kind == "plain5":
+        return PlainConvBody(in_channels, hidden)
     if kind in {"compact3", "depthwise3"}:
         return CompactConvBody(in_channels, hidden, depthwise=kind == "depthwise3")
     raise ValueError(f"unknown spatial body: {kind}")

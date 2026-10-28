@@ -80,6 +80,10 @@ Teacher가 gate를 통과하면 student에는 별도로 teacher V-cycle 보정 �
 | 사용 시점 | 새 A에 대한 P 생성 후 캐시 | 학습과 명시적 offline 평가만 |
 | Attention | 없음 | 없음 |
 
+새 run에서 `unet_transfer.student_body_kind: plain5`를 지정하면 direct/distilled
+student 모두 같은 깊이의 skip 없는 기본 CNN을 사용한다. 생략하면 기존 `residual5`이며,
+teacher는 바뀌지 않는다. [구조와 초기화 비교](PLAIN_CNN_ABLATION_KR.md)를 참고한다.
+
 Teacher의 각 블록은 `shortcut(x) + Conv(GELU(Conv(x)))`이며 채널이 바뀌면
 shortcut에 1×1 convolution을 사용한다. Encoder에서는 stride-2 convolution으로
 축소하고 decoder에서는 skip 특징맵의 정확한 크기로 bilinear resize한 뒤 채널을

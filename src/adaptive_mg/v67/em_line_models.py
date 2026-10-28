@@ -30,10 +30,12 @@ class AffineTransferCNN(TransferNet):
                     complexity_caps=dict(self.complexity_caps), version=1)
 
 
-def make_em_line_components(*, hidden=8, seed=20261021):
+def make_em_line_components(*, hidden=8, seed=20261021,
+                            transfer_body_kind='residual5', smoother_body_kind='residual5'):
     from .line_smoother import LineSmootherCNN
     torch.manual_seed(seed)
-    model = Components(LineSmootherCNN(hidden=hidden), AffineTransferCNN(hidden=hidden),
+    model = Components(LineSmootherCNN(hidden=hidden, body_kind=smoother_body_kind),
+                       AffineTransferCNN(hidden=hidden, body_kind=transfer_body_kind),
                        TinyNet(DETECTOR_INPUTS, 1), TinyNet(CONTROLLER_INPUTS, 4))
     model.metadata = dict(contract=CONTRACT, role='student', em_line_study=True,
         smoother_trained=False, transfer_trained=False, detector_trained=False,

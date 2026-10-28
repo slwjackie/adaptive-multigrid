@@ -58,6 +58,9 @@ def validate_settings(settings):
                 'validation_per_family', 'raw_cycles', 'raw_probes', 'target_rhs_count'):
         if type(settings[key]) is not int or settings[key] < 1:
             raise ValueError(f'{key} must be a positive integer')
+    for key in ('transfer_body_kind', 'smoother_body_kind'):
+        if settings.get(key, 'residual5') not in ('residual5', 'plain5'):
+            raise ValueError(f'{key} must be residual5 or plain5')
     if type(settings['smoke']) is not bool:
         raise ValueError('smoke must be a boolean')
     for key in ('training_sizes', 'validation_sizes'):
@@ -134,7 +137,9 @@ def prepare(config, output, *, resume=False):
         out.mkdir(parents=True, exist_ok=True)
         write_json(out/'configuration.json', settings)
         write_json(out/'fixed_classical.json', baseline.to_dict())
-        model = make_em_line_components(hidden=settings['hidden'], seed=settings['seed'])
+        model = make_em_line_components(hidden=settings['hidden'], seed=settings['seed'],
+            transfer_body_kind=settings.get('transfer_body_kind', 'residual5'),
+            smoother_body_kind=settings.get('smoother_body_kind', 'residual5'))
         model.save(out/'initial.pt')
         write_json(out/'initial.json', dict(sha256=digest_file(out/'initial.pt')))
         write_json(out/'em_line_manifest.json', _manifest(settings, baseline))

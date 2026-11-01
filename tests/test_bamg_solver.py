@@ -188,7 +188,12 @@ def test_baseline_runtime_and_zero_rhs_tolerance_report():
     assert zero['trajectory_log_rate'] is None
     failed = bank.solve(e.b, max_cycles=0)
     assert not failed['converged'] and failed['reason'] == 'max_cycles'
-    assert failed['tolerance'] == max(1e-12, 1e-8 * np.linalg.norm(e.b))
+    # Runtime uses a scaled L2 norm to avoid overflow; its rounding can differ
+    # from the direct NumPy reduction across platforms/BLAS implementations.
+    np.testing.assert_allclose(
+        failed['tolerance'], max(1e-12, 1e-8 * np.linalg.norm(e.b)),
+        rtol=1e-14, atol=0.,
+    )
     nonfinite = bank.solve(np.full(225, np.nan))
     assert not nonfinite['converged'] and nonfinite['reason'] == 'nonfinite_initial_residual'
 

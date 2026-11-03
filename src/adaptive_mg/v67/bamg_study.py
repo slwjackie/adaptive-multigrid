@@ -42,7 +42,8 @@ from .bamg_solver import (
     progress_rates, mask_digest,
 )
 from .bamg_teacher import TeacherConfig, build_teacher
-from .bamg_training import train_supervised, train_finetune
+from .bamg_training import train_supervised, train_finetune, _digest
+from .bamg_validation import WarmCheckpointSelector, validation_settings
 
 
 VERSION = 'bamg-two-cnn-frozen-support-v1'
@@ -159,6 +160,8 @@ def validate_settings(settings):
     if (not np.isfinite(bench['failure_penalty_seconds']) or
         not np.isfinite(bench['timeout_seconds']) or bench['timeout_seconds'] <= 0):
         raise ValueError('Invalid timing budget')
+    if settings.get('warm_validation') is not None:
+        validation_settings(settings['warm_validation'])
     return cfg
 
 
@@ -372,7 +375,7 @@ def freeze_masks(output, *, resume=False):
 
 def finetune(output, *, weighting='both', resume=False):
     out, settings, cfg, baseline = _open(output, mutable=True)
-    train, _, manifest = _examples(out, baseline)
+    train, validation, manifest = _examples(out, baseline)
     choices = ('uniform', 'terminal') if weighting == 'both' else (weighting,)
     for choice in choices:
         path = out / ('finetune_' + choice + '.pt')
@@ -386,14 +389,35 @@ def finetune(output, *, weighting='both', resume=False):
         reference = ReferenceModels.from_state_dict(frozen['reference'])
         options = {**settings['finetune'], 'cycle_loss_weighting': choice,
                    'l1_cap': settings['l1_cap']}
+        selector = None
+        if settings.get('warm_validation') is not None:
+            # Independent cache: evaluation cannot mutate the training reference.
+            selector = WarmCheckpointSelector(validation, train,
+                ReferenceModels.from_state_dict(frozen['reference']), cfg,
+                settings=settings['warm_validation'],
+                best_path=out / ('finetune_' + choice + '_best_warm.pt'))
         history = train_finetune(weight, reference, train, settings=options, mg_config=cfg,
             checkpoint_path=path, resume=resume and path.exists(),
             manifest=dict(study=_read(out / 'study_manifest.json'), data=manifest,
-                          reference_sha256=_file_hash(out / 'reference.pt')))
-        _save(out / ('deployment_' + choice + '.pt'),
-              dict(version=VERSION, reference=reference.state_dict(), weight_spec=weight.spec,
+                          reference_sha256=_file_hash(out / 'reference.pt')),
+            warm_selector=selector)
+        selection = dict(mode='last_update', update=len(history))
+        if selector is not None:
+            # Never resume Adam from this selected (possibly earlier) snapshot.
+            weight.load_state_dict(selector.best['weight_state'], strict=True)
+            selection = dict(mode='best_warm', update=selector.best['update'],
+                metrics=selector.best['metrics'], contract=selector.contract)
+            _write(out / ('finetune_' + choice + '_warm_validation.json'), selector.report())
+        deployment = dict(version=VERSION, reference=reference.state_dict(), weight_spec=weight.spec,
                    weight_state=weight.state_dict(), settings=settings,
-                   reference_sha256=_file_hash(out / 'reference.pt'), weighting=choice))
+                   reference_sha256=_file_hash(out / 'reference.pt'), weighting=choice,
+                   selection=selection)
+        deployment_path = out / ('deployment_' + choice + '.pt')
+        # Equal tensor/metadata content can have different pickle aliasing after
+        # restore. Keep the original bytes so completed benchmark identities hold.
+        if not (resume and deployment_path.exists() and
+                _digest(_load_pt(deployment_path)) == _digest(deployment)):
+            _save(deployment_path, deployment)
         _write(out / ('finetune_' + choice + '_history.json'), history)
 
 

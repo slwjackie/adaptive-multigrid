@@ -111,8 +111,8 @@
     "learning_rate": 0.0001,
     "seed": 2026110107,
     "gradient_clip": 2.0,
-    "cycles": 3,
-    "final_cycles": 6,
+    "cycles": 6,
+    "final_cycles": 12,
     "curriculum_step": 1,
     "cycle_loss_weighting": "uniform",
     "probe_kinds": [
@@ -145,5 +145,14 @@
     "failure_penalty_seconds": 30.0,
     "allowed_failure_rate": 0.0
   },
-  "support_mode": "fixed_bilinear"
+  "support_mode": "fixed_bilinear",
+  "warm_validation": {
+    "every": 1,
+    "per_family_per_size": 1,
+    "repetitions": 1,
+    "warmup_cycles": 1,
+    "timeout_seconds": 30.0,
+    "failure_penalty_seconds": 30.0,
+    "allowed_failure_rate": 0.0
+  }
 }

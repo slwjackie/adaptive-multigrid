@@ -1,6 +1,8 @@
 > **BAMG compact-support experiment:** [Fixed bilinear edges, direct Weight CNN](docs/bamg_compact_weight_study.md)
 > uses the same geometric mask for teacher labels, weight-only training and deployment.
 > Compatible BAMG checkpoints can initialize new training with `--init-weight`.
+> Compact Q1 now trains with 6→12-cycle residual rollouts and selects intermediate
+> checkpoints by full-tolerance warm solves, separately from latest resume state.
 
 > **New independent experiment:** [Fixed-P lightweight line smoothing](docs/light_smoother_study.md)
 > adds a 242-parameter MLP and 26-coefficient ridge predictor, with separately

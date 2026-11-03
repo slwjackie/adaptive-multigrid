@@ -2,8 +2,8 @@
 
 Stage one uses numerical teacher labels; stage two differentiates raw classical
 V-cycles.  Neither entry point performs online adaptation or changes a mask
-while optimizing the residual objective.  Checkpoints are deliberately separate
-from validation model selection: incompatible objectives are never ranked here.
+while optimizing the residual objective. Optional warm validation chooses a
+deployment snapshot separately from the latest optimizer/RNG resume state.
 """
 from __future__ import annotations
 
@@ -258,7 +258,8 @@ def load_training_checkpoint(path):
 
 
 def _run(models, settings, *, phase, source, objective, checkpoint_path, resume,
-         manifest, stop_after, extra=None, verify=None, validation_callback=None):
+         manifest, stop_after, extra=None, verify=None, validation_callback=None,
+         warm_selector=None):
     parameters = _model_contract(models)
     if stop_after is not None and (type(stop_after) is not int or stop_after < 0):
         raise ValueError("stop_after must be a nonnegative invocation budget")
@@ -269,6 +270,10 @@ def _run(models, settings, *, phase, source, objective, checkpoint_path, resume,
     contract = dict(version=TRAINING_VERSION, phase=phase, settings=asdict(settings),
                     source=source, manifest=_plain(manifest or {}), specs=specs,
                     placement=placement)
+    if warm_selector is not None:
+        if checkpoint_path is None or Path(checkpoint_path).resolve() == warm_selector.best_path.resolve():
+            raise ValueError('warm selection requires separate latest and best checkpoint paths')
+        contract['warm_selection'] = warm_selector.contract
     signature = {key + "_hash": _digest(value) for key, value in contract.items()}
     optimizer = torch.optim.Adam(parameters, lr=settings.learning_rate)
     rng = np.random.default_rng(settings.seed)
@@ -289,6 +294,10 @@ def _run(models, settings, *, phase, source, objective, checkpoint_path, resume,
         history, update = saved["history"], saved["update"]
         if not 0 <= update <= settings.updates or len(history) != update:
             raise ValueError("inconsistent checkpoint progress")
+        if warm_selector is not None:
+            if 'warm_selection_state' not in saved:
+                raise ValueError('latest checkpoint has no warm selection state')
+            warm_selector.load_state_dict(saved['warm_selection_state'], update)
     else:
         torch.manual_seed(settings.seed); np.random.seed(settings.seed); random.seed(settings.seed)
     for model in models.values():
@@ -301,10 +310,29 @@ def _run(models, settings, *, phase, source, objective, checkpoint_path, resume,
                      history=history, optimizer=optimizer.state_dict(), rng=_rng_state(rng),
                      models={key: model.state_dict() for key, model in models.items()},
                      extra=extra or {}, failure=failure)
+        if warm_selector is not None:
+            state['warm_selection_state'] = warm_selector.state_dict()
         _atomic_save(state, checkpoint_path)
+        if warm_selector is not None:
+            # Latest is authoritative: a crash before this write is repaired on resume.
+            warm_selector.export_best()
+
+    def evaluate_warm():
+        if warm_selector is None or not warm_selector.is_due(update, settings.updates):
+            return None
+        before = _rng_state(rng)
+        try:
+            return warm_selector.maybe_evaluate(update, settings.updates, models['weight'])
+        finally:
+            _restore_rng(before, rng)
+            if verify:
+                verify()
 
     end = settings.updates if stop_after is None else min(settings.updates, update + stop_after)
     try:
+        # Include the supervised starting point so fine-tuning need not degrade it.
+        if update == 0 and evaluate_warm() is not None:
+            save('running')
         while update < end:
             optimizer.zero_grad(set_to_none=True)
             loss, report = objective(update, rng)
@@ -333,7 +361,12 @@ def _run(models, settings, *, phase, source, objective, checkpoint_path, resume,
                     for model in models.values():
                         model.train()
             history.append(record)
-            if update % settings.checkpoint_every == 0:
+            warm_report = evaluate_warm()
+            if warm_report is not None:
+                record['warm_validation'] = dict(update=update, improved=warm_report['improved'],
+                    failures=warm_report['failures'], attempts=warm_report['attempts'],
+                    mean_case_median_warm_seconds=warm_report['mean_case_median_warm_seconds'])
+            if update % settings.checkpoint_every == 0 or warm_report is not None:
                 save("complete" if update == settings.updates else "running")
         save("complete" if update == settings.updates else "paused")
     except Exception as exc:
@@ -546,11 +579,13 @@ def _validate_time_profile(settings, reference, weight_model):
 
 def train_finetune(weight_model, reference, examples, *, settings=None, mg_config=None,
                    checkpoint_path=None, resume=False, manifest=None,
-                   validation_callback=None, stop_after=None):
+                   validation_callback=None, stop_after=None, warm_selector=None):
     """Train only theta on fixed reference masks; return all completed updates.
 
     ``validation_callback(update, weight_model)`` may return logging data.  Model
-    choice remains the caller's warm-time decision; callback RNG use is isolated.
+    choice can use ``warm_selector`` for periodic full-tolerance warm evaluation.
+    Its best weights/metrics are saved inside latest before exporting a separate
+    best snapshot; validation RNG use is isolated from TRAIN updates.
     ``stop_after`` pauses after that many additional updates and supports exact
     resume without changing the total-budget configuration.
     """
@@ -646,7 +681,7 @@ def train_finetune(weight_model, reference, examples, *, settings=None, mg_confi
     return _run(dict(weight=weight_model), settings, phase="finetune", source=source_contract,
                 objective=objective, checkpoint_path=checkpoint_path, resume=resume,
                 manifest=manifest, stop_after=stop_after, extra=extra, verify=verify,
-                validation_callback=validation_callback)
+                validation_callback=validation_callback, warm_selector=warm_selector)
 
 
 def refit_fixed_mask_labels(levels, masks, *, teacher_config=None):

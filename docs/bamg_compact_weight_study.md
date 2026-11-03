@@ -53,23 +53,76 @@ python scripts/run_v6_7_bamg_study.py run \
   --config configs/v6_7_bamg_compact_smoke_q1.json \
   --output artifacts/bamg_compact_smoke_q1
 
-# 기존 학습 Weight CNN을 초기값으로 쓰는 새 Q1 본실험
+# 새 Weight CNN으로 시작: 6→12 cycle + 중간 warm 체크포인트 선택
 python scripts/run_v6_7_bamg_study.py run \
   --config configs/v6_7_bamg_compact_research_q1.json \
-  --output artifacts/bamg_compact_research_q1 \
-  --init-weight artifacts/bamg_research_q1/deployment_terminal.pt
+  --output artifacts/bamg_compact_warm612_q1
 
 # 새 실험이 중단된 경우: init-weight 없이 재개
 python scripts/run_v6_7_bamg_study.py run \
   --config configs/v6_7_bamg_compact_research_q1.json \
-  --output artifacts/bamg_compact_research_q1 \
+  --output artifacts/bamg_compact_warm612_q1 \
   --resume
+
 ```
 
 이전 체크포인트의 hidden/depth/activation/geometry/mask_mode 등이 새 설정과
 다르면 명시적으로 거절한다. 설정을 원본 spec에 맞춘 후 새 실험을 준비한다.
 초기값 없이 학습하려면 `--init-weight`를 생략한다. 설정의 updates는 새로
 수행할 학습량이며 warm start라고 자동으로 줄이지 않는다.
+기존 가중치로 시작하려면 최초 `run`에
+`--init-weight artifacts/bamg_research_q1/deployment_terminal.pt`를 추가한다.
+
+## 잔차 미세조정과 중간 warm 모델 선택
+
+본실험의 각 uniform/terminal 학습은 같은 지도학습 모델에서 독립적으로 시작한다.
+각각 총 1,000 updates이며, 1–500회는 6 V-cycle, 501–1,000회는 12 V-cycle의
+잔차 손실로 Weight CNN만 학습한다. 기존 mask, smoother, 수렴 tolerance는 유지한다.
+Smoke는 배선 확인용 2 updates(6회, 12회)이며 성능 판단용 학습량이 아니다.
+
+`warm_validation`은 학습 손실과 별개인 개발용 모델 선택이다.
+
+- 본실험은 update 0(지도학습 초기값), 매 100 updates, 마지막 update에서 평가한다.
+  `every: 200`도 설정 가능하다. 마지막 update가 주기의 배수가 아니어도 평가한다.
+- 기존 validation에서 **PDE family × 격자 크기마다 1개**를 case ID 순서로 고정 선택한다.
+  n=31/63 × 7 family = 14개이며 uniform/terminal 모두 같은 A와 RHS를 사용한다.
+  TRAIN과 겹치는 case/operator를 거절한다. Final/OOD에는 접근하지 않는다.
+- 매 평가마다 현재 P와 실제 Galerkin 행렬·분해를 새로 준비한다. Setup은 시간
+  점수에서 제외한다. Untimed warmup 1 cycle 뒤, 같은 RHS를 매번 x=0에서 3회 푼다.
+- 각 측정은 6/12 cycle에서 멈추지 않고
+  `||r|| <= max(1e-12, 1e-8*||r0||)`까지 실행한다. `mg.max_cycles=150` 또는
+  측정당 120초 제한에 걸리면 실패다. 시간 제한은 cycle 사이에서 확인하는 방식이며
+  이미 실행 중인 factorization/cycle을 강제로 중단하는 기능은 아니다.
+- **실패 측정 수가 적은 모델을 먼저 선택**하고, 같으면 case별 반복 중앙값의
+  산술평균 warm 시간으로 비교한다. 실패 측정도 최소 120초의 페널티로 포함한다.
+  동점이면 기존 모델을 유지한다. Fallback 성공을 raw 성공으로 계산하지 않는다.
+- 모든 후보가 실패해도 가장 실패가 적은 후보는 저장하되 `eligible=false`로 표시한다.
+  최종 전체 validation의 기존 실패율 자격 심사는 별도로 유지한다.
+- 평가는 `eval()`과 `no_grad()`로 실행하며 학습 RNG 상태를 복원한다. Warm 시간은
+  미분하지 않는다. 더 긴 rollout의 잔차로 역전파하고, 실제 시간으로 모델을 고른다.
+
+| 파일 (uniform 예시; terminal도 동일) | 용도 |
+| --- | --- |
+| `finetune_uniform.pt` | **latest**: 마지막 저장 update의 모델·Adam·RNG·학습 이력. 재개는 항상 여기서 수행 |
+| `finetune_uniform_best_warm.pt` | **best_warm**: 선택된 update의 가중치와 성능·평가 조건. Optimizer 없음 |
+| `deployment_uniform.pt` | 학습 종료 후 **best_warm 가중치**를 내보낸 배포 모델. 최종 benchmark도 이 모델 사용 |
+| `finetune_uniform_warm_validation.json` | 미세조정 종료 후 중간 평가 이력과 선택된 update를 확인하는 작은 보고서 |
+
+Latest 안에도 최우수 가중치와 평가 이력을 보관한다. 두 파일 저장 사이 중단이
+생겨도 latest에서 best 파일을 복원할 수 있다. 재개 후 이전 최우수 결과를 유지하며,
+이미 끝난 평가를 반복하지 않는다. Latest 저장 주기(10 updates)와 별개로 평가가
+끝난 update에도 latest를 저장한다. 가장 좋은 모델이 update 0일 수도 있다.
+전체 잔차 궤적·해 벡터·계층 행렬을 중간 평가 기록에 저장하지 않아 큰 파일의
+중복을 피한다. 실행 중 성능 요약은 `Warm validation update=... best_update=...`로 출력된다.
+
+긴 rollout과 중간 평가 때문에 **오프라인 학습 시간은 늘어난다**. 최종 warm 풀이에
+그 비용이 들어가지는 않는다. 14개 선택용 validation에서 빠르다는 것이 전체
+validation이나 final/OOD의 우위를 보장하지 않는다. 최종 비교는 기존 전체 validation을
+사용하고, 연구 결론은 별도로 보존된 final/OOD로 확인한다.
+
+기존 실험은 source/configuration manifest가 달라지므로 그대로 `--resume`하지 않는다.
+새 출력 폴더로 시작하거나 호환되는 가중치만 `--init-weight`로 이전한다.
+기존 자유-mask 설정은 `warm_validation`을 생략하면 종전의 마지막 update 선택을 유지한다.
 
 CNN 없이 compact teacher 라벨만 먼저 만들려면:
 
@@ -104,10 +157,12 @@ teacher 후보 자체의 full-tolerance 시간 선택을 구현했다고 해석�
 ```bash
 python -m pytest tests/test_bamg_compact.py tests/test_bamg_teacher.py \
   tests/test_bamg_transfer.py tests/test_bamg_solver.py \
-  tests/test_bamg_training.py tests/test_bamg_study.py -ra
+  tests/test_bamg_training.py tests/test_bamg_study.py \
+  tests/test_bamg_warm_validation.py -ra
 ```
 
 새 검증에는 n=31/63 Q1 bootstrap의 support·9-point 구조·line batching,
 모델 없는 geometry reference, Weight-only 학습과 exact resume,
-옛 checkpoint의 weight-only 초기화, 새 CLI 전체 실행과 재개가 포함된다.
+옛 checkpoint의 weight-only 초기화, 6→12 cycle의 CLI 실행과 재개, 실패 우선 선택,
+학습 RNG 독립성, 초기/중간/최종 평가, best/latest 분리와 배포 연결이 포함된다.
 이 테스트는 연구 규모에서의 속도 향상 측정이 아니다.

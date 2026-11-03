@@ -52,6 +52,12 @@ METHODS = ('fixed_C', 'em5_C', 'ls_once_C', 'bootstrap_C',
            'bootstrap_two_cnn_finetuned_terminal')
 
 
+def methods_for(settings):
+    if settings.get('support_mode', 'learned') == 'fixed_bilinear':
+        return tuple(m.replace('bootstrap_two_cnn_', 'bootstrap_weight_cnn_') for m in METHODS)
+    return METHODS
+
+
 def _hash(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'),
                                      allow_nan=False).encode()).hexdigest()
@@ -135,7 +141,12 @@ def validate_settings(settings):
         raise ValueError('Expected k=4 or 8 and a feasible positive L1 cap')
     if settings.get('torch_threads', 0) < 1:
         raise ValueError('Positive thread budget required')
-    TeacherConfig(**{**settings['teacher'], 'k': settings['k'], 'l1_cap': settings['l1_cap']})
+    mode = settings.get('support_mode', 'learned')
+    if settings['teacher'].get('support_mode', mode) != mode:
+        raise ValueError('Teacher and student must use the same support_mode')
+    if mode == 'fixed_bilinear' and settings['supervised'].get('alpha_mask', 1.) != 0:
+        raise ValueError('Fixed bilinear support requires alpha_mask=0')
+    _teacher_config(settings)
     bench = settings['benchmark']
     if bench.get('selection_workload') != 'warm_rhs_1':
         raise ValueError('Default study selection must explicitly be warm_rhs_1')
@@ -215,7 +226,8 @@ def prepare(config, output, *, resume=False):
 
 
 def _teacher_config(settings, *, once=False):
-    values = {**settings['teacher'], 'k': settings['k'], 'l1_cap': settings['l1_cap']}
+    values = {**settings['teacher'], 'k': settings['k'], 'l1_cap': settings['l1_cap'],
+              'support_mode': settings.get('support_mode', 'learned')}
     if once:
         values['setup_passes'] = 1
     return TeacherConfig(**values)
@@ -266,31 +278,64 @@ def _teacher_results(out, examples):
 
 def _models(settings):
     _initialize(settings)
-    return (MaskCNN(**settings['models']['mask']).double(),
+    return (None if settings.get('support_mode') == 'fixed_bilinear'
+            else MaskCNN(**settings['models']['mask']).double(),
             WeightCNN(**settings['models']['weight']).double())
 
 
 def _model_package(mask, weight):
-    return dict(mask_spec=mask.spec, mask_state=mask.state_dict(),
+    return dict(mask_spec=mask.spec if mask is not None else None,
+                mask_state=mask.state_dict() if mask is not None else None,
                 weight_spec=weight.spec, weight_state=weight.state_dict())
 
 
 def _restore_models(package):
-    mask = model_from_spec(package['mask_spec']).double()
+    mask = model_from_spec(package['mask_spec']).double() if package['mask_spec'] is not None else None
     weight = model_from_spec(package['weight_spec']).double()
-    mask.load_state_dict(package['mask_state']); weight.load_state_dict(package['weight_state'])
+    if mask is not None:
+        mask.load_state_dict(package['mask_state'])
+    elif package['mask_state'] is not None:
+        raise ValueError('Mask state without mask architecture')
+    weight.load_state_dict(package['weight_state'])
     return mask, weight
 
 
-def pretrain(output, *, resume=False):
+def _initialize_weight(weight, path):
+    """Transfer compatible tensors only; never inherit optimizer/progress/masks."""
+    path = Path(path).resolve()
+    before = _file_hash(path)
+    package = torch.load(path, map_location='cpu', weights_only=True)
+    spec = package.get('weight_spec', package.get('specs', {}).get('weight'))
+    state = package.get('weight_state', package.get('models', {}).get('weight'))
+    if spec != weight.spec or state is None:
+        raise ValueError('Weight CNN architecture mismatch; use the source model specification')
+    if _file_hash(path) != before:
+        raise ValueError('Initialization checkpoint changed while reading')
+    weight.load_state_dict(state, strict=True)
+    return dict(path=str(path), sha256=before, weight_spec=spec,
+                transfer='weights_only', optimizer_reused=False, training_updates_reused=False)
+
+
+def pretrain(output, *, resume=False, init_weight=None):
     out, settings, _, baseline = _open(output, mutable=True)
+    if resume and init_weight is not None:
+        raise ValueError('Use --init-weight for a new training run, not --resume')
     if (out / 'pretrain.pt').exists() and not resume:
         raise FileExistsError('Supervised checkpoint exists; use --resume or a new run')
     train, _, manifest = _examples(out, baseline); mask, weight = _models(settings)
+    provenance = dict(study=_read(out / 'study_manifest.json'), data=manifest)
+    initial_path = out / 'weight_initialization.json'
+    if resume and initial_path.exists():
+        provenance['initialization'] = _read(initial_path)
+    elif init_weight is not None:
+        provenance['initialization'] = _initialize_weight(weight, init_weight)
+        _write(initial_path, provenance['initialization'])
+    elif initial_path.exists():
+        raise ValueError('Initialization record already exists; use the recorded initialization explicitly')
     history = train_supervised(mask, weight, _teacher_results(out, train),
         settings={**settings['supervised'], 'l1_cap': settings['l1_cap']},
         checkpoint_path=out / 'pretrain.pt', resume=resume,
-        manifest=dict(study=_read(out / 'study_manifest.json'), data=manifest))
+        manifest=provenance)
     _save(out / 'supervised_models.pt', _model_package(mask, weight))
     _write(out / 'pretrain_history.json', history)
 
@@ -312,7 +357,9 @@ def freeze_masks(output, *, resume=False):
                 raise ValueError('Frozen binary masks are missing or differ from their manifest')
         return
     mask, weight = _restore_models(_load_pt(out / 'supervised_models.pt'))
-    reference = ReferenceModels(mask, weight, k=settings['k'], l1_cap=settings['l1_cap'],
+    compact = settings.get('support_mode') == 'fixed_bilinear'
+    reference = ReferenceModels(None if compact else mask, None if compact else weight,
+                                 k=settings['k'], l1_cap=settings['l1_cap'],
                                  mg_config=cfg, caps=settings.get('caps'),
                                  support_mode=settings.get('support_mode', 'learned'))
     train, validation, _ = _examples(out, baseline); masks = {}
@@ -399,6 +446,9 @@ def _packages(out):
         weight.load_state_dict(payload['weight_state'])
         result['bootstrap_two_cnn_finetuned_' + choice] = (
             weight, ReferenceModels.from_state_dict(payload['reference']))
+    if frozen['reference']['support_mode'] == 'fixed_bilinear':
+        result = {name.replace('bootstrap_two_cnn_', 'bootstrap_weight_cnn_'): value
+                  for name, value in result.items()}
     return result
 
 
@@ -485,7 +535,7 @@ def summarize(rows, settings):
     config = settings['benchmark']; penalty = config['failure_penalty_seconds']
     summaries = {}
     cohorts = {r['case_id'] for r in rows}
-    for method in METHODS:
+    for method in methods_for(settings):
         selected = [r for r in rows if r['method'] == method]
         cases = []; failures = 0; total = 0
         for case_id in sorted(cohorts):
@@ -504,9 +554,9 @@ def summarize(rows, settings):
             failure_rate=rate, eligible=rate <= config['allowed_failure_rate'],
             mean_case_median_warm_seconds=float(np.mean(cases)) if cases else None,
             failed_samples_use_seconds_penalty=penalty)
-    eligible = [m for m in METHODS if summaries[m]['eligible'] and summaries[m]['cases']]
+    eligible = [m for m in methods_for(settings) if summaries[m]['eligible'] and summaries[m]['cases']]
     winner = min(eligible, key=lambda m: summaries[m]['mean_case_median_warm_seconds']) if eligible else None
-    learned = [m for m in eligible if m.startswith('bootstrap_two_cnn_')]
+    learned = [m for m in eligible if m.startswith(('bootstrap_two_cnn_', 'bootstrap_weight_cnn_'))]
     selected_model = min(learned, key=lambda m: summaries[m]['mean_case_median_warm_seconds']) if learned else None
     return dict(methods=summaries, fastest_eligible_method=winner,
                 selected_learned_model=selected_model, selection_split='validation',
@@ -531,7 +581,7 @@ def _benchmark_cases(out, settings, cfg, examples, *, result_path, resume=False,
     for case_index, example in enumerate(examples):
         rhs = _rhs(example, max(config['rhs_counts']), settings['seed'] + case_index)
         for repeat in range(config['repetitions']):
-            methods = list(METHODS); rng.shuffle(methods)
+            methods = list(methods_for(settings)); rng.shuffle(methods)
             for method in methods:
                 if (example['case_id'], method, repeat) in done:
                     continue
@@ -596,6 +646,8 @@ def diagnose(output):
     out, settings, _, _ = _open(output)
     mask, weight = _restore_models(_load_pt(out / 'supervised_models.pt'))
     def model_info(model):
+        if model is None:
+            return dict(spec=None, parameters=0, bytes=0, convolution_layers=0)
         return dict(spec=model.spec, parameters=sum(p.numel() for p in model.parameters()),
                     bytes=sum(p.numel() * p.element_size() for p in model.parameters()),
                     convolution_layers=sum(isinstance(m, torch.nn.Conv2d) for m in model.modules()))
@@ -607,7 +659,9 @@ def diagnose(output):
                          total_ms=int(np.ceil(np.log(1e-8)/np.log(rho))) * ms)
                      for rho, ms in ((.8, 1), (.25, 4))]
     report = dict(version=VERSION, mask=model_info(mask), weight=model_info(weight),
-                  deployment_parameter_copies='one mask, frozen reference weight, final weight',
+                  deployment_parameter_copies=('one weight CNN; geometry-only masks'
+                      if settings.get('support_mode') == 'fixed_bilinear'
+                      else 'one mask, frozen reference weight, final weight'),
                   mu=settings['teacher']['mu'], omega_uniform='1/K',
                   omega_terminal='0,...,0,1', rate_examples=rate_examples,
                   uniform_prefers_first=bool(uniform), terminal_prefers_second=bool(terminal_prefers_second),
@@ -643,7 +697,7 @@ def evaluate_final(output, *, resume=False):
     out, settings, cfg, baseline = _open(output)
     root = out / 'data'; freeze_path = root / 'research_freeze.json'
     with claim_final_evaluation(root, freeze_path, dict(command='bamg-evaluate-final',
-            settings_digest=_hash(settings), methods=list(METHODS)), resume=resume) as claim:
+            settings_digest=_hash(settings), methods=list(methods_for(settings))), resume=resume) as claim:
         splits, _ = materialize_final_data(root, claim, baseline); paths = []
         for split, data in splits.items():
             examples = [dict(A=e.a, shape=(e.n, e.n), case_id=e.digest, b=e.b,
@@ -666,18 +720,25 @@ def main(argv=None):
             p.add_argument('--resume', action='store_true')
         if command == 'finetune':
             p.add_argument('--weighting', choices=('uniform', 'terminal', 'both'), default='both')
+        if command in ('pretrain', 'run'):
+            p.add_argument('--init-weight', help='Compatible old BAMG weight tensors; starts new optimizer/updates')
     args = parser.parse_args(argv)
+    if getattr(args, 'init_weight', None) and args.resume:
+        parser.error('--init-weight initializes a new run; it cannot be combined with --resume')
     if args.command in ('prepare', 'run'):
         prepare(args.config, args.output, resume=args.resume)
     if args.command == 'run':
         teacher(args.output, resume=args.resume)
-        pretrain(args.output, resume=args.resume and (Path(args.output) / 'pretrain.pt').exists())
+        pretrain(args.output, resume=args.resume and (Path(args.output) / 'pretrain.pt').exists(),
+                 init_weight=args.init_weight)
         freeze_masks(args.output, resume=args.resume)
         finetune(args.output, resume=args.resume)
         diagnose(args.output)
         benchmark(args.output, resume=args.resume and (Path(args.output) / 'benchmark.json').exists())
     elif args.command == 'finetune':
         finetune(args.output, weighting=args.weighting, resume=args.resume)
+    elif args.command == 'pretrain':
+        pretrain(args.output, resume=args.resume, init_weight=args.init_weight)
     elif args.command in ('diagnose', 'freeze'):
         globals()[args.command](args.output)
     elif args.command != 'prepare':

@@ -233,8 +233,12 @@ class ReferenceModels:
             raise ValueError('support_mode must be learned or fixed_bilinear')
         if not isinstance(k, int) or not 1 <= k <= 16:
             raise ValueError('k must be an integer in [1,16]')
-        self.mask_model = deepcopy(mask_model).eval().requires_grad_(False)
-        self.weight_model = deepcopy(weight_model).eval().requires_grad_(False)
+        if support_mode == 'learned' and (mask_model is None or weight_model is None):
+            raise ValueError('Learned support requires both reference CNNs')
+        self.mask_model = (deepcopy(mask_model).eval().requires_grad_(False)
+                           if mask_model is not None else None)
+        self.weight_model = (deepcopy(weight_model).eval().requires_grad_(False)
+                             if weight_model is not None else None)
         self.k, self.l1_cap = k, float(l1_cap)
         self.support_mode = support_mode
         self.mg_config = _config(mg_config)
@@ -245,8 +249,9 @@ class ReferenceModels:
 
     def _signature(self):
         return dict(version=self.VERSION, backend='scipy_fp64_sparse_values_v1',
-                    mask=_module_key(self.mask_model),
-                    weight=_module_key(self.weight_model), k=self.k, l1_cap=self.l1_cap,
+                    mask=_module_key(self.mask_model) if self.mask_model is not None else None,
+                    weight=_module_key(self.weight_model) if self.weight_model is not None else None,
+                    k=self.k, l1_cap=self.l1_cap,
                     support_mode=self.support_mode,
                     mg=asdict(self.mg_config), caps=asdict(self.caps),
                     features=FEATURE_VERSION, candidates=CANDIDATE_VERSION,
@@ -254,6 +259,8 @@ class ReferenceModels:
 
     def check_immutable(self):
         for model in (self.mask_model, self.weight_model):
+            if model is None:
+                continue
             if any(m.training for m in model.modules()) or any(p.requires_grad for p in model.parameters()):
                 raise RuntimeError('Reference models must remain frozen in evaluation mode')
         if self._signature() != self._identity:
@@ -278,13 +285,19 @@ class ReferenceModels:
             expected = torch.tensor(np.array(pattern.columns, copy=True), dtype=torch.int64)
             if mask.dtype != torch.bool or mask.shape != expected.shape or not torch.equal(columns, expected):
                 raise RuntimeError('Corrupted reference candidate mapping')
+            if self.support_mode == 'fixed_bilinear' and not torch.equal(mask, fixed_bilinear_mask(pattern)):
+                raise RuntimeError('Cached support differs from bilinear geometry')
             sh = cs
         if not terminal(sh, self.mg_config.coarsest_n):
             raise RuntimeError('Mask cache depth mismatch')
 
     def cache_key(self, a, shape):
         self.check_immutable()
-        spec = dict(reference=self._identity, operator=_operator_key(a), shape=list(shape))
+        # All problems with the same grid share the same geometric masks. Do not
+        # serialize hundreds of copies of identical masks/candidate indices.
+        spec = dict(reference=self._identity, shape=list(shape))
+        if self.support_mode == 'learned':
+            spec['operator'] = _operator_key(a)
         return hashlib.sha256(json.dumps(spec, sort_keys=True).encode()).hexdigest()
 
     def masks_for(self, a, shape):
@@ -299,7 +312,8 @@ class ReferenceModels:
                                     support_mode=self.support_mode,
                                     reference_seconds=perf_counter() - start)
             return [mask.clone() for mask in entry['masks']]
-        at = SparseTensor.from_scipy(a); sh = shape; masks = []; columns = []; levels = []
+        at = SparseTensor.from_scipy(a) if self.support_mode == 'learned' else None
+        sh = shape; masks = []; columns = []; levels = []
         timings = _timings(); index = 0; strategy = get_strategy(self.mg_config.strategy_name)
         with torch.no_grad():
             while not terminal(sh, self.mg_config.coarsest_n):
@@ -319,6 +333,13 @@ class ReferenceModels:
                     _sync(self.mask_model); timings['mask_cnn_seconds'] += perf_counter() - t
                     t = perf_counter(); mask = select_mask(scores, pattern, k=self.k).detach().cpu().bool()
                     _sync(self.mask_model); timings['selection_seconds'] += perf_counter() - t
+                if self.support_mode == 'fixed_bilinear':
+                    # Geometry is independent of A and of any reference weights.
+                    # Do not build a second numerical hierarchy just to get masks.
+                    masks.append(mask)
+                    columns.append(torch.tensor(np.array(pattern.columns, copy=True), dtype=torch.int64))
+                    sh = cs; index += 1
+                    continue
                 p, _ = _weights(at, sh, pattern, mask, self.weight_model, self.l1_cap, timings)
                 level = TLevel(at, sh, index, strategy, p=p)
                 levels.append(level)
@@ -339,9 +360,12 @@ class ReferenceModels:
     def state_dict(self, *, include_cache=False):
         self.check_immutable()
         state = dict(version=self.VERSION, identity=deepcopy(self._identity),
-                     mask_spec=deepcopy(self.mask_model.spec), weight_spec=deepcopy(self.weight_model.spec),
-                     mask_state={k: v.detach().cpu().clone() for k, v in self.mask_model.state_dict().items()},
-                     weight_state={k: v.detach().cpu().clone() for k, v in self.weight_model.state_dict().items()},
+                     mask_spec=deepcopy(self.mask_model.spec) if self.mask_model is not None else None,
+                     weight_spec=deepcopy(self.weight_model.spec) if self.weight_model is not None else None,
+                     mask_state=({k: v.detach().cpu().clone() for k, v in self.mask_model.state_dict().items()}
+                                 if self.mask_model is not None else None),
+                     weight_state=({k: v.detach().cpu().clone() for k, v in self.weight_model.state_dict().items()}
+                                   if self.weight_model is not None else None),
                      k=self.k, l1_cap=self.l1_cap, mg_config=asdict(self.mg_config), caps=asdict(self.caps),
                      support_mode=self.support_mode)
         if include_cache:
@@ -355,6 +379,11 @@ class ReferenceModels:
         models = []
         for name in ('mask', 'weight'):
             values = state[name + '_state']
+            if values is None:
+                if state.get('support_mode') != 'fixed_bilinear' or state[name + '_spec'] is not None:
+                    raise ValueError('Only geometry support may omit reference models')
+                models.append(None)
+                continue
             dtype = next(v.dtype for v in values.values() if v.is_floating_point())
             model = model_from_spec(state[name + '_spec']).to(device=device, dtype=dtype)
             model.load_state_dict(values); models.append(model)

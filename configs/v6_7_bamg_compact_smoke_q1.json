@@ -1,0 +1,149 @@
+{
+  "version": "bamg-two-cnn-frozen-support-v1",
+  "smoke": true,
+  "seed": 2026110107,
+  "torch_threads": 1,
+  "dtype": "float64",
+  "discretization": "q1",
+  "mg": {
+    "mode": "classical",
+    "fixed_k": 0,
+    "max_nn_cycles": 6,
+    "max_cycles": 150,
+    "tolerance": 1e-08,
+    "absolute_tolerance": 1e-12,
+    "residual_reference": "initial",
+    "pre_steps": 2,
+    "post_steps": 2,
+    "coarsest_n": 3,
+    "strategy_name": "line_alt_bilinear_full__v22",
+    "jacobi_omega": 0.72,
+    "chebyshev_degree": 2,
+    "chebyshev_lower_fraction": 0.15,
+    "em_iterations": 5,
+    "em_rtol": 1e-08,
+    "em_fixed_iterations": true,
+    "operator_sweeps": 3,
+    "operator_omega": 0.7,
+    "operator_blend": 0.75,
+    "operator_drop_tolerance": 0.0001,
+    "operator_candidate_topk": 8,
+    "nn_levels": 1,
+    "smoother_gain_multiplier": 1,
+    "stencil_backend": "csr",
+    "native_threads": 1,
+    "native_min_cells": 2048,
+    "native_parallel_min": 32768,
+    "safety_growth": 1,
+    "safety_rtol_slack": 1e-12,
+    "stagnation_rho": 0.98,
+    "stagnation_patience": 2,
+    "near_tolerance_factor": 10,
+    "reserve_classical_cycles": 1,
+    "divergence_factor": 1000000000000,
+    "device": "cpu",
+    "verbose": false
+  },
+  "k": 4,
+  "l1_cap": 8.0,
+  "models": {
+    "weight": {
+      "hidden": 8,
+      "depth": 5,
+      "activation": "relu",
+      "geometry": true,
+      "mask_mode": "early"
+    }
+  },
+  "data": {
+    "train": {
+      "sizes": [
+        15
+      ],
+      "per_family": 1
+    },
+    "validation": {
+      "sizes": [
+        15
+      ],
+      "per_family": 1
+    }
+  },
+  "teacher": {
+    "vectors": 16,
+    "sweeps": [
+      2,
+      4,
+      8
+    ],
+    "setup_passes": 2,
+    "mu": 1e-06,
+    "seed": 2026110107,
+    "selection_vectors": 16,
+    "audit_vectors": 16,
+    "selection_cycles": 2,
+    "eigen_count": 4,
+    "eigen_refine": 2,
+    "adaptive_vectors": 4,
+    "adaptive_cycles": 1,
+    "augment_vectors": 4,
+    "max_vector_retries": 1,
+    "rank_tolerance": 1e-10,
+    "condition_limit": 10000000000.0,
+    "weighting": "uniform",
+    "energy_weight_cap": 100.0,
+    "max_operator_complexity": 8.0,
+    "max_mass_nnz": 10000000
+  },
+  "supervised": {
+    "updates": 2,
+    "learning_rate": 0.001,
+    "seed": 2026110107,
+    "gradient_clip": 2.0,
+    "alpha_mask": 0.0,
+    "alpha_weight": 1.0,
+    "alpha_action": 0.1,
+    "normalize_weights": true,
+    "checkpoint_every": 1
+  },
+  "finetune": {
+    "updates": 2,
+    "learning_rate": 0.0001,
+    "seed": 2026110107,
+    "gradient_clip": 2.0,
+    "cycles": 3,
+    "final_cycles": 6,
+    "curriculum_step": 1,
+    "cycle_loss_weighting": "uniform",
+    "probe_kinds": [
+      "random",
+      "smoothed",
+      "hard"
+    ],
+    "probes_per_kind": 1,
+    "smoothing_sweeps": 4,
+    "hard_cycles": 2,
+    "eps": 1e-12,
+    "checkpoint_every": 1
+  },
+  "caps": {
+    "max_p_nnz": 5000000,
+    "max_a_nnz": 20000000,
+    "max_operator_complexity": 8.0,
+    "max_sparse_bytes": 2000000000
+  },
+  "benchmark": {
+    "selection_workload": "warm_rhs_1",
+    "repetitions": 1,
+    "rhs_counts": [
+      1,
+      4,
+      16
+    ],
+    "warmup_cycles": 1,
+    "timeout_seconds": 30.0,
+    "failure_penalty_seconds": 30.0,
+    "allowed_failure_rate": 0.0
+  },
+  "support_mode": "fixed_bilinear"
+}

@@ -62,8 +62,11 @@ class TeacherConfig:
     energy_weight_cap: float = 100.0
     max_operator_complexity: float = 30.0
     max_mass_nnz: int = 10_000_000
+    support_mode: str = "learned"
 
     def __post_init__(self):
+        if self.support_mode not in ("learned", "fixed_bilinear"):
+            raise ValueError("support_mode must be learned or fixed_bilinear")
         object.__setattr__(self, "sweeps", tuple(self.sweeps))
         positive = ("vectors", "setup_passes", "k", "selection_vectors", "audit_vectors",
                     "selection_cycles", "adaptive_cycles", "max_mass_nnz")
@@ -320,7 +323,7 @@ def local_fit(A, pattern, vectors, *, config=None, fixed_mask=None, heldout_vect
     bounded by at most 16 candidates per row and is not a globally optimal
     support search.  Fixed-mask refitting preserves selected zero-valued slots.
     """
-    from .bamg_transfer import geometry_constraints
+    from .bamg_transfer import geometry_constraints, fixed_bilinear_mask
 
     config = config or TeacherConfig()
     a = _checked_matrix(A, pattern.fine_shape)
@@ -336,11 +339,17 @@ def local_fit(A, pattern, vectors, *, config=None, fixed_mask=None, heldout_vect
     vector_weights = _vector_weights(a, z, config)
     weights = np.zeros(columns.shape, dtype=np.float64)
     mask = np.zeros(columns.shape, dtype=bool)
+    if config.support_mode == "fixed_bilinear":
+        geometric_mask = fixed_bilinear_mask(pattern).cpu().numpy()
+        if fixed_mask is not None and not np.array_equal(fixed_mask, geometric_mask):
+            raise ValueError("fixed mask differs from the declared bilinear geometry")
+        fixed_mask = geometric_mask
     if fixed_mask is not None:
         fixed_mask = np.asarray(fixed_mask, dtype=bool)
         if fixed_mask.shape != columns.shape or np.any(fixed_mask & ~valid):
             raise ValueError("fixed mask has wrong shape or invalid candidates")
-        degrees = np.minimum(config.k, valid.sum(axis=1))
+        degrees = (geometric_mask.sum(axis=1) if config.support_mode == "fixed_bilinear"
+                   else np.minimum(config.k, valid.sum(axis=1)))
         degrees[injection >= 0] = 1
         if not np.array_equal(fixed_mask.sum(axis=1), degrees):
             raise ValueError("fixed mask must obey the configured row cardinalities")

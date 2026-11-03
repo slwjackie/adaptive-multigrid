@@ -30,6 +30,7 @@ from ..transfer import coarse_fine_indices
 from .bamg_transfer import (
     MaskCNN, WeightCNN, direct_features, direct_pattern, geometry_constraints,
     project_weights, row_slots, sparse_from_weights,
+    fixed_bilinear_mask,
 )
 
 
@@ -402,24 +403,33 @@ def supervised_objective(mask_model, weight_model, levels, *, settings=None):
     each test vector's mean-square amplitude.  No teacher gradients are built.
     """
     settings = _settings(settings, SupervisedSettings)
+    if mask_model is None and (settings.alpha_mask != 0 or settings.alpha_weight + settings.alpha_action <= 0):
+        raise ValueError("Weight-only supervision requires alpha_mask=0 and a weight/action loss")
     parameter = next(weight_model.parameters())
     terms, reports = [], []
     for index, level in enumerate(levels):
         pattern, mask_np, target_np = _aligned_labels(level)
+        if mask_model is None and not np.array_equal(mask_np, fixed_bilinear_mask(pattern).numpy()):
+            raise ValueError("Weight-only teacher labels must use fixed bilinear support")
         _, injection, valid_np = geometry_constraints(pattern)
         dtype, device = parameter.dtype, parameter.device
         target = torch.as_tensor(target_np, dtype=dtype, device=device)
         mask = torch.as_tensor(mask_np, dtype=torch.bool, device=device)
         valid = torch.as_tensor(valid_np, dtype=torch.bool, device=device)
         free = torch.as_tensor(injection < 0, device=device) & valid.any(1)
+        if mask_model is None:
+            free &= mask.sum(1) > 1  # One-slot rows are fixed by their row sum.
         if not bool(free.any()):
             continue
         features = direct_features(_operator(level), _shape(level), dtype=dtype, device=device)
-        logits = row_slots(mask_model(features), pattern)
+        logits = row_slots(mask_model(features), pattern) if mask_model is not None else None
         predicted = project_weights(row_slots(weight_model(features, mask), pattern), mask,
                                     pattern, l1_cap=settings.l1_cap)
-        bce = F.binary_cross_entropy_with_logits(logits, mask.to(dtype), reduction="none")
-        bce = ((bce * valid).sum(1) / valid.sum(1).clamp_min(1))[free].mean()
+        if logits is None:
+            bce = predicted.sum() * 0.
+        else:
+            bce = F.binary_cross_entropy_with_logits(logits, mask.to(dtype), reduction="none")
+            bce = ((bce * valid).sum(1) / valid.sum(1).clamp_min(1))[free].mean()
         scale = target.abs().sum(1).clamp_min(1.) if settings.normalize_weights else torch.ones_like(target[:, 0])
         mse = ((((predicted - target) / scale[:, None]).square() * mask).sum(1)
                / mask.sum(1).clamp_min(1))[free].mean()
@@ -437,7 +447,7 @@ def supervised_objective(mask_model, weight_model, levels, *, settings=None):
             action = (difference[free].square() / scale_z[None, :]).mean()
         term = settings.alpha_mask * bce + settings.alpha_weight * mse + settings.alpha_action * action
         terms.append(term)
-        selected = (logits.detach() > 0) & valid & free[:, None]
+        selected = ((logits.detach() > 0) if logits is not None else mask) & valid & free[:, None]
         true = mask & free[:, None]
         tp = int((selected & true).sum())
         reports.append(dict(level=index, mask_bce=float(bce.detach()), weight_mse=float(mse.detach()),
@@ -447,7 +457,8 @@ def supervised_objective(mask_model, weight_model, levels, *, settings=None):
     if not terms:
         raise ValueError("no learnable teacher interpolation rows")
     return torch.stack(terms).mean(), dict(levels=reports, normalization="equal levels, equal rows",
-                                          teacher_forcing=True, hard_topk_gradient=False)
+                                          teacher_forcing=True, hard_topk_gradient=False,
+                                          mask_learned=mask_model is not None)
 
 
 def train_supervised(mask_model, weight_model, teacher_results, *, settings=None,
@@ -469,7 +480,8 @@ def train_supervised(mask_model, weight_model, teacher_results, *, settings=None
         loss, report = supervised_objective(mask_model, weight_model, groups[case], settings=settings)
         return loss, dict(case=case, **report)
 
-    return _run(dict(mask=mask_model, weight=weight_model), settings, phase="supervised",
+    models = dict(weight=weight_model) if mask_model is None else dict(mask=mask_model, weight=weight_model)
+    return _run(models, settings, phase="supervised",
                 source=source, objective=objective, checkpoint_path=checkpoint_path,
                 resume=resume, manifest=manifest, stop_after=stop_after)
 
@@ -518,7 +530,8 @@ def _validate_time_profile(settings, reference, weight_model):
     if not isinstance(profile, Mapping) or not profile.get("snapshot_id"):
         raise ValueError("detached-time training requires a deployment time_profile snapshot")
     expected = dict(backend="scipy_fp64_cpu", dtype="torch.float64", k=reference.k,
-                    mask_spec=reference.mask_model.spec, weight_spec=weight_model.spec,
+                    mask_spec=reference.mask_model.spec if reference.mask_model is not None else None,
+                    weight_spec=weight_model.spec,
                     hardware=hardware_environment(), cycle_seconds=list(settings.time_weights))
     for key, value in expected.items():
         if _digest(profile.get(key)) != _digest(value):
@@ -565,13 +578,18 @@ def train_finetune(weight_model, reference, examples, *, settings=None, mg_confi
     if settings.l1_cap != reference.l1_cap:
         raise ValueError("student and frozen reference must use the same weight constraint")
     examples = list(examples)
-    masks, source = [], []
+    masks, source, geometry_masks = [], [], {}
     for example in examples:
         _train_only(example)
         a, shape = _operator(example), _shape(example)
         if a.shape != (shape[0] * shape[1],) * 2:
             raise ValueError("operator/grid mismatch")
-        case_masks = [m.detach().cpu().clone() for m in reference.masks_for(a, shape)]
+        if reference.support_mode == "fixed_bilinear" and shape in geometry_masks:
+            case_masks = geometry_masks[shape]
+        else:
+            case_masks = [m.detach().cpu().clone() for m in reference.masks_for(a, shape)]
+            if reference.support_mode == "fixed_bilinear":
+                geometry_masks[shape] = case_masks
         masks.append(case_masks)
         source.append(dict(operator=operator_digest(a), shape=shape, dtype=str(a.dtype),
                            case_id=_field(example, "case_id", _field(example, "group_digest")),
@@ -581,6 +599,8 @@ def train_finetune(weight_model, reference, examples, *, settings=None, mg_confi
     mask_hash = _digest(masks)
     train_storage = {p.untyped_storage().data_ptr() for p in weight_model.parameters()}
     for model in (reference.mask_model, reference.weight_model):
+        if model is None:
+            continue
         if model.training or any(p.requires_grad for p in model.parameters()):
             raise ValueError("reference CNNs must be frozen and in eval mode")
         if train_storage & {p.untyped_storage().data_ptr() for p in model.parameters()}:

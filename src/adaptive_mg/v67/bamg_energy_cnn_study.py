@@ -1,7 +1,7 @@
 """Paired initialization study on shared, fresh hybrid-teacher TRAIN labels.
 
-Only development validation is evaluated. Existing studies and their final-test
-freezes are inputs, never mutated. Checkpoints must be trusted local artifacts.
+Development choices are frozen before a separate final/OOD evaluation. Existing
+studies and their freezes are inputs, never mutated. Use trusted local checkpoints.
 """
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ from . import bamg_energy_study as numerical
 from .bamg_energy_cnn_benchmark import benchmark
 from .bamg_energy_cnn_training import train_arm
 from .bamg_energy_labels import build_energy_teacher
+from . import bamg_energy_holdout_data as holdout_data
 from .bamg_study import (
     PROJECT, VERSION as OLD_VERSION, _environment, _examples, _file_hash,
     _initialize, _initialize_weight, _load_pt, _read, _save, _sources, _write,
@@ -35,7 +36,30 @@ from .research_data import (
     prepare_development_data,
 )
 
-VERSION = 'bamg-energy-cnn-initialization-comparison-v1'
+VERSION = 'bamg-energy-cnn-initialization-comparison-v2'
+
+
+def _holdout_plan(settings):
+    declaration = settings.get('holdout')
+    if declaration is None:
+        return None
+    if set(declaration) - {'seed', 'splits'}:
+        raise ValueError('Unknown holdout declaration field')
+    plan = holdout_data.make_holdout_plan(smoke=settings['smoke'], seed=declaration['seed'],
+        discretization=settings['discretization'], training_sizes=settings['data']['train']['sizes'])
+    for name, override in declaration.get('splits', {}).items():
+        if name not in plan['splits'] or set(override) - {'sizes', 'families', 'per_family'}:
+            raise ValueError('Invalid holdout split override')
+        plan['splits'][name].update(override)
+    for spec in plan['splits'].values():
+        spec['count'] = len(spec['sizes']) * len(spec['families']) * spec['per_family']
+    plan['cases_expected'] = sum(s['count'] for s in plan['splits'].values())
+    holdout_data.validate_plan(plan)
+    if not settings['smoke']:
+        training_families = set(settings['data'].get('families', FAMILIES))
+        if set(plan['splits']['final']['families']) - training_families:
+            raise ValueError('In-distribution final families must have been represented in TRAIN')
+    return plan
 
 
 def source_inputs(source_study):
@@ -159,6 +183,17 @@ def resolve_settings(requested, source_settings, teacher_settings, cfg, tc):
         raise ValueError('Paired comparison declares exactly one RHS per A')
     # Reuse the established solver/training protocol validation.
     validate_settings({**settings, 'version': OLD_VERSION})
+    holdout_plan = _holdout_plan(settings)
+    if holdout_plan is not None:
+        from .bamg_energy_cnn_holdout_benchmark import _settings as holdout_settings
+        holdout_settings(settings)
+        if not settings['smoke']:
+            seen_sizes = set()
+            for data in (settings['data'], source_settings['data']):
+                for split in ('train', 'validation'):
+                    seen_sizes.update(data[split]['sizes'])
+            if set(holdout_plan['splits']['ood_grid']['sizes']) & seen_sizes:
+                raise ValueError('Grid OOD must be unseen by both new and warm-source development data')
     return settings
 
 
@@ -199,6 +234,12 @@ def _prepare(out, settings, source, teacher, cfg):
     _copy_verified(Path(source['path']) / source['checkpoint'], checkpoint,
                    source['init_weight_sha256'])
     baseline = BilinearClassicalBaseline.from_config(SimpleNamespace(mg=cfg))
+    holdout = _holdout_plan(settings)
+    if holdout is not None:
+        path = out / 'holdout_plan.json'
+        if path.exists() and _read(path) != holdout:
+            raise ValueError('Preregistered final/OOD plan changed')
+        _write(path, holdout)
     history_path = out / 'inputs/exclusion_manifest.json'
     if not history_path.exists():
         roots = list(dict.fromkeys([source['path'], str(out.parent)] + settings.get('historical_roots', [])))
@@ -224,6 +265,11 @@ def _prepare(out, settings, source, teacher, cfg):
             spec.update(settings['data'][split])
             spec['families'] = settings['data'].get('families', list(FAMILIES))
             spec['count'] = len(spec['sizes']) * len(spec['families']) * spec['per_family']
+        if holdout is not None:
+            for name, holdout_spec in holdout['splits'].items():
+                plan['splits'][name].update({k: holdout_spec[k] for k in ('sizes', 'families', 'per_family', 'count', 'seed')})
+            plan['holdout_materializer'] = dict(version=holdout['version'], plan='holdout_plan.json',
+                note='The dedicated frozen holdout generator is authoritative; legacy final generator is unused.')
         # Publish the pair of metadata files together; interrupted generation is redone.
         with tempfile.TemporaryDirectory(prefix='.prepare-data-', dir=out) as directory:
             prepared = Path(directory) / 'data'
@@ -235,6 +281,8 @@ def _prepare(out, settings, source, teacher, cfg):
         for example in examples:
             example['split'] = split
     files = [checkpoint, history_path, out / 'data/dataset_plan.json', out / 'data/development_manifest.json']
+    if holdout is not None:
+        files.append(out / 'holdout_plan.json')
     inventory = {str(p.relative_to(out)): _file_hash(p) for p in files}
     path = out / 'prepared_manifest.json'
     if path.exists() and _read(path) != inventory:
@@ -308,6 +356,8 @@ def run(config, output, *, source_study, teacher_comparison, resume=False, stop_
     out.mkdir(parents=True, exist_ok=True)
     with (out / '.cnn-comparison.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if (out / 'research_freeze.json').exists() or (out / 'final/claim.json').exists():
+            raise ValueError('Study is frozen; training and validation selection are closed')
         path = out / 'study_manifest.json'
         if path.exists():
             if not resume:
@@ -379,19 +429,31 @@ def print_report(result):
     if boundaries:
         print('Best checkpoint at the training limit (consider a longer fresh study):', ', '.join(boundaries))
     print('Fixed budgets only: inspect training histories and best-update positions before judging convergence.')
-    print('Validation selection only; final/OOD remains outside this entry point.')
+    print('Validation selection only. Use freeze, then evaluate-final for the preregistered holdout.')
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=('run', 'report'))
+    parser.add_argument('command', choices=('run', 'report', 'freeze', 'evaluate-final', 'report-final'))
     parser.add_argument('--config')
     parser.add_argument('--source-study', help='Migrated original study containing its selected deployment and data metadata')
     parser.add_argument('--teacher-comparison', help='Complete numerical comparison directory; selects its eligible lambda')
     parser.add_argument('--output', required=True)
     parser.add_argument('--resume', action='store_true')
     parser.add_argument('--stop-after', type=int, help='Testing: cap new updates in the next unfinished training phase')
+    parser.add_argument('--max-cases', type=int, help='evaluate-final: limit NEW completed operator cases before pausing')
+    parser.add_argument('--group', help='report-final: split/grid/family or crossed subgroup key')
     args = parser.parse_args(argv)
+    if args.command in ('freeze', 'evaluate-final', 'report-final'):
+        from .bamg_energy_cnn_final import freeze, evaluate_final, report_final
+        if args.command == 'freeze':
+            freeze(args.output)
+        elif args.command == 'evaluate-final':
+            result = evaluate_final(args.output, resume=args.resume, max_cases=args.max_cases)
+            print(f'Final/OOD completed: {result["completed"]}; use report-final to inspect groups.')
+        else:
+            report_final(args.output, group=args.group)
+        return
     if args.command == 'report':
         path = Path(args.output) / 'comparison.json'
         if not path.exists():

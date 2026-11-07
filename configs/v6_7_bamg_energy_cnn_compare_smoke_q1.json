@@ -1,5 +1,5 @@
 {
-  "version": "bamg-energy-cnn-initialization-comparison-v1",
+  "version": "bamg-energy-cnn-initialization-comparison-v2",
   "smoke": true,
   "seed": 2026110713,
   "torch_threads": 1,
@@ -134,5 +134,21 @@
   },
   "model_seeds": [
     6101
-  ]
+  ],
+  "holdout": {
+    "seed": 2026111997
+  },
+  "holdout_benchmark": {
+    "repetitions": 1,
+    "warmup_cycles": 1,
+    "timeout_seconds": 30.0,
+    "failure_penalty_seconds": 30.0,
+    "rhs_kinds": [
+      "manufactured",
+      "random",
+      "localized"
+    ],
+    "bootstrap_resamples": 200,
+    "bootstrap_seed": 2026112111
+  }
 }

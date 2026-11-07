@@ -2,8 +2,9 @@
 
 The numerical comparison in `run_v6_7_bamg_energy_study.py` does not train a CNN.
 This new entry point takes its selected lambda, generates fresh TRAIN labels,
-and compares two ways to initialize the same fixed-support Weight CNN. It never
-runs final/OOD evaluation or changes the original Mac study.
+and compares two ways to initialize the same fixed-support Weight CNN. A separate
+freeze and final/OOD path tests the completed models on a preregistered expanded
+holdout. The original Mac study and numerical comparison remain unchanged.
 
 ## Inputs and protocol
 
@@ -61,6 +62,78 @@ this compares adaptation strategies rather than equal lifetime training costs.
 The lambda that produced the best numerical teacher is also not guaranteed to
 produce the best CNN after approximation and residual fine-tuning.
 
+## Expanded final/OOD protocol
+
+`holdout_plan.json` is committed and hashed **before TRAIN label generation**.
+The new generator is authoritative; `data/dataset_plan.json` mirrors its counts
+and records that the legacy final generator is unused. Merely declaring the plan
+does not assemble, inspect or solve any held-out A.
+
+| Split | Interior grid n | Families | Independent A per grid/family | Total A |
+| --- | --- | ---: | ---: | ---: |
+| Final, within TRAIN parameter support | 15, 31, 63, 127 | 7 | 20 | 560 |
+| OOD grid | 255 | 7 | 20 | 140 |
+| OOD rotation | 31, 63, 127 | 5 | 10 | 150 |
+| OOD anisotropy | 31, 63, 127 | 6 | 10 | 180 |
+| OOD contrast | 31, 63, 127 | 4 | 10 | 120 |
+| OOD topology | 31, 63, 127 | 4 | 10 | 120 |
+| **Total** | | | | **1,270** |
+
+The older research plan had 126 final/OOD operators. Counts here mean different
+normalized operators, not different RHS, repeated timings, scalar rescalings or
+different model seeds. Existing Mac TRAIN/validation/final/OOD, inherited earlier
+history, numerical lambda-selection A's and new development A's are excluded.
+Duplicates alone trigger deterministic resampling; hard cases or solve failures
+are never discarded. Default grid OOD is also outside the old warm-start model's
+development grid sizes. The configured fields can be changed only before a new
+study; research final families must be represented in TRAIN.
+
+Continuous parameters use independently jittered Latin-hypercube strata, and
+discrete angles/geometries are balanced within grid/family cells. The final set
+matches TRAIN's support and family formulas, but is stratified rather than IID
+Monte Carlo. Each named OOD split changes one declared axis:
+
+- Rotation uses jittered held-out angle intervals separated from TRAIN angles.
+- Anisotropy uses epsilon in `[1e-5, 10^-3.1]`, outside TRAIN `[1e-3, 1e-1]`.
+- Contrast uses `[10^3.2, 1e5]`, outside TRAIN `[10, 1000]`.
+- Topology uses three new variants for each heterogeneous family: ellipse/annulus/L
+  patches, shifted/rotated/stretched checker patterns, sinuous/crossing/branching
+  channels, and oblique/Gaussian-island/radial smooth coefficient fields.
+
+Axes apply to meaningful families only: rotation excludes near-isotropic/aligned,
+anisotropy excludes near-isotropic, and contrast/topology use the four heterogeneous
+families. Both final and grid OOD cover all seven families. All cases remain the
+declared Q1, SPD, homogeneous-Dirichlet diffusion problem class.
+
+Each A has three deterministic RHS: manufactured, independent random, and a smooth
+localized source assembled with Q1 quadrature. Each is normalized to unit L2; every
+method sees identical vectors. Three timing repetitions and all 15 prespecified
+methods give **171,450 solve attempts**, in addition to training/setup. One operator
+and one method hierarchy are held at a time, scalar results save after each solve,
+and `--max-cases`/`--resume` permit staged execution.
+
+`freeze` pins configuration, source/environment, development data, label identity,
+all completed checkpoints, full validation evidence and lambda/model selections.
+It closes training and selection. Only `evaluate-final` may materialize the heldout
+operators, under the same process lock and a single-use claim. An identical
+interrupted evaluation may resume; completed resume verifies sealed evidence and
+does not repeat timings. Dataset records and benchmark shards are cross-checked.
+
+Reports retain individual seeds and their all-seed arm averages. Each operator's
+seed times are averaged before operator aggregation. Paired bootstrap intervals
+resample A within split/grid/family cells; RHS/repeats/seeds do not increase the
+independent sample count. The intervals are descriptive approximations conditional
+on the prescribed seeds and synthetic sampling design, not a formal guarantee.
+Failed-A counts, solve-attempt failures, missing results and penalties remain
+visible; failed timings are not presented as reliable speedups. No final/OOD row
+selects a winner. Inspect separate shifts and cells rather than treating the pooled
+mean over these unequal distributions as the main generalization result.
+
+This supplies stronger evidence about fresh instances from the **declared**
+distributions. It does not by itself establish arbitrary PDE-family, nonlinear,
+unstructured-mesh or real CFD generalization, and 1,270 successes would not prove
+zero failure probability.
+
 ## Lenovo WSL commands
 
 Keep the existing numerical-comparison checkout for its source-hash-bound resume.
@@ -68,10 +141,10 @@ Create a separate checkout for the new entry point:
 
 ```bash
 cd /mnt/c/Users/user/Desktop/adaptive-multigrid-bamg
-git fetch origin codex/hybrid-cnn-initialization-comparison
-git worktree add --detach ../adaptive-multigrid-cnn-compare FETCH_HEAD
+git fetch origin codex/hybrid-cnn-initialization-comparison &&
+git worktree add --detach ../adaptive-multigrid-cnn-final FETCH_HEAD
 
-cd /mnt/c/Users/user/Desktop/adaptive-multigrid-cnn-compare
+cd /mnt/c/Users/user/Desktop/adaptive-multigrid-cnn-final
 source ../adaptive-multigrid-bamg/.venv-bamg/bin/activate
 export OMP_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
@@ -85,21 +158,21 @@ mkdir -p artifacts/logs
 The script explicitly imports this checkout's `src`. Existing venv dependencies
 can be reused; no checkpoint or Mac metadata needs to be moved again.
 
-Run using the original completed teacher comparison (currently selects lambda 10):
+Run using the completed expanded teacher comparison (currently selects lambda 10):
 
 ```bash
 python -u scripts/run_v6_7_bamg_energy_cnn_study.py run \
   --config configs/v6_7_bamg_energy_cnn_compare_q1.json \
   --source-study ../adaptive-multigrid-bamg/artifacts/initial_weights/mac_bamg \
-  --teacher-comparison ../adaptive-multigrid-bamg/artifacts/bamg_energy_teacher_q1 \
-  --output artifacts/bamg_energy_cnn_compare_q1 \
-  2>&1 | tee artifacts/logs/bamg_energy_cnn_compare_q1.log
+  --teacher-comparison ../adaptive-multigrid-bamg/artifacts/bamg_energy_teacher_lambda_sweep_q1 \
+  --output artifacts/bamg_energy_cnn_final_q1 \
+  2>&1 | tee artifacts/logs/bamg_energy_cnn_final_q1.log
 ```
 
-If the expanded lambda sweep has finished, replace only the comparison argument
-with `../adaptive-multigrid-bamg/artifacts/bamg_energy_teacher_lambda_sweep_q1`
-**before the first invocation**, using a fresh output if a prior run exists.
-Its selected lambda is read automatically; it is never silently fixed at 10.
+If your completed sweep is stored elsewhere, use that directory consistently.
+Its selected lambda is read automatically from verified raw cases; it is not
+hardcoded. Use a new output for this version: changing code/holdout specifications
+is not an exact resume of an older study. Keep any older running checkout intact.
 
 After interruption, activate the same venv, set the same thread variables, then:
 
@@ -107,10 +180,10 @@ After interruption, activate the same venv, set the same thread variables, then:
 python -u scripts/run_v6_7_bamg_energy_cnn_study.py run \
   --config configs/v6_7_bamg_energy_cnn_compare_q1.json \
   --source-study ../adaptive-multigrid-bamg/artifacts/initial_weights/mac_bamg \
-  --teacher-comparison ../adaptive-multigrid-bamg/artifacts/bamg_energy_teacher_q1 \
-  --output artifacts/bamg_energy_cnn_compare_q1 \
+  --teacher-comparison ../adaptive-multigrid-bamg/artifacts/bamg_energy_teacher_lambda_sweep_q1 \
+  --output artifacts/bamg_energy_cnn_final_q1 \
   --resume \
-  2>&1 | tee -a artifacts/logs/bamg_energy_cnn_compare_q1.log
+  2>&1 | tee -a artifacts/logs/bamg_energy_cnn_final_q1.log
 ```
 
 Keep the same comparison path if you originally used the expanded sweep.
@@ -121,8 +194,40 @@ or environment mismatches fail explicitly instead of silently mixing experiments
 
 ```bash
 python scripts/run_v6_7_bamg_energy_cnn_study.py report \
-  --output artifacts/bamg_energy_cnn_compare_q1
+  --output artifacts/bamg_energy_cnn_final_q1
 ```
+
+After inspecting validation and deciding that model/training choices are settled:
+
+```bash
+python scripts/run_v6_7_bamg_energy_cnn_study.py freeze \
+  --output artifacts/bamg_energy_cnn_final_q1
+
+python -u scripts/run_v6_7_bamg_energy_cnn_study.py evaluate-final \
+  --output artifacts/bamg_energy_cnn_final_q1 \
+  2>&1 | tee artifacts/logs/bamg_energy_cnn_final_q1_holdout.log
+```
+
+Append `--max-cases 10` to evaluate at most ten newly completed operators per
+invocation. Resume with exactly the same frozen study:
+
+```bash
+python -u scripts/run_v6_7_bamg_energy_cnn_study.py evaluate-final \
+  --output artifacts/bamg_energy_cnn_final_q1 --resume \
+  2>&1 | tee -a artifacts/logs/bamg_energy_cnn_final_q1_holdout.log
+
+python scripts/run_v6_7_bamg_energy_cnn_study.py report-final \
+  --output artifacts/bamg_energy_cnn_final_q1 --group final
+python scripts/run_v6_7_bamg_energy_cnn_study.py report-final \
+  --output artifacts/bamg_energy_cnn_final_q1 --group ood_grid
+python scripts/run_v6_7_bamg_energy_cnn_study.py report-final \
+  --output artifacts/bamg_energy_cnn_final_q1 --group ood_topology/n127/channel
+```
+
+Other group keys are a split name, `n31`, a family name, `split/n31`,
+`split/family`, or `split/n31/family`. Reporting reads saved scalar evidence;
+it does not rerun solves. Tuning in response to these results consumes this test
+set; a later developed model needs a newly declared, independent assessment.
 
 Important outputs:
 
@@ -134,8 +239,24 @@ Important outputs:
 | `runs/scratch_seed6101/` etc. | Latest resumable checkpoints, compact histories, selected deployment |
 | `validation/benchmark_cases/` | Compact per-case scalar timings and failures |
 | `comparison.json` | Full development comparison and aggregate seed results |
+| `holdout_plan.json` | Preregistered expanded distributions/counts/RHS protocol |
+| `research_freeze.json` | Immutable checkpoints and validation-only choices |
+| `final/data/` | Per-case deterministic parameters, operator/RHS hashes |
+| `final/benchmark/benchmark_cases/` | Compact final/OOD scalar measurements |
+| `final/report.json` | Split/grid/family reports, all-seed cohorts and intervals |
+| `final/claim.json` | Single-use evaluation state and completed evidence hashes |
 
-The smoke configuration uses two n=7 families, one seed and two updates per phase;
-it verifies execution only and cannot establish numerical superiority. Neither
-configuration consumes a new final/OOD test. That requires a separate freeze and
-evaluation after development choices are settled.
+The smoke configuration uses two n=7 families, one seed and two updates per phase.
+Its optional freeze/final workflow is explicitly labeled `smoke_only`; it verifies
+execution and cannot establish generalization or numerical superiority.
+
+## Implementation verification
+
+The focused BAMG and research-data suite passes **191 tests**, including fresh
+process freeze/evaluate/resume/report, post-freeze training rejection, input/label
+identity, lost-data provenance, all-seed aggregation and failure accounting.
+An additional private-seed assembly check covers 47 cases across n=15/31/63/127/255,
+all seven families and all twelve new topology variants. It checks finite/symmetric
+operators, positive sampled quadratic forms, manufactured RHS consistency and RHS
+normalization. It is a generator check, not a solver-performance result. The full
+1,270-case research benchmark has not been run as part of this implementation.

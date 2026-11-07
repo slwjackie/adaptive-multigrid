@@ -20,8 +20,12 @@ holdout. The original Mac study and numerical comparison remain unchanged.
 - One new TRAIN split and one new validation split are generated and saved once.
   Old TRAIN, old validation, previously exposed final/OOD operator hashes, and
   numerical lambda-selection operators are excluded from both new splits.
-  Files under the output's parent and explicit `historical_roots` are also scanned
-  for historical manifests. Only hashes/metadata from old final/OOD are used.
+  The first study scans the output's parent and explicit `historical_roots` for
+  historical manifests. A larger study in the same development cohort explicitly
+  reuses the verified exclusion snapshot with `--development-study`; it verifies
+  identical validation and nested TRAIN cases. That deliberate shared development
+  data is not treated as historical leakage. Only hashes/metadata from old
+  final/OOD are used.
 - The selected lambda, vector-bank settings and optimizer budget are inherited
   from the numerical comparison. Labels retain the original selected-pass BAMG
   vectors, but each new P rebuilds its actual `P.T @ A @ P` and mass at every level.
@@ -40,7 +44,7 @@ holdout. The original Mac study and numerical comparison remain unchanged.
   with the unchanged old CNN, `fixed_C`, and `em5_C`.
   Fine-tune checkpoint selection uses the fixed stratified validation subset,
   including the supervised starting point (update 0). Thus a fine-tuned export
-  can equal that starting model; the full 56-case validation may rank it differently.
+  can equal that starting model; the full 280-case validation may rank it differently.
   If no subset checkpoint is eligible, the least-failing candidate is still
   exported with `eligible=false`, and full-validation failures remain visible.
 - Validation uses identical A/RHS, zero initial iterates, tolerance
@@ -51,16 +55,86 @@ holdout. The original Mac study and numerical comparison remain unchanged.
 - Results contain individual seeds and their aggregate mean/std. All prespecified
   seeds remain in the comparison; a favorable seed is not presented as the whole arm.
 
-The research configuration has 280 TRAIN operators, 56 validation operators,
-4,000 supervised updates and 2,000 fine-tune updates per arm/seed. These are
-**fixed budgets, not a convergence certificate**. Inspect loss histories, warm
-validation curves and best-update locations. If scratch is still improving, use
-a new output directory and a longer preregistered configuration before concluding
-warm start is intrinsically better. Changing the budget of an existing run is not
-an exact resume. Warm start also benefited from historical training compute, so
-this compares adaptation strategies rather than equal lifetime training costs.
-The lambda that produced the best numerical teacher is also not guaranteed to
-produce the best CNN after approximation and residual fine-tuning.
+## Complete-epoch training and expanded development data
+
+The default research configuration now uses 560 TRAIN operators. The optional
+`v6_7_bamg_energy_cnn_compare_1120_q1.json` extends the same planned training pool
+to 1,120 operators. Both use the same independent 280-case development validation
+and 56-case checkpoint-selection subset when run in the shared development cohort.
+
+| Setting | Default 560 | Expanded 1,120 |
+| --- | ---: | ---: |
+| TRAIN grids | 15, 31, 63, 127 | 15, 31, 63, 127 |
+| TRAIN per grid/family | 20 | 40 |
+| Full validation (four grids, seven families, ten each) | 280 | 280 |
+| Checkpoint validation (four grids, seven families, two each) | 56 | 56 |
+| Supervised epochs / updates | 15 / 8,400 | 15 / 16,800 |
+| Residual fine-tune epochs / updates | 8 / 4,480 | 8 / 8,960 |
+| Switch from 6 to 12 cycles after update | 2,240 | 4,480 |
+| Warm checkpoint validation interval | 560 updates | 1,120 updates |
+
+`sampling: "epoch_shuffle"` permutes all TRAIN indices independently each epoch.
+Each problem is used exactly once per completed epoch, with one optimizer update
+per problem. The same arm/seed pair uses the same problem order; the sampling
+stream is independent of error-probe randomness. Interrupted training restores
+optimizer/probe RNG progress and reconstructs the exact remaining epoch order
+from the saved update count and immutable sampling identity. A partially completed
+epoch is not restarted from its first problem. Work after the latest durable
+checkpoint can be repeated, as with any checkpoint resume.
+
+The update budgets use **15 complete supervised epochs and 8 complete residual
+epochs**, rather than the approximate 16,000/8,000-update suggestion for 1,120 cases.
+This gives every case the same number of visits in each completed training phase.
+The latest completed weights have those visits; the deployed checkpoint can come
+from an earlier validation-selected epoch, including update zero. The cycle curriculum
+switches after four residual epochs, and checkpoint selection runs at update zero
+and each epoch boundary. This compares equal data passes; the larger dataset has
+more updates and more computation. It is not an equal-wall-time data-size ablation.
+
+`data.sampling: "stratified_nested_v1"` introduces development-only stratification:
+
+- TRAIN uses deterministic blocks of 20 cases per grid/family. The 20-case pool is
+  a prefix of the 40-case pool; validation does not depend on the chosen TRAIN size.
+- Rotation categories and checker counts are balanced to within one case where
+  the category count does not divide the block size. Aligned anisotropy retains
+  its 0/90-degree directions, and the other applicable families retain the five
+  original TRAIN angles.
+- Continuous parameters are stratified in their existing support. Epsilon and
+  contrast are stratified in log space; patch position/size, channel width and
+  smooth-field frequency/phase are also spread through their ranges.
+- Applicable heterogeneous families deliberately include small-epsilon,
+  high-contrast combinations within the declared TRAIN support. These cases are
+  not removed if teacher optimization or a solver finds them difficult.
+- Normalized-operator duplicate exclusion and historical TRAIN/validation/exposed
+  test exclusions remain active. Only duplicates trigger deterministic resampling.
+
+This improves coverage of existing coefficient-field families. It does not add
+new channel topology or arbitrary PDE classes. The final set has the same parameter
+support and family formulas, but its sampling design differs from this deliberately
+stratified TRAIN design. In particular, n=255, held-out angle intervals, extreme
+OOD epsilon/contrast ranges, and the twelve topology-OOD variants remain excluded
+from TRAIN and validation.
+
+Choose the dataset size from the common development validation, including
+per-grid/family failures and warm solve times, **before freezing or evaluating
+final/OOD**. Do not inspect the 560-case final/OOD results and then use them to
+justify moving to 1,120 TRAIN cases. Three prespecified model seeds remain in
+both arms; no seed is silently removed or selected for being fastest.
+
+These are **fixed budgets, not a convergence certificate**. Inspect loss histories,
+warm validation curves and best-update locations. If scratch is still improving,
+use a new output directory and a longer preregistered configuration before
+concluding warm start is intrinsically better. Changing data, sampling or budgets
+in an existing run is not an exact resume. Preserve its checkout/configuration.
+Warm start also benefited from historical training compute, so this compares
+adaptation strategies rather than equal lifetime training costs. The lambda that
+produced the best numerical teacher is not guaranteed to produce the best CNN.
+
+Unlike streamed final/OOD evaluation, development operators and teacher labels
+currently occupy memory together. Start with the 560-case study on Lenovo and
+record elapsed time and peak resident memory before choosing the larger run.
+Training convergence and laptop resource use must be measured; the counts alone
+guarantee neither performance nor sufficient RAM.
 
 ## Expanded final/OOD protocol
 
@@ -142,9 +216,9 @@ Create a separate checkout for the new entry point:
 ```bash
 cd /mnt/c/Users/user/Desktop/adaptive-multigrid-bamg
 git fetch origin residual-u-net-teacher &&
-git worktree add --detach ../adaptive-multigrid-cnn-final FETCH_HEAD
+git worktree add --detach ../adaptive-multigrid-cnn-expanded FETCH_HEAD
 
-cd /mnt/c/Users/user/Desktop/adaptive-multigrid-cnn-final
+cd /mnt/c/Users/user/Desktop/adaptive-multigrid-cnn-expanded
 source ../adaptive-multigrid-bamg/.venv-bamg/bin/activate
 export OMP_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
@@ -158,15 +232,17 @@ mkdir -p artifacts/logs
 The script explicitly imports this checkout's `src`. Existing venv dependencies
 can be reused; no checkpoint or Mac metadata needs to be moved again.
 
-Run using the completed expanded teacher comparison (currently selects lambda 10):
+Start the 560-case study using the completed expanded teacher comparison
+(currently selects lambda 10). `/usr/bin/time -v` records total elapsed time and
+maximum resident set size in the same log:
 
 ```bash
-python -u scripts/run_v6_7_bamg_energy_cnn_study.py run \
+/usr/bin/time -v python -u scripts/run_v6_7_bamg_energy_cnn_study.py run \
   --config configs/v6_7_bamg_energy_cnn_compare_q1.json \
   --source-study ../adaptive-multigrid-bamg/artifacts/initial_weights/mac_bamg \
   --teacher-comparison ../adaptive-multigrid-bamg/artifacts/bamg_energy_teacher_lambda_sweep_q1 \
-  --output artifacts/bamg_energy_cnn_final_q1 \
-  2>&1 | tee artifacts/logs/bamg_energy_cnn_final_q1.log
+  --output artifacts/bamg_energy_cnn_560_q1 \
+  2>&1 | tee artifacts/logs/bamg_energy_cnn_560_q1.log
 ```
 
 If your completed sweep is stored elsewhere, use that directory consistently.
@@ -181,9 +257,9 @@ python -u scripts/run_v6_7_bamg_energy_cnn_study.py run \
   --config configs/v6_7_bamg_energy_cnn_compare_q1.json \
   --source-study ../adaptive-multigrid-bamg/artifacts/initial_weights/mac_bamg \
   --teacher-comparison ../adaptive-multigrid-bamg/artifacts/bamg_energy_teacher_lambda_sweep_q1 \
-  --output artifacts/bamg_energy_cnn_final_q1 \
+  --output artifacts/bamg_energy_cnn_560_q1 \
   --resume \
-  2>&1 | tee -a artifacts/logs/bamg_energy_cnn_final_q1.log
+  2>&1 | tee -a artifacts/logs/bamg_energy_cnn_560_q1.log
 ```
 
 Keep the same comparison path if you originally used the expanded sweep.
@@ -194,18 +270,55 @@ or environment mismatches fail explicitly instead of silently mixing experiments
 
 ```bash
 python scripts/run_v6_7_bamg_energy_cnn_study.py report \
-  --output artifacts/bamg_energy_cnn_final_q1
+  --output artifacts/bamg_energy_cnn_560_q1
 ```
 
-After inspecting validation and deciding that model/training choices are settled:
+To compare against 1,120 TRAIN cases, first complete the 560-case development run.
+Keep final/OOD unopened in both studies. Run the larger configuration in a **new**
+output and explicitly link its completed development cohort:
+
+```bash
+/usr/bin/time -v python -u scripts/run_v6_7_bamg_energy_cnn_study.py run \
+  --config configs/v6_7_bamg_energy_cnn_compare_1120_q1.json \
+  --source-study ../adaptive-multigrid-bamg/artifacts/initial_weights/mac_bamg \
+  --teacher-comparison ../adaptive-multigrid-bamg/artifacts/bamg_energy_teacher_lambda_sweep_q1 \
+  --development-study artifacts/bamg_energy_cnn_560_q1 \
+  --output artifacts/bamg_energy_cnn_1120_q1 \
+  2>&1 | tee artifacts/logs/bamg_energy_cnn_1120_q1.log
+```
+
+For interruption/resume, keep all arguments, including `--development-study`,
+add `--resume`, and use `tee -a`. The two studies must use the same verified Mac
+source and numerical teacher comparison. The larger study checks the shared
+validation identities and TRAIN nesting; merely choosing equal data seeds does
+not substitute for this verification. Each study has its own immutable label
+cache and independent trained checkpoints; it does not resume the 560-case model
+as the 1,120-case scratch arm.
+
+```bash
+python scripts/run_v6_7_bamg_energy_cnn_study.py report \
+  --output artifacts/bamg_energy_cnn_1120_q1
+```
+
+Inspect the study's `runtime_metrics.json` together with the `/usr/bin/time -v`
+log to assess resource use. Phase entries cover `prepare_data`, `prepare_labels`,
+each arm, and validation, recording the latest invocation wall time, cumulative
+invocation time, invocation count, and process peak RSS in MiB. Peak RSS is the
+process high-water mark, not an additive measure of each phase. No runtime or RAM
+requirement is promised for the research run.
+
+Use the common development validation to choose the data size and training budget.
+The following commands show freezing the 560-case study; if choosing 1,120, use
+`artifacts/bamg_energy_cnn_1120_q1` consistently instead. Freeze only after these
+choices are settled, then evaluate the selected study's final/OOD once:
 
 ```bash
 python scripts/run_v6_7_bamg_energy_cnn_study.py freeze \
-  --output artifacts/bamg_energy_cnn_final_q1
+  --output artifacts/bamg_energy_cnn_560_q1
 
 python -u scripts/run_v6_7_bamg_energy_cnn_study.py evaluate-final \
-  --output artifacts/bamg_energy_cnn_final_q1 \
-  2>&1 | tee artifacts/logs/bamg_energy_cnn_final_q1_holdout.log
+  --output artifacts/bamg_energy_cnn_560_q1 \
+  2>&1 | tee artifacts/logs/bamg_energy_cnn_560_q1_holdout.log
 ```
 
 Append `--max-cases 10` to evaluate at most ten newly completed operators per
@@ -213,15 +326,15 @@ invocation. Resume with exactly the same frozen study:
 
 ```bash
 python -u scripts/run_v6_7_bamg_energy_cnn_study.py evaluate-final \
-  --output artifacts/bamg_energy_cnn_final_q1 --resume \
-  2>&1 | tee -a artifacts/logs/bamg_energy_cnn_final_q1_holdout.log
+  --output artifacts/bamg_energy_cnn_560_q1 --resume \
+  2>&1 | tee -a artifacts/logs/bamg_energy_cnn_560_q1_holdout.log
 
 python scripts/run_v6_7_bamg_energy_cnn_study.py report-final \
-  --output artifacts/bamg_energy_cnn_final_q1 --group final
+  --output artifacts/bamg_energy_cnn_560_q1 --group final
 python scripts/run_v6_7_bamg_energy_cnn_study.py report-final \
-  --output artifacts/bamg_energy_cnn_final_q1 --group ood_grid
+  --output artifacts/bamg_energy_cnn_560_q1 --group ood_grid
 python scripts/run_v6_7_bamg_energy_cnn_study.py report-final \
-  --output artifacts/bamg_energy_cnn_final_q1 --group ood_topology/n127/channel
+  --output artifacts/bamg_energy_cnn_560_q1 --group ood_topology/n127/channel
 ```
 
 Other group keys are a split name, `n31`, a family name, `split/n31`,
@@ -235,6 +348,7 @@ Important outputs:
 | --- | --- |
 | `inputs/initial_weight.pt` | Verified unchanged old CNN weights |
 | `data/` | Shared fresh development specifications and manifests |
+| `runtime_metrics.json` | Preparation, label, arm and validation wall times and process peak RSS |
 | `teacher/train/` | Per-case hybrid labels, hashes and optimizer diagnostics |
 | `runs/scratch_seed6101/` etc. | Latest resumable checkpoints, compact histories, selected deployment |
 | `validation/benchmark_cases/` | Compact per-case scalar timings and failures |
@@ -252,7 +366,7 @@ execution and cannot establish generalization or numerical superiority.
 
 ## Implementation verification
 
-The focused BAMG and research-data suite passes **191 tests**, including fresh
+The earlier expanded-holdout implementation passed **191 focused tests**, including fresh
 process freeze/evaluate/resume/report, post-freeze training rejection, input/label
 identity, lost-data provenance, all-seed aggregation and failure accounting.
 An additional private-seed assembly check covers 47 cases across n=15/31/63/127/255,

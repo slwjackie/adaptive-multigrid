@@ -135,3 +135,72 @@ def test_resume_and_report_in_fresh_python_processes(tmp_path):
                             capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert 'complete=True' in result.stdout
+
+
+def test_expanded_epoch_cohort_shared_validation_and_resume(tmp_path):
+    source, teacher, config = inputs(tmp_path)
+    settings = _read(config)
+    settings['sampling'] = 'epoch_shuffle'
+    settings['data']['sampling'] = 'stratified_nested_v1'
+    settings['data']['train']['per_family'] = 2
+    settings['data']['validation']['per_family'] = 2
+    settings['supervised']['updates'] = 6
+    settings['finetune'].update(updates=4, curriculum_step=2)
+    settings['warm_validation']['every'] = 2
+    _write(config, settings)
+    smaller, larger = tmp_path / 'small', tmp_path / 'large'
+    study.run(config, smaller, source_study=source, teacher_comparison=teacher, stop_after=1)
+    expanded = deepcopy(settings)
+    expanded['data']['train']['per_family'] = 4
+    expanded['supervised']['updates'] = 12
+    expanded['finetune'].update(updates=8, curriculum_step=4)
+    expanded['warm_validation']['every'] = 4
+    large_config = tmp_path / 'large.json'
+    _write(large_config, expanded)
+    kwargs = dict(source_study=source, teacher_comparison=teacher, development_study=smaller)
+    result = study.run(large_config, larger, stop_after=3, **kwargs)
+    assert not result['completed']
+    a = _read(smaller / 'data/development_manifest.json')['splits']
+    b = _read(larger / 'data/development_manifest.json')['splits']
+    assert a['validation'] == b['validation']
+    assert a['train'] == b['train'][:2]
+    assert len(b['train']) == 4
+    assert _file_hash(smaller / 'inputs/exclusion_manifest.json') == _file_hash(larger / 'inputs/exclusion_manifest.json')
+    result = study.run(large_config, larger, resume=True, **kwargs)
+    assert result['completed']
+    for name in ('scratch_seed6101', 'warm_seed6101'):
+        history = _read(larger / 'runs' / name / 'pretrain_history.json')
+        assert len(history) == 12
+        for start in range(0, 12, 4):
+            assert sorted(r['case'] for r in history[start:start + 4]) == list(range(4))
+    metrics = _read(larger / 'runtime_metrics.json')
+    assert metrics['phases']['prepare_data']['process_peak_rss_mib'] > 0
+    assert metrics['phases']['prepare_data']['invocations'] == 2
+    _, source_settings = study.source_inputs(source)
+    ti, ts, cfg, tc = study.teacher_inputs(teacher)
+    resolved = study.resolve_settings(expanded, source_settings, ts, cfg, tc)
+    si, _ = study.source_inputs(source)
+    bad = deepcopy(resolved)
+    bad['supervised']['learning_rate'] *= 2
+    with pytest.raises(ValueError, match='protocol differs'):
+        study._development_reference(smaller, bad, si, ti)
+    bad = deepcopy(resolved)
+    bad['supervised']['updates'] += 4
+    with pytest.raises(ValueError, match='equal training epochs'):
+        study._development_reference(smaller, bad, si, ti)
+    (smaller / 'final').mkdir()
+    _write(smaller / 'final/claim.json', {})
+    with pytest.raises(ValueError, match='before opening final'):
+        study._development_reference(smaller, resolved, si, ti)
+
+
+def test_research_configs_have_matched_epochs_and_full_grid_validation():
+    for suffix, count in [('q1', 560), ('1120_q1', 1120)]:
+        settings = _read(study.PROJECT / f'configs/v6_7_bamg_energy_cnn_compare_{suffix}.json')
+        assert settings['data']['sampling'] == 'stratified_nested_v1'
+        assert settings['sampling'] == 'epoch_shuffle'
+        assert settings['supervised']['updates'] == 15 * count
+        assert settings['finetune']['updates'] == 8 * count
+        assert settings['finetune']['curriculum_step'] == 4 * count
+        assert settings['data']['validation'] == dict(sizes=[15, 31, 63, 127], per_family=10)
+        assert settings['warm_validation']['per_family_per_size'] == 2

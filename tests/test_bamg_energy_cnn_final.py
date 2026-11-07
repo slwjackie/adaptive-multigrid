@@ -118,7 +118,7 @@ def test_research_holdout_rejects_grid_seen_by_warm_model_and_untrained_final_fa
     teacher = _read(study.PROJECT / 'configs/v6_7_bamg_energy_teacher_q1.json')
     cfg, tc = study.numerical.validate(teacher)
     requested['data']['train']['sizes'] = [15, 31]
-    requested['data']['validation']['sizes'] = [31]
+    requested['data']['validation']['sizes'] = [15, 31]
     with pytest.raises(ValueError, match='warm-source'):
         study.resolve_settings(requested, source, teacher, cfg, tc)
     requested['holdout']['splits'] = dict(ood_grid=dict(sizes=[255]))

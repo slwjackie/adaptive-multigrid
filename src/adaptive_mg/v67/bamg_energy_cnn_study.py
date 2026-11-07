@@ -12,7 +12,10 @@ import fcntl
 import json
 from pathlib import Path
 import shutil
+import resource
+import sys
 import tempfile
+import time
 from types import SimpleNamespace
 
 import numpy as np
@@ -37,6 +40,73 @@ from .research_data import (
 )
 
 VERSION = 'bamg-energy-cnn-initialization-comparison-v2'
+
+
+def _development_reference(directory, settings, source, teacher):
+    """Pin a sibling development cohort before expanding its TRAIN sample count."""
+    root = Path(directory).resolve()
+    if (root / 'final/claim.json').exists():
+        raise ValueError('Choose TRAIN size on development validation before opening final/OOD')
+    manifest = _read(root / 'study_manifest.json')
+    previous = _read(root / 'configuration.json')
+    if numerical.digest(previous) != manifest['settings_digest']:
+        raise ValueError('Development reference configuration changed')
+    if manifest['source'] != source or manifest['teacher'] != teacher:
+        raise ValueError('Development reference must use the same source model and numerical teacher')
+    for relative, expected in _read(root / 'prepared_manifest.json').items():
+        path = (root / relative).resolve()
+        if not path.is_relative_to(root) or not path.is_file() or _file_hash(path) != expected:
+            raise ValueError('Development reference prepared input changed: ' + relative)
+    before, after = deepcopy(previous['data']), deepcopy(settings['data'])
+    old_count = before['train'].pop('per_family')
+    new_count = after['train'].pop('per_family')
+    if (before != after or new_count < old_count or
+            after.get('sampling') != 'stratified_nested_v1'):
+        raise ValueError('Development reference requires the same stratified cohort and nondecreasing TRAIN count')
+    for key in ('model_seeds', 'models', 'benchmark', 'warm_validation', 'holdout',
+                'discretization', 'support_mode', 'sampling', 'supervised', 'finetune', 'caps',
+                'holdout_benchmark'):
+        a, b = deepcopy(previous.get(key)), deepcopy(settings.get(key))
+        if key == 'warm_validation':
+            if a['every'] * new_count != b['every'] * old_count:
+                raise ValueError('Development reference validation cadence must match in epochs')
+            a.pop('every', None)
+            b.pop('every', None)
+        if key in ('supervised', 'finetune'):
+            if a['updates'] * new_count != b['updates'] * old_count:
+                raise ValueError('Development reference must use equal training epochs')
+            if key == 'finetune':
+                sa, sb = a.get('curriculum_step'), b.get('curriculum_step')
+                sa = (a['updates'] + 1) // 2 if sa is None else sa
+                sb = (b['updates'] + 1) // 2 if sb is None else sb
+                if sa * b['updates'] != sb * a['updates']:
+                    raise ValueError('Development reference curriculum fraction differs')
+            for item in ('updates', 'curriculum_step'):
+                a.pop(item, None)
+                b.pop(item, None)
+        if a != b:
+            raise ValueError('Development reference comparison protocol differs: ' + key)
+    files = ('inputs/exclusion_manifest.json', 'data/dataset_plan.json',
+             'data/development_manifest.json', 'prepared_manifest.json',
+             'configuration.json', 'study_manifest.json')
+    return dict(path=str(root), hashes={name: _file_hash(root / name) for name in files},
+                scope='shared development cohort; no final/OOD based size selection')
+
+
+def _runtime_record(out, phase, started):
+    """Resource observations only; never part of model/holdout selection."""
+    path = out / 'runtime_metrics.json'
+    report = _read(path) if path.exists() else dict(phases={})
+    elapsed = time.perf_counter() - started
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    mib = peak / (1024 ** 2 if sys.platform == 'darwin' else 1024)
+    value = report['phases'].setdefault(phase, dict(invocations=0, total_wall_seconds=0.))
+    value.update(invocations=value['invocations'] + 1,
+                 total_wall_seconds=value['total_wall_seconds'] + elapsed,
+                 last_wall_seconds=elapsed, process_peak_rss_mib=mib)
+    report['note'] = 'Process lifetime peak RSS, not per-phase allocation; completed/paused invocations only.'
+    _write(path, report)
+    print(f'{phase}: {elapsed:.1f}s; process peak RSS {mib:.1f} MiB', flush=True)
 
 
 def _holdout_plan(settings):
@@ -167,6 +237,22 @@ def resolve_settings(requested, source_settings, teacher_settings, cfg, tc):
         raise ValueError('Distinct nonnegative model seeds below 2**32 are required')
     if type(settings['data'].get('seed')) is not int or settings['data']['seed'] < 0:
         raise ValueError('Declare a data seed independently of model seeds')
+    if settings.get('sampling', 'with_replacement') not in ('with_replacement', 'epoch_shuffle'):
+        raise ValueError('Unknown training sampling policy')
+    data_sampling = settings['data'].get('sampling')
+    if data_sampling not in (None, 'stratified_nested_v1'):
+        raise ValueError('Unknown development sampling policy')
+    if data_sampling is not None and settings.get('sampling') != 'epoch_shuffle':
+        raise ValueError('Expanded development data requires epoch_shuffle')
+    if settings.get('sampling') == 'epoch_shuffle':
+        count = (len(settings['data']['train']['sizes']) *
+                 len(settings['data'].get('families', FAMILIES)) * settings['data']['train']['per_family'])
+        for phase in ('supervised', 'finetune'):
+            updates = settings[phase]['updates']
+            if updates < count or (not settings['smoke'] and updates % count):
+                raise ValueError('Epoch training requires at least one full pass and complete research epochs')
+        if not settings['smoke'] and set(settings['data']['validation']['sizes']) != set(settings['data']['train']['sizes']):
+            raise ValueError('Validation must cover every training grid')
     if settings['models']['weight'] != source_settings['models']['weight']:
         raise ValueError('Use exactly the source Weight CNN architecture in both arms')
     if settings['discretization'] != teacher_settings['data']['discretization']:
@@ -241,6 +327,15 @@ def _prepare(out, settings, source, teacher, cfg):
             raise ValueError('Preregistered final/OOD plan changed')
         _write(path, holdout)
     history_path = out / 'inputs/exclusion_manifest.json'
+    reference = settings.get('development_reference')
+    if reference is not None:
+        reference_root = Path(reference['path'])
+        for relative, expected in reference['hashes'].items():
+            if _file_hash(reference_root / relative) != expected:
+                raise ValueError('Development reference changed: ' + relative)
+        _copy_verified(reference_root / 'inputs/exclusion_manifest.json', history_path,
+                       reference['hashes']['inputs/exclusion_manifest.json'])
+        _write(out / 'inputs/development_reference.json', reference)
     if not history_path.exists():
         roots = list(dict.fromkeys([source['path'], str(out.parent)] + settings.get('historical_roots', [])))
         history = historical_operator_index(roots, exclude=[out])
@@ -265,6 +360,10 @@ def _prepare(out, settings, source, teacher, cfg):
             spec.update(settings['data'][split])
             spec['families'] = settings['data'].get('families', list(FAMILIES))
             spec['count'] = len(spec['sizes']) * len(spec['families']) * spec['per_family']
+        prepare = prepare_development_data
+        if settings['data'].get('sampling') == 'stratified_nested_v1':
+            from .bamg_energy_development_data import prepare_development_data as prepare
+            plan['development_sampling'] = settings['data']['sampling']
         if holdout is not None:
             for name, holdout_spec in holdout['splits'].items():
                 plan['splits'][name].update({k: holdout_spec[k] for k in ('sizes', 'families', 'per_family', 'count', 'seed')})
@@ -273,14 +372,22 @@ def _prepare(out, settings, source, teacher, cfg):
         # Publish the pair of metadata files together; interrupted generation is redone.
         with tempfile.TemporaryDirectory(prefix='.prepare-data-', dir=out) as directory:
             prepared = Path(directory) / 'data'
-            prepare_development_data(prepared, baseline, plan=plan, historical_roots=[history_path])
+            prepare(prepared, baseline, plan=plan, historical_roots=[history_path])
             prepared.rename(out / 'data')
         _write(out / 'fixed_classical.json', baseline.to_dict())
     train, validation, _ = _examples(out, baseline)
+    if reference is not None:
+        previous = _read(reference_root / 'data/development_manifest.json')['splits']
+        current = _read(out / 'data/development_manifest.json')['splits']
+        if (current['validation'] != previous['validation'] or
+                current['train'][:len(previous['train'])] != previous['train']):
+            raise ValueError('Expanded study must retain identical validation and nested TRAIN records')
     for split, examples in [('train', train), ('validation', validation)]:
         for example in examples:
             example['split'] = split
     files = [checkpoint, history_path, out / 'data/dataset_plan.json', out / 'data/development_manifest.json']
+    if reference is not None:
+        files.append(out / 'inputs/development_reference.json')
     if holdout is not None:
         files.append(out / 'holdout_plan.json')
     inventory = {str(p.relative_to(out)): _file_hash(p) for p in files}
@@ -345,11 +452,16 @@ def seed_summary(benchmark_summary, seeds):
                 policy='All prespecified seeds are retained, including failures. No fastest-seed selection.')
 
 
-def run(config, output, *, source_study, teacher_comparison, resume=False, stop_after=None):
+def run(config, output, *, source_study, teacher_comparison, resume=False, stop_after=None,
+        development_study=None):
     requested = _read(config)
     source, source_settings = source_inputs(source_study)
     teacher, teacher_settings, cfg, tc = teacher_inputs(teacher_comparison)
     settings = resolve_settings(requested, source_settings, teacher_settings, cfg, tc)
+    if development_study is not None:
+        if Path(development_study).resolve() == Path(output).resolve():
+            raise ValueError('Development reference and new output must differ')
+        settings['development_reference'] = _development_reference(development_study, settings, source, teacher)
     _initialize(settings)
     identity = _manifest(settings, source, teacher)
     out = Path(output).resolve()
@@ -369,11 +481,15 @@ def run(config, output, *, source_study, teacher_comparison, resume=False, stop_
                 raise FileExistsError('New study requires an empty output directory')
             _write(path, identity)
         _write(out / 'configuration.json', settings)
+        started = time.perf_counter()
         train, validation, init_weight, inventory = _prepare(out, settings, source, teacher, cfg)
+        _runtime_record(out, 'prepare_data', started)
         teacher_identity = dict(study=numerical.digest(identity), prepared=inventory,
                                 lambda_value=teacher['selected_lambda'])
+        started = time.perf_counter()
         results, label_hash = _labels(out, train, cfg, tc, settings['teacher_optimizer'],
                                      teacher['selected_lambda'], teacher_identity)
+        _runtime_record(out, 'prepare_labels', started)
         provenance = dict(study=numerical.digest(identity), prepared=inventory,
                           teacher_manifest_sha256=label_hash,
                           init_weight_sha256=source['init_weight_sha256'])
@@ -385,10 +501,12 @@ def run(config, output, *, source_study, teacher_comparison, resume=False, stop_
             for arm in arms:
                 name = f'{arm}_seed{seed}'
                 print(f'Train {name}: shared lambda={teacher["selected_lambda"]}', flush=True)
+                started = time.perf_counter()
                 result = train_arm(out / 'runs' / name, arm=arm, seed=seed, settings=settings,
                             train=train, validation=validation, teacher_results=results,
                             init_weight=init_weight, provenance=provenance,
                             resume=resume, stop_after=stop_after)
+                _runtime_record(out, name, started)
                 completions[name] = result
                 if result['status'] != 'complete':
                     _write(out / 'progress.json', dict(completed=False, runs=completions))
@@ -396,8 +514,10 @@ def run(config, output, *, source_study, teacher_comparison, resume=False, stop_
                 checkpoints[name + '_supervised'] = out / 'runs' / name / 'supervised_models.pt'
                 checkpoints[name + '_finetuned'] = out / 'runs' / name / 'deployment.pt'
         _write(out / 'progress.json', dict(completed=False, runs=completions))
+        started = time.perf_counter()
         summary = benchmark(out / 'validation', examples=validation, settings=settings,
                             checkpoints=checkpoints, identity=provenance, resume=resume)
+        _runtime_record(out, 'validation', started)
         report = dict(version=VERSION, completed=summary['completed'],
                       selected_lambda=teacher['selected_lambda'], source_model=source['selected_model'],
                       init_weight_sha256=source['init_weight_sha256'],
@@ -438,6 +558,7 @@ def main(argv=None):
     parser.add_argument('--config')
     parser.add_argument('--source-study', help='Migrated original study containing its selected deployment and data metadata')
     parser.add_argument('--teacher-comparison', help='Complete numerical comparison directory; selects its eligible lambda')
+    parser.add_argument('--development-study', help='Verified smaller development study: reuse validation and expand nested TRAIN')
     parser.add_argument('--output', required=True)
     parser.add_argument('--resume', action='store_true')
     parser.add_argument('--stop-after', type=int, help='Testing: cap new updates in the next unfinished training phase')
@@ -463,7 +584,8 @@ def main(argv=None):
         if not args.config or not args.source_study or not args.teacher_comparison:
             parser.error('run requires --config, --source-study and --teacher-comparison')
         run(args.config, args.output, source_study=args.source_study,
-            teacher_comparison=args.teacher_comparison, resume=args.resume, stop_after=args.stop_after)
+            teacher_comparison=args.teacher_comparison, resume=args.resume, stop_after=args.stop_after,
+            development_study=args.development_study)
 
 
 if __name__ == '__main__':

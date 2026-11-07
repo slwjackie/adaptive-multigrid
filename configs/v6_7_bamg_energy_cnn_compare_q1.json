@@ -63,19 +63,22 @@
         63,
         127
       ],
-      "per_family": 10
+      "per_family": 20
     },
     "validation": {
       "sizes": [
+        15,
         31,
-        63
+        63,
+        127
       ],
-      "per_family": 4
+      "per_family": 10
     },
-    "seed": 2026110821
+    "seed": 2026110821,
+    "sampling": "stratified_nested_v1"
   },
   "supervised": {
-    "updates": 4000,
+    "updates": 8400,
     "learning_rate": 0.001,
     "seed": 2026110107,
     "gradient_clip": 2.0,
@@ -86,13 +89,13 @@
     "checkpoint_every": 25
   },
   "finetune": {
-    "updates": 2000,
+    "updates": 4480,
     "learning_rate": 0.0001,
     "seed": 2026110107,
     "gradient_clip": 2.0,
     "cycles": 6,
     "final_cycles": 12,
-    "curriculum_step": 1000,
+    "curriculum_step": 2240,
     "cycle_loss_weighting": "uniform",
     "probe_kinds": [
       "random",
@@ -124,8 +127,8 @@
   },
   "support_mode": "fixed_bilinear",
   "warm_validation": {
-    "every": 100,
-    "per_family_per_size": 1,
+    "every": 560,
+    "per_family_per_size": 2,
     "repetitions": 3,
     "warmup_cycles": 1,
     "timeout_seconds": 120.0,
@@ -152,5 +155,6 @@
     ],
     "bootstrap_resamples": 2000,
     "bootstrap_seed": 2026112111
-  }
+  },
+  "sampling": "epoch_shuffle"
 }

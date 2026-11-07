@@ -225,3 +225,99 @@ def test_actual_warm_selection_exports_geometry_only_deployment(tmp_path, inputs
     assert report['contract']['setup_included'] is False
     assert report['contract']['fallback'] is False
     assert result['selection']['metrics']['attempts'] == 1
+
+
+def epoch_inputs(inputs):
+    values = deepcopy(inputs)
+    values['train'] = [case('train-a', .2, 'train'), case('train-b', .35, 'train')]
+    a = assemble_stiffness(DiffusionCase(n=15, epsilon=.7, angle_deg=30.,
+        contrast=1., pattern='uniform', discretization='q1'))
+    values['train'].append(dict(A=a, shape=(15, 15), b=np.ones(225), case_id='train-c',
+        family='near_isotropic', split='train',
+        normalized_operator_digest=operator_digest(a, scale_invariant=True)))
+    tc = TeacherConfig(support_mode='fixed_bilinear', vectors=6, sweeps=(1, 2),
+        setup_passes=2, selection_vectors=2, audit_vectors=2, eigen_count=0,
+        adaptive_vectors=1, max_vector_retries=0)
+    values['teacher_results'] = [build_teacher(e['A'], e['shape'], config=tc)
+                                for e in values['train']]
+    values['settings']['sampling'] = 'epoch_shuffle'
+    values['settings']['supervised']['updates'] = 6
+    values['settings']['finetune'].update(updates=6, cycles=1, final_cycles=2,
+                                         curriculum_step=3)
+    return values
+
+
+def constant_measurement(self, model):
+    # Deliberate global RNG consumption must not affect TRAIN/probe streams.
+    np.random.normal(size=11); torch.randn(11)
+    return dict(failures=0, attempts=1, failure_rate=0., eligible=True,
+                mean_case_median_warm_seconds=1., cases=[])
+
+
+@pytest.mark.parametrize('arm', ['scratch', 'warm'])
+def test_epoch_shuffle_resume_exact_inside_and_between_epochs(tmp_path, inputs, monkeypatch, arm):
+    values = epoch_inputs(inputs)
+    monkeypatch.setattr(WarmCheckpointSelector, '_measure', constant_measurement)
+    full = paired.train_arm(tmp_path / 'full', arm=arm, **values)
+    partial = paired.train_arm(tmp_path / 'resume', arm=arm, stop_after=2, **values)
+    assert partial['training_coverage']['supervised']['distinct_cases_seen'] == 2
+    partial = paired.train_arm(tmp_path / 'resume', arm=arm, stop_after=5, resume=True, **values)
+    assert partial['completed_updates'] == dict(supervised=6, finetune=1)
+    partial = paired.train_arm(tmp_path / 'resume', arm=arm, stop_after=2, resume=True, **values)
+    assert partial['training_coverage']['finetune']['completed_epochs'] == 1
+    result = paired.train_arm(tmp_path / 'resume', arm=arm, resume=True, **values)
+    for phase, key in [('supervised', 'supervised_checkpoint'), ('finetune', 'finetune_checkpoint')]:
+        a = load_training_checkpoint(full['paths'][key])
+        b = load_training_checkpoint(result['paths'][key])
+        assert a['history'] == b['history']
+        for field in ('models', 'optimizer', 'rng'):
+            assert _digest(a[field]) == _digest(b[field])
+        assert a['source']['sampler']['version'] == paired.epoch_training.EpochShuffle.VERSION
+        for offset in (0, 3):
+            epoch = a['history'][offset:offset + 3]
+            assert sorted(r['case'] for r in epoch) == [0, 1, 2]
+            assert [r['epoch_position'] for r in epoch] == [1, 2, 3]
+            assert {r['epoch'] for r in epoch} == {offset // 3 + 1}
+            assert len({r['permutation_sha256'] for r in epoch}) == 1
+        assert result['training_coverage'][phase]['minimum_visits'] == 2
+        assert result['training_coverage'][phase]['maximum_visits'] == 2
+        assert result['training_coverage'][phase]['all_cases_seen'] is True
+    # A selected early model must not inherit the latest checkpoint's coverage claim.
+    assert result['selection']['selected_finetune_coverage']['updates'] == 0
+    assert result['selection']['selected_finetune_coverage']['all_cases_seen'] is False
+    hashes = {k: paired._file_hash(v) for k, v in result['paths'].items()}
+    again = paired.train_arm(tmp_path / 'resume', arm=arm, resume=True, **values)
+    assert again == result
+    assert hashes == {k: paired._file_hash(v) for k, v in result['paths'].items()}
+
+
+def test_epoch_shuffle_scratch_and_warm_use_identical_case_orders(tmp_path, inputs, monkeypatch):
+    values = epoch_inputs(inputs)
+    monkeypatch.setattr(WarmCheckpointSelector, '_measure', constant_measurement)
+    scratch = paired.train_arm(tmp_path / 'scratch', arm='scratch', **values)
+    warm = paired.train_arm(tmp_path / 'warm', arm='warm', **values)
+    for key in ('supervised_checkpoint', 'finetune_checkpoint'):
+        a = load_training_checkpoint(scratch['paths'][key])
+        b = load_training_checkpoint(warm['paths'][key])
+        assert [(r['case'], r['epoch'], r['permutation_sha256']) for r in a['history']] == [
+            (r['case'], r['epoch'], r['permutation_sha256']) for r in b['history']]
+        assert _digest(a['models']) != _digest(b['models'])
+
+
+@pytest.mark.parametrize('stage', ['supervised', 'finetune'])
+def test_epoch_shuffle_rejects_budget_that_cannot_visit_all_train(tmp_path, inputs, stage):
+    values = epoch_inputs(inputs)
+    values['settings'][stage]['updates'] = 2
+    if stage == 'finetune':
+        values['settings'][stage]['curriculum_step'] = 1
+    with pytest.raises(ValueError, match='at least one full TRAIN epoch'):
+        paired.train_arm(tmp_path / 'short', arm='scratch', **values)
+    assert not (tmp_path / 'short').exists()
+
+
+def test_epoch_policy_change_requires_new_output(tmp_path, inputs):
+    values = epoch_inputs(inputs)
+    paired.train_arm(tmp_path / 'arm', arm='scratch', stop_after=1, **values)
+    values['settings']['sampling'] = 'with_replacement'
+    with pytest.raises(ValueError, match='provenance/configuration mismatch'):
+        paired.train_arm(tmp_path / 'arm', arm='scratch', resume=True, **values)

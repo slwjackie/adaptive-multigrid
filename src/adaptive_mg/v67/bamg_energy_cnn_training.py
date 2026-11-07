@@ -24,6 +24,7 @@ from .bamg_training import (
 )
 from .bamg_transfer import WeightCNN
 from .bamg_validation import WarmCheckpointSelector
+from . import bamg_energy_cnn_epoch_training as epoch_training
 
 
 VERSION = 'bamg-energy-cnn-arm-v1'
@@ -76,7 +77,8 @@ def _stage_state(path, phase, settings, manifest, spec):
 def _compact_history(history):
     keys = ('update', 'loss', 'gradient_norm', 'case', 'cycles', 'probe_kinds',
             'fallback_used', 'fixed_support', 'normalization', 'teacher_forcing',
-            'hard_topk_gradient', 'mask_learned', 'levels', 'warm_validation')
+            'hard_topk_gradient', 'mask_learned', 'levels', 'warm_validation',
+            'sampling', 'epoch', 'epoch_position', 'epoch_size', 'permutation_sha256')
     return [{key: record[key] for key in keys if key in record} for record in history]
 
 
@@ -100,6 +102,11 @@ def train_arm(output, *, arm, seed, settings, train, validation, teacher_results
     if stop_after is not None and (type(stop_after) is not int or stop_after < 0):
         raise ValueError('stop_after must be a nonnegative invocation budget')
     settings = deepcopy(settings)
+    sampling = settings.get('sampling', 'with_replacement')
+    if sampling not in ('with_replacement', 'epoch_shuffle'):
+        raise ValueError('Unknown paired TRAIN sampling policy')
+    supervised_trainer = epoch_training.train_supervised if sampling == 'epoch_shuffle' else train_supervised
+    finetune_trainer = epoch_training.train_finetune if sampling == 'epoch_shuffle' else train_finetune
     if settings.get('support_mode', 'fixed_bilinear') != 'fixed_bilinear':
         raise ValueError('paired training requires fixed bilinear support')
     fine_values = settings['finetune']
@@ -113,6 +120,9 @@ def train_arm(output, *, arm, seed, settings, train, validation, teacher_results
                                     cycle_loss_weighting='uniform'), FinetuneSettings))
     if supervised['alpha_mask'] != 0:
         raise ValueError('paired Weight CNN training requires alpha_mask=0')
+    if sampling == 'epoch_shuffle':
+        for stage, values in [('supervised', supervised), ('finetune', finetune)]:
+            epoch_training.EpochShuffle(len(train), seed, stage).require_budget(values['updates'])
     init_weight = Path(init_weight).resolve()
     init_hash = _file_hash(init_weight)
     if provenance.get('init_weight_sha256') != init_hash:
@@ -195,11 +205,18 @@ def train_arm(output, *, arm, seed, settings, train, validation, teacher_results
     def paused(stage):
         return dict(version=VERSION, status='paused', arm=arm, seed=seed, stage=stage,
                     identity_sha256=identity_hash, completed_updates=progress.copy(),
-                    paths={k: str(v) for k, v in paths.items()}, selection=None)
+                    paths={k: str(v) for k, v in paths.items()}, selection=None,
+                    training_coverage=coverage())
+
+    def coverage():
+        if sampling != 'epoch_shuffle':
+            return dict(sampling=sampling, all_cases_seen_guaranteed=False)
+        return {stage: epoch_training.EpochShuffle(len(train), seed, stage).coverage(update)
+                for stage, update in progress.items()}
 
     if latest_supervised is None or latest_supervised['status'] != 'complete':
         before = progress['supervised']
-        history = train_supervised(None, weight, teacher_results, settings=supervised,
+        history = supervised_trainer(None, weight, teacher_results, settings=supervised,
             checkpoint_path=paths['supervised_checkpoint'],
             resume=latest_supervised is not None, manifest=manifest, stop_after=remaining)
         progress['supervised'] = len(history)
@@ -233,7 +250,7 @@ def train_arm(output, *, arm, seed, settings, train, validation, teacher_results
         ReferenceModels.from_state_dict(reference_state), cfg,
         settings=settings['warm_validation'], best_path=paths['best_warm'])
     if latest_fine is None or latest_fine['status'] != 'complete':
-        history = train_finetune(weight, reference, train, settings=finetune, mg_config=cfg,
+        history = finetune_trainer(weight, reference, train, settings=finetune, mg_config=cfg,
             checkpoint_path=paths['finetune_checkpoint'], resume=latest_fine is not None,
             manifest=manifest, stop_after=remaining, warm_selector=selector)
         progress['finetune'] = len(history)
@@ -255,6 +272,9 @@ def train_arm(output, *, arm, seed, settings, train, validation, teacher_results
                      budget_updates=finetune['updates'],
                      best_at_budget_boundary=selector.best['update'] == finetune['updates'],
                      training_budget='fixed_updates', convergence_certified=False)
+    if sampling == 'epoch_shuffle':
+        selection['selected_finetune_coverage'] = epoch_training.EpochShuffle(
+            len(train), seed, 'finetune').coverage(selector.best['update'])
     _atomic_save(dict(version=VERSION, arm=arm, seed=seed, identity_sha256=identity_hash,
                      reference=reference_state, weight_spec=weight.spec,
                      weight_state=weight.state_dict(), settings=settings,
@@ -264,6 +284,7 @@ def train_arm(output, *, arm, seed, settings, train, validation, teacher_results
     progress = dict(supervised=supervised['updates'], finetune=finetune['updates'])
     completed = dict(version=VERSION, status='complete', arm=arm, seed=seed,
                      identity_sha256=identity_hash, completed_updates=progress,
+                     training_coverage=coverage(),
                      paths={k: str(v) for k, v in paths.items()}, selection=selection,
                      artifact_sha256={k: _file_hash(v) for k, v in paths.items()
                                       if k not in ('completion', 'identity')})

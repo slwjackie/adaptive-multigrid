@@ -71,6 +71,9 @@ def hardware_environment(*,refresh=False):
         _POOL_CONTROLLER=ThreadpoolController()
         if refresh:_hardware_static.cache_clear()
     pools=[{k:p.get(k) for k in ('internal_api','num_threads','version','architecture')} for p in _POOL_CONTROLLER.info()]
+    # Library discovery order can differ across processes. Preserve every pool
+    # and all recorded fields while making hardware fingerprints order invariant.
+    pools.sort(key=lambda pool: json.dumps(pool, sort_keys=True))
     return dict(**_hardware_static(),
                 affinity_count=len(os.sched_getaffinity(0)) if hasattr(os, 'sched_getaffinity') else os.cpu_count(),
                 numpy=np.__version__, scipy=scipy.__version__, torch=str(torch.__version__),

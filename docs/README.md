@@ -13,6 +13,7 @@ P 고정 줄 smoother 학습 → 전체 V-cycle 공동 미세조정**이다. 브
 | 문서 | 내용 |
 | --- | --- |
 | [em_line_study.md](em_line_study.md) | 새 3단계 학습, 학생 coarse 행렬의 EM 정답, 줄 CNN, 재사용·실측 선택, Mac 전체 명령 |
+| [PLAIN_CNN_ABLATION_KR.md](PLAIN_CNN_ABLATION_KR.md) | Residual 연결이 없는 같은 깊이의 plain5 CNN, P/smoother별 선택과 실행 설정 |
 | [learned_p_study.md](learned_p_study.md) | 이전 P-only 경로의 PDE·P 제약·Frobenius 손실·fallback |
 | [learned_p_runbook.md](learned_p_runbook.md) | 이전 P-only의 설치, 확대 학습·평가·재개 |
 | [ARCHITECTURE_KR.md](ARCHITECTURE_KR.md) | 이전 P-only 및 공통 코드 위치와 데이터 흐름 |

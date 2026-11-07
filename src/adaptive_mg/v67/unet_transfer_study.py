@@ -76,6 +76,8 @@ def validate_settings(settings):
         raise ValueError('Teacher and students must share frozen-parent sparse support')
     if study.get('parameterization', 'softmax') not in ('softmax', 'affine'):
         raise ValueError('Unknown P parameterization')
+    if study.get('student_body_kind', 'residual5') not in ('residual5', 'plain5'):
+        raise ValueError('student_body_kind must be residual5 or plain5')
     for key in ('student_hidden', 'teacher_hidden', 'teacher_depth', 'teacher_blocks'):
         value = study[key]
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:
@@ -213,7 +215,8 @@ def initial_model(settings, stage):
         model.transfer = ResidualUNetTransferTeacher(hidden=study['teacher_hidden'],
             depth=study['teacher_depth'], blocks_per_stage=study['teacher_blocks'], **common)
     else:
-        model.transfer = CompactTransferStudent(hidden=study['student_hidden'], **common)
+        model.transfer = CompactTransferStudent(hidden=study['student_hidden'],
+            body_kind=study.get('student_body_kind', 'residual5'), **common)
     model.metadata.update(research_version=VERSION, role='teacher' if stage == 'teacher' else 'student',
         initialization_seed=int(settings['seed']), final_test_seen=False,
         transfer_only=True, attention=False, trained_against='fixed line_alt + energy minimization + full coarsening')

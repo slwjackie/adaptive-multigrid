@@ -4,6 +4,9 @@
 `scripts/run_v6_7_em_line_study.py`다. 이전 P-only, sparse smoother, pruning/TTT
 실험과 구분되는 **새 run**을 만든다. 이전 run의 manifest나 freeze 기록은 수정하지 않는다.
 
+기본 CNN은 기존 `residual5`다. 같은 깊이·채널 수에서 skip 덧셈을 제거한 `plain5`도
+선택할 수 있다. [기본 CNN 비교 설정과 실행 방법](PLAIN_CNN_ABLATION_KR.md)을 참고한다.
+
 ## 학습과 배포 구조
 
 | 단계 / 평가 이름 | 학습 대상 | 고정된 부분 | 손실 |

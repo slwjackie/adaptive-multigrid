@@ -141,7 +141,7 @@ Create a separate checkout for the new entry point:
 
 ```bash
 cd /mnt/c/Users/user/Desktop/adaptive-multigrid-bamg
-git fetch origin codex/hybrid-cnn-initialization-comparison &&
+git fetch origin residual-u-net-teacher &&
 git worktree add --detach ../adaptive-multigrid-cnn-final FETCH_HEAD
 
 cd /mnt/c/Users/user/Desktop/adaptive-multigrid-cnn-final

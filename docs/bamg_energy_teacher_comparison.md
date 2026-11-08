@@ -69,8 +69,11 @@ The Q1 configuration generates a fresh, reproducible development-validation set:
 read any prior study or final/OOD data. This is **development selection**, not an
 unbiased final-generalization result. No operator is discarded for failure.
 
-Default lambda grid: `[0, 0.01, 0.1, 1, 10]`. The same global lambda is used on
-every level and selected across the entire development set, not per case/family.
+Default lambda grid: `[0, 0.01, 0.1, 1, 5, 10, 30, 50]`. The same global lambda
+is used on every level and selected across the entire development set, not per
+case/family. This expands the original grid with 5, 30 and 50; use a new output
+directory for the expanded comparison. Resume an existing run with its original
+configuration.
 There are three repeats and two RHS per operator: one existing manufactured
 case RHS and one independently seeded random RHS. Neither RHS enters the
 setup vector bank. Timing order is deterministically shuffled between methods.
@@ -158,9 +161,11 @@ passed together: **78 passed**. The only warning came from an external pytest
 plugin's deprecated pytest API. The report CLI, including `--group n63`, was
 also exercised on the following completed comparison.
 
-For an integration pilot, use the supplied Q1 configuration with only
-`data.per_family` changed from 4 to 1. All other settings, including 32 setup
-vectors, two setup passes, the lambda grid, 3 repeats and 2 RHS, are unchanged.
+The completed integration pilot used the original Q1 configuration with
+`data.per_family` changed from 4 to 1 and the original lambda grid
+`[0, 0.01, 0.1, 1, 10]`. Other settings included 32 setup vectors, two setup
+passes, 3 repeats and 2 RHS. The table below does not evaluate the added 5/30/50
+candidates.
 This gives 14 operators and 84 solve attempts per method. Environment: Linux
 x86_64, one CPU thread, Python 3.12.14, NumPy 2.3.5, SciPy 1.17.0,
 PyTorch 2.15.0+cpu. This shared execution environment was not a dedicated
@@ -190,10 +195,10 @@ five-iteration definition; all of its outer solves still converged.
 
 The globally selected grid value was lambda=10. Its warm mean was **37.622 ms
 vs EM5's 36.645 ms at n=31**, and **83.549 ms vs 97.922 ms at n=63**. Therefore
-the pilot does not establish superiority at both sizes. Lambda=10 is also the
-largest finite value in the declared grid, not a continuous optimum. A future
-development sweep can bracket larger values while retaining the energy-only
-control; use a new output directory for a different grid.
+the pilot does not establish superiority at both sizes. Lambda=10 was the
+largest finite value in that pilot's original grid, not a continuous optimum.
+The current default adds 5, 30 and 50 while retaining the energy-only control;
+those candidates require a new comparison before drawing conclusions.
 
 The complete pilot's JSON files occupied about 1.32 MB, and its entire output,
 including compressed vector banks, about 15.97 MB. No CNN was retrained or

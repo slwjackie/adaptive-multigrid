@@ -4,7 +4,7 @@
   "smoke": false,
   "seed": 2026110701,
   "threads": 1,
-  "lambdas": [0.0, 0.01, 0.1, 1.0, 10.0],
+  "lambdas": [0.0, 0.01, 0.1, 1.0, 5.0, 10.0, 30.0, 50.0],
   "data": {
     "discretization": "q1",
     "seed": 2026110789,

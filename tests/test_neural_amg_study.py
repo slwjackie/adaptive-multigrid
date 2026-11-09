@@ -32,7 +32,7 @@ def test_training_resume_freeze_final_and_tampering(tmp_path, config):
     assert frozen['selection'].endswith('setup_plus_solve')
     evaluated = study.evaluate(config, run)
     assert evaluated['complete']
-    assert {r['split'] for r in evaluated['results']} == {'final','ood_grid'}
+    assert {r['split'] for r in evaluated['results']} == {'final','ood_grid','ood_mesh'}
     assert {r['method'] for r in evaluated['results']} == {'classical','teacher','learned'}
     assert study.evaluate(config, run, resume=True) == evaluated
     with pytest.raises(ValueError, match='Frozen runs'):
@@ -56,22 +56,32 @@ def test_resume_rejects_config_and_data_changes(tmp_path, config):
         study.prepare(config, run, resume=True)
 
 
-def test_external_npz_arbitrary_node_count_and_overlap(tmp_path, config):
-    # Eleven unknowns cannot be reshaped to the previous square-grid CNN input.
-    for name, scale in [('tr',1),('va',2),('fi',3)]:
-        a = sp.diags([-np.ones(10), np.linspace(3,4+scale,11), -np.ones(10)], [-1,0,1], format='csr')
-        sp.save_npz(tmp_path/f'{name}.npz', a)
-    manifest = tmp_path/'operators.json'
-    manifest.write_text(json.dumps({'splits': {'train':[{'A':'tr.npz'}],
-        'validation':[{'A':'va.npz'}], 'final':[{'A':'fi.npz'}]}}))
-    config['data'] = dict(kind='npz_manifest', manifest=str(manifest), seed=15)
+@pytest.mark.parametrize('kind', ['generated', 'npz_manifest', 'q1', 'p1', 'p1_structured'])
+def test_other_discretization_paths_rejected(config, kind):
+    config['data']['kind'] = kind
+    with pytest.raises(ValueError, match='Only p1_unstructured'):
+        study.validate_config(config)
+
+
+def test_mesh_is_saved_and_tampering_rejected(tmp_path, config):
     data = study.prepare(config, tmp_path/'run')
-    assert study._load_case(tmp_path/'run', data['train'][0]).a.shape == (11,11)
-    assert not (tmp_path/'run'/'data_final.json').exists()
-    manifest.write_text(json.dumps({'splits': {'train':[{'A':'tr.npz'}],
-        'validation':[{'A':'tr.npz'}], 'final':[{'A':'fi.npz'}]}}))
-    with pytest.raises(ValueError, match='Duplicate normalized'):
-        study.prepare(config, tmp_path/'overlap')
+    record = data['train'][0]
+    case = study._load_case(tmp_path/'run', record)
+    assert case.a.shape[0] == len(case.mesh.interior)
+    assert record['mesh_statistics']['triangles'] == 128
+    with study._mesh_path(tmp_path/'run', record['spec']).open('ab') as stream:
+        stream.write(b'changed mesh')
+    with pytest.raises(ValueError, match='Cached case content changed'):
+        study.prepare(config, tmp_path/'run', resume=True)
+
+
+def test_p1_run_rejects_old_protocol_and_split_override(config):
+    old = copy.deepcopy(config); old['version'] = 'neural-amg-study-v1'
+    with pytest.raises(ValueError, match='Unsupported'):
+        study.validate_config(old)
+    config['data']['splits']['train']['discretization'] = 'q1'
+    with pytest.raises(ValueError, match='other discretizations'):
+        study.validate_config(config)
 
 
 def test_resumed_optimizer_trajectory_equals_uninterrupted(tmp_path, config, monkeypatch):
@@ -88,7 +98,10 @@ def test_source_identity_is_nonempty_and_complete():
     hashes = study._source_identity()
     assert 'neural_amg/model.py' in hashes
     assert 'neural_amg/solver.py' in hashes
-    assert 'adaptive_mg/v67/autograd_sparse.py' in hashes
+    assert 'neural_amg/autograd_sparse.py' in hashes
+    assert 'neural_amg/fem.py' in hashes
+    assert 'neural_amg/data.py' in hashes
+    assert 'adaptive_mg/pde.py' not in hashes
     assert all(len(value) == 64 for value in hashes.values())
 
 

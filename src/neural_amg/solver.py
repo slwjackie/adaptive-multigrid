@@ -12,7 +12,7 @@ import scipy.sparse as sp
 import scipy.sparse.linalg as sla
 import torch
 
-from adaptive_mg.v67.autograd_sparse import SparseTensor
+from neural_amg.autograd_sparse import SparseTensor
 from .structure import build_structure
 
 

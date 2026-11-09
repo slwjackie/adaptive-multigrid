@@ -1,5 +1,5 @@
 {
-  "version": "neural-amg-study-v1",
+  "version": "neural-amg-p1-study-v2",
   "seed": 6101,
   "torch_threads": 1,
   "model": {
@@ -53,7 +53,7 @@
     ]
   },
   "data": {
-    "kind": "generated",
+    "kind": "p1_unstructured",
     "seed": 2026111001,
     "families": [
       "near_isotropic"
@@ -82,7 +82,24 @@
           15
         ],
         "per_family": 1
+      },
+      "ood_mesh": {
+        "sizes": [
+          7
+        ],
+        "per_family": 1,
+        "mesh": {
+          "jitter": 0.4,
+          "grading": 1.5
+        }
       }
-    }
+    },
+    "discretization": "p1_unstructured",
+    "mesh": {
+      "jitter": 0.3,
+      "grading": 1.0
+    },
+    "forcing": "constant_one",
+    "boundary": "homogeneous_dirichlet"
   }
 }

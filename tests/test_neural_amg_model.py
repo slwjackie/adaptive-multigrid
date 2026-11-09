@@ -4,7 +4,7 @@ import scipy.sparse as sp
 import torch
 from neural_amg.structure import Structure, build_structure, validate_support_hops
 from neural_amg.model import GraphAttentionTransfer, graph_features, constrain_weights
-from adaptive_mg.v67.autograd_sparse import SparseTensor
+from neural_amg.autograd_sparse import SparseTensor
 
 
 def problem():

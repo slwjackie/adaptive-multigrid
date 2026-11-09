@@ -18,7 +18,7 @@ import math
 import numpy as np
 import torch
 from torch import nn
-from adaptive_mg.v67.autograd_sparse import SparseTensor
+from neural_amg.autograd_sparse import SparseTensor
 from .structure import Structure
 
 FEATURE_MODES = ("original", "row9", "symmetric9")

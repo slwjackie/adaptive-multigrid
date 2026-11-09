@@ -1,81 +1,58 @@
-> **새 독립 비교 경로:** [같은 P의 경량 줄 smoother와 Mac 실행 안내](docs/light_smoother_study.md).
-> 학습 완료 `em_P`를 고정하고 242개 파라미터 MLP와 26개 계수 회귀를 비교한다.
-> 온라인 적응은 기본 off이며 별도 비교군으로 평가한다. 아래 EM-line·P-only 경로는 유지한다.
+# 비정렬 삼각형 P1 FEM 기반 Neural AMG
 
-# EM 모방 P와 줄 smoother 학습
+![Actual generated P1 triangular meshes](docs/figures/p1_unstructured_mesh.svg)
 
-현재 주 실험은 **EM5 모방 P 사전학습 → P 고정 줄 smoother 학습 → 전체 V-cycle
-공동 미세조정**이다. [새 설계와 Mac 전체 실행 명령](docs/em_line_study.md)을 따른다.
-`scripts/run_v6_7_em_line_study.py`를 새 run에서 실행하며, 아래 P-only 경로와
-기존 실험 기록은 재현을 위해 유지한다. [영문 현재 README](README.md)
+현재 **`neural-amg` 브랜치는 FEM P1 비정렬 삼각형 이산화만 사용한다.**
+Q1, 정렬 삼각형 조립, 이전 geometric/CNN 실행 경로는 이 브랜치에서 제거했다.
+이전 연구 코드는 [`residual-u-net-teacher`](https://github.com/slwjackie/adaptive-multigrid/tree/residual-u-net-teacher)와 Git 이력에 남아 있다.
 
-## 이전 실험: line_alt 고정 + learned P
+[실행 문서](docs/neural_amg.md) · [P1 수식·검증](docs/p1_fem.md) · [영문 README](README.md)
 
-작업 브랜치는 **`residual-u-net-teacher`**다. 아래 내용은 이전
-`run_v6_7_learned_p_study.py`의 **classical `line_alt`를 고정하고 작은 CNN으로
-P만 학습**하는 구조를 설명한다. 이하의 “현재”는 그 P-only 실험의 문맥이며,
-그 경로에는 NN smoother·U-net teacher·TTT·GRU 정책이 없다.
+## 실제 계산 흐름
 
-- [현재 설계와 학습 목표](docs/learned_p_study.md)
-- [Mac 실행: smoke → 420개 A 학습 → 직접 P 평가 → 재개](docs/learned_p_runbook.md)
-- [현재 코드 위치](docs/ARCHITECTURE_KR.md)
-- [docs 전체 안내와 과거 실험](docs/README.md)
+1. Seed에 따라 내부 점 위치를 교란하고 Delaunay 삼각분할로 비정렬 mesh를 만든다.
+   삼각형은 실제 좌표와 연결 정보로 저장하며, 정사각형을 고정 대각선으로 자르지 않는다.
+2. 각 삼각형의 선형 형상함수 기울기를 계산해 P1 FEM 강성행렬을 조립한다.
+3. 연구 데이터는 물리적 소스 `f=1`을 적분해 하중벡터를 만들고 `u=0` Dirichlet 경계를 제거한다.
+4. Classical AMG가 각 level의 실제 A에서 coarse 노드 C와 interpolation support S를 정한다.
+5. BAMG+EM teacher로 graph attention 모델을 지도학습하고, 실제 MG 잔차로 fine-tuning한다.
+6. 생성한 P로 `R=Pᵀ`, `Ac=PᵀAP`를 구성한다. NN 추론은 setup에서만 수행한다.
 
-## 현재 구성
-
-| 항목 | 내용 |
+| 항목 | 설정 |
 | --- | --- |
-| 대상 | 합성 2차원 확산 PDE의 SPD 선형계 Ax=b |
-| Coarsening | full 고정 |
-| Smoother | 모든 nonterminal level에서 `line_alt`, pre/post 각 2회 |
-| 학습 대상 | Width-8 residual CNN이 생성하는 희소 P, 생성기 파라미터 3,208개 |
-| Restriction / coarse 행렬 | R=Pᵀ, Ac=PᵀAP |
-| 최하위 풀이 | 내부 격자 3×3에서 LU |
-| 초기 P·fallback | `line_alt + bilinear + full` |
-| 독립 비교군 | `line_alt + EM5 + full`; learned setup에서는 EM 실행 안 함 |
-| 손실 | 전체 V-cycle 오차 전달행렬의 Frobenius norm 제곱 / 미지수 수 |
-| 최종 성능 기준 | 같은 tolerance까지의 setup + solve 총시간 |
+| 이산화 | 비정렬 삼각형 P1 FEM만 허용 |
+| 공간 적분 | 양의 가중치를 가진 7점 삼각형 적분, 5차 다항식까지 정확 |
+| Attention | A 그래프 3층 + sparse fine–coarse cross-attention + signed edge head |
+| P 제약 | Coarse injection, 기준 P 행합, signed row-L1 cap |
+| Smoother | Weighted Jacobi pre/post 각 2회 |
+| 입력 특징 | `original` 기본, `row9`·`symmetric9` 선택 실험 |
+| 계산 환경 | CPU FP64 |
+| 연구 데이터 | TRAIN 560 / validation 280 / final 280 + 6종 OOD |
+| Mesh OOD | 별도 `ood_mesh`: jitter와 공간 grading 변화 |
 
-새 A의 각 level에서 CNN을 한 번 실행하고, 생성한 P/R/Ac와 수치 분해를 같은 A의
-모든 cycle·RHS에서 재사용한다. A가 바뀌면 계층을 갱신한다. 현재 기본 경로는
-느리다는 이유만으로 classical로 바꾸지 않으며, 잔차 증가·비정상 값·생성 실패에 대한
-fallback과 tolerance 근처의 classical 마무리를 사용한다.
+격자 크기 `n`은 초기 점 밀도를 정하며 기본 내부 미지수는 `n²`개다.
+점의 실제 좌표와 Delaunay 연결은 mesh seed에 따라 달라진다. Solver와 NN은
+행렬을 정렬 격자 이미지로 reshape하지 않는다. `ood_topology`는 계수 분포 형상의
+변화이며, mesh의 변화는 `ood_mesh`로 따로 평가한다.
 
-## 현재 실행 순서와 예산
+## 실행과 재개
 
-먼저 `scripts/run_v6_7_learned_p_study.py`의 `prepare → train → diagnose`를 실행한다.
-그 뒤 [실행 안내](docs/learned_p_runbook.md)의 세 비교군 평가를 수행한다.
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e '.[dev]'
+python scripts/run_neural_amg.py train \
+  --config configs/neural_amg_smoke.json --run-dir artifacts/neural_amg_p1_smoke
+python scripts/run_neural_amg.py freeze \
+  --config configs/neural_amg_smoke.json --run-dir artifacts/neural_amg_p1_smoke
+python scripts/run_neural_amg.py evaluate \
+  --config configs/neural_amg_smoke.json --run-dir artifacts/neural_amg_p1_smoke
+```
 
-| 구성 | Train A | Validation A | Updates |
-| --- | ---: | ---: | ---: |
-| 저장소 smoke 설정 | 7개, n=7 | 7개, n=7 | 14 |
-| 저장소 research 설정: 예비 예산 | 84개, n=15/31/63 | 28개, n=15/31/63/127 | 336 |
-| 현재 확대 실행안 | **420개, n=15/31/63** | **140개, n=15/31/63/127** | **4,200** |
+**새 출력 폴더를 사용한다.** 기존 Q1 설정·label·checkpoint·run의 resume는
+새 `neural-amg-p1-study-v2`에서 거부한다. 임의의 A/b NPZ 입력 경로도 제거했다.
+모든 연구 행렬은 저장된 삼각형 mesh에서 P1으로 조립되며, 좌표·연결·경계·내부 DOF
+배열과 해시를 함께 보존한다. Final/OOD mesh는 freeze 후 생성한다.
 
-확대 실행안은 runbook의 명령으로 별도 설정 파일을 만드는 방식이다. 저장소 기본
-JSON이나 이미 준비한 run의 설정을 바꿨다는 뜻은 아니다. 4,200 updates는 학습
-시작 예산이며 충분한 학습이나 속도 개선을 보장하는 숫자가 아니다.
-
-일반 `benchmark` CLI는 `distilled_P`도 요구한다. 직접 학습 직후에는 runbook에 있는
-기존 평가 API 호출로 **fixed_C / em5_C / learned_P**만 평가한다. 이 결과는 development
-validation이며, 네 비교군 `freeze/final`의 필수 증거를 대체하지 않는다.
-
-직접 P 학습의 효과를 확인한 다음 선택적으로 `search → distill`을 실행한다. 이 경로도
-P만 최적화하며 NN smoother 공동 학습과 다르다. Final/OOD는 개발 중 학습·선택에
-사용하지 않는다.
-
-## 결과를 읽는 기준
-
-`diagnose`는 동일한 A·고정 오차 벡터의 학습 전후 손실과 실제 cycle·시간을 비교한다.
-Before 시간은 초기 CNN이 bilinear P를 생성하는 경로의 시간이다. 순수 classical 대비
-속도비는 별도 평가의 `fixed_C`를 기준으로 읽는다. 손실 감소, cycle 감소, 총시간 감소는
-서로 다른 결과이며 `rollback=0`도 모든 cycle이 learned P였다는 뜻은 아니다.
-
-Smoke와 단위 테스트 통과는 실행 검증이다. 확대 학습의 연구 규모 성능이나 classical
-대비 우위는 아직 확인되지 않았다. Sloshing·전단 혼합층 등 CFD 시간 적분기는 이
-브랜치의 현재 실험에 포함되지 않는다.
-
-이전 U-net, pruning/TTT, sparse smoother, joint, strong-aware 실험은
-[과거 문서 목록](docs/README.md)에 남겨 두었다. 과거 수치와 조건을 현재 결과에
-합쳐 해석하지 않는다. 이전 v6.7 패키지 README는
-[변경 전 커밋](https://github.com/slwjackie/adaptive-multigrid/blob/6df5ed7c1bb930600b56b9746e59c520c345273c/README_KR.md)에서 확인할 수 있다.
+전체 연구·재개 명령은 [실행 문서](docs/neural_amg.md)에 있다. 단위 테스트와 smoke는
+실행·수치 검증이며, 560개 연구 학습 또는 classical AMG 대비 속도 우위의 증거는 아니다.

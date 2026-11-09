@@ -1,7 +1,7 @@
 """Isolated neural AMG study: teacher supervision, multilevel tuning and frozen tests.
 
-The data protocol uses the existing seven diffusion families, but coarsening,
-features, teacher constraints and solver are algebraic. No legacy run is resumed.
+Seven diffusion families are assembled exclusively with P1 FEM on seeded
+unstructured triangular meshes. No old Q1 or structured P1 run is resumed.
 """
 from __future__ import annotations
 
@@ -22,15 +22,17 @@ import scipy.sparse as sp
 import torch
 from threadpoolctl import threadpool_limits
 
-from adaptive_mg.provenance import operator_digest
-from adaptive_mg.v67.autograd_sparse import SparseTensor
+from neural_amg.provenance import operator_digest
+from neural_amg.autograd_sparse import SparseTensor
 from .model import GraphAttentionTransfer
 from .solver import build_hierarchy, solve, multicycle_loss
 from .teacher import fit_teacher
+from .fem import DISCRETIZATION, TriangleMesh
+from .data import FAMILIES, validate_data_config, specification, materialize
 
-VERSION = 'neural-amg-study-v1'
+VERSION = 'neural-amg-p1-study-v2'
 SPLITS = ('train', 'validation', 'final', 'ood_grid', 'ood_rotation',
-          'ood_anisotropy', 'ood_contrast', 'ood_topology')
+          'ood_anisotropy', 'ood_contrast', 'ood_topology', 'ood_mesh')
 
 
 def digest(value):
@@ -73,8 +75,6 @@ def read_json(path):
 def _source_identity():
     root = Path(__file__).resolve().parents[1]
     paths = sorted((root / 'neural_amg').glob('*.py'))
-    # Bind reused sparse differentiation and PDE generators as well.
-    paths += sorted((root / 'adaptive_mg').rglob('*.py'))
     return {str(p.relative_to(root)): file_hash(p) for p in paths}
 
 
@@ -100,66 +100,30 @@ def validate_config(config):
         raise ValueError('Benchmark methods must be unique known methods including learned')
     if config['benchmark']['failure_penalty_seconds'] <= 0:
         raise ValueError('Failure penalty must be positive')
-    if config['data']['kind'] not in ('generated', 'npz_manifest'):
-        raise ValueError('Data kind must be generated or npz_manifest')
+    validate_data_config(config['data'])
     return config
 
 
 def load_config(path):
-    config = validate_config(read_json(path))
-    if config['data']['kind'] == 'npz_manifest':
-        config['data']['manifest'] = str((Path(path).resolve().parent / config['data']['manifest']).resolve())
-    return config
-
-
-def _external_identity(config):
-    if config['data']['kind'] != 'npz_manifest':
-        return {}
-    path = Path(config['data']['manifest']); manifest = read_json(path)
-    result = {'manifest': file_hash(path)}
-    for split, records in manifest['splits'].items():
-        for k, record in enumerate(records):
-            for field in ('A', 'b'):
-                if field in record:
-                    result[f'{split}/{k}/{field}'] = file_hash(path.parent / record[field])
-    return result
+    return validate_config(read_json(path))
 
 
 def identity(config):
-    return dict(config=digest(config), source=_source_identity(), external=_external_identity(config),
+    return dict(config=digest(config), source=_source_identity(),
                 runtime=dict(numpy=np.__version__, scipy=scipy.__version__, torch=str(torch.__version__),
                              pyamg=pyamg.__version__))
 
 
 def _specifications(config):
     data = config['data']
-    if data['kind'] == 'npz_manifest':
-        path = Path(data['manifest']); manifest = read_json(path)
-        if not {'train', 'validation', 'final'} <= manifest['splits'].keys():
-            raise ValueError('External manifest requires train, validation and final splits')
-        if any(s not in SPLITS and not s.startswith('ood_') for s in manifest['splits']):
-            raise ValueError('Unknown external split')
-        result = {}
-        for split, records in manifest['splits'].items():
-            result[split] = [dict(name=f'{split}_{k}', split=split, family=r.get('family','external'),
-                seed=data['seed'] + k + 1000003 * list(manifest['splits']).index(split),
-                external_A=str((path.parent / r['A']).resolve()),
-                external_b=str((path.parent / r['b']).resolve()) if 'b' in r else None)
-                for k, r in enumerate(records)]
-        if any(not rows for rows in result.values()):
-            raise ValueError('Empty split in external manifest')
-        return result
-    from adaptive_mg.v67.research_data import _specification, FAMILIES
+    validate_data_config(data)
     result = {}
     for index, (split, spec) in enumerate(data['splits'].items()):
         if split not in SPLITS:
-            raise ValueError('Unknown generated split')
+            raise ValueError('Unknown P1 data split')
         families = spec.get('families', data.get('families', list(FAMILIES)))
-        full = dict(spec, seed=data['seed'] + 1000003 * index, discretization='q1')
-        result[split] = [_specification(split, full, n, family, k, 0)
+        result[split] = [specification(split, data, index, n, family, k)
                          for n in spec['sizes'] for family in families for k in range(spec['per_family'])]
-    if not {'train', 'validation', 'final'} <= result.keys() or any(not x for x in result.values()):
-        raise ValueError('Nonempty train, validation, final specifications required')
     return result
 
 
@@ -169,21 +133,11 @@ class Case:
     a: sp.csr_matrix
     b: np.ndarray
     metadata: dict
+    mesh: TriangleMesh
 
 
 def _materialize(spec):
-    if 'external_A' in spec:
-        a = sp.load_npz(spec['external_A']).tocsr().astype(np.float64)
-        b = (np.load(spec['external_b'], allow_pickle=False) if spec['external_b']
-             else np.random.default_rng(spec['seed']).normal(size=a.shape[0]))
-    else:
-        from adaptive_mg.v67.research_data import _example
-        example = _example(spec); a, b = example.a, example.b
-    a.sum_duplicates(); a.sort_indices(); a.eliminate_zeros()
-    b = np.asarray(b, dtype=np.float64)
-    if a.shape[0] != a.shape[1] or b.shape != (a.shape[0],) or not np.isfinite(b).all():
-        raise ValueError('Invalid operator/RHS shape or values')
-    return a, b
+    return materialize(spec)
 
 
 def _case_paths(run, spec):
@@ -191,11 +145,26 @@ def _case_paths(run, spec):
     return directory / (spec['name'] + '.A.npz'), directory / (spec['name'] + '.b.npy')
 
 
+def _mesh_path(run, spec):
+    return Path(run) / 'data' / spec['split'] / (spec['name'] + '.mesh.npz')
+
+
 def _load_case(run, record):
     ap, bp = _case_paths(run, record['spec'])
-    if file_hash(ap) != record['a_file_sha256'] or file_hash(bp) != record['b_file_sha256']:
+    mp = _mesh_path(run, record['spec'])
+    if (file_hash(ap) != record['a_file_sha256'] or file_hash(bp) != record['b_file_sha256']
+            or file_hash(mp) != record['mesh_file_sha256']):
         raise ValueError('Cached case content changed')
-    return Case(record['spec']['name'], sp.load_npz(ap), np.load(bp, allow_pickle=False), record)
+    with np.load(mp, allow_pickle=False) as saved:
+        mesh = TriangleMesh(saved['points'], saved['triangles'], saved['boundary'])
+        if not np.array_equal(saved['interior'], mesh.interior):
+            raise ValueError('Cached P1 degree-of-freedom map changed')
+    if mesh.digest() != record['mesh_digest']:
+        raise ValueError('Cached P1 mesh identity changed')
+    a, b = sp.load_npz(ap), np.load(bp, allow_pickle=False)
+    if a.shape != (len(mesh.interior),)*2 or b.shape != (len(mesh.interior),):
+        raise ValueError('P1 mesh and operator dimensions differ')
+    return Case(record['spec']['name'], a, b, record, mesh)
 
 
 def _prepare_split(run, split, specs, forbidden):
@@ -211,15 +180,21 @@ def _prepare_split(run, split, specs, forbidden):
             raise ValueError('Operator overlap across data splits')
         forbidden.add(record['normalized_operator_digest'])
     for spec in specs[len(records):]:
-        a, b = _materialize(spec)
+        system = _materialize(spec)
+        a, b, mesh = system.a, system.b, system.mesh
         group = operator_digest(a, scale_invariant=True)
         if group in forbidden:
             raise ValueError('Duplicate normalized operator: choose disjoint data seeds/operators')
         forbidden.add(group)
         ap, bp = _case_paths(run, spec); ap.parent.mkdir(parents=True, exist_ok=True)
         sp.save_npz(ap, a); np.save(bp, b, allow_pickle=False)
+        mp = _mesh_path(run, spec)
+        np.savez_compressed(mp, points=mesh.points, triangles=mesh.triangles,
+                            boundary=mesh.boundary, interior=mesh.interior)
         record = dict(spec=spec, normalized_operator_digest=group, operator_digest=operator_digest(a),
-                      a_file_sha256=file_hash(ap), b_file_sha256=file_hash(bp))
+                      a_file_sha256=file_hash(ap), b_file_sha256=file_hash(bp),
+                      mesh_file_sha256=file_hash(mp), mesh_digest=mesh.digest(),
+                      mesh_statistics=mesh.statistics())
         records.append(record)
         atomic_json(path, dict(records=records))
     return records
@@ -232,7 +207,7 @@ def prepare(config, run, *, resume=False):
         if not resume:
             raise FileExistsError('Run exists; use --resume or a new output directory')
         if read_json(run / 'identity.json') != ident:
-            raise ValueError('Config, source, external data or runtime changed; resume rejected')
+            raise ValueError('Config, source, P1 data or runtime changed; resume rejected')
     else:
         if any(run.iterdir()):
             raise FileExistsError('New run directory must be empty')
@@ -355,7 +330,7 @@ def _state(model):
 
 def _check_run(config, run):
     if read_json(Path(run) / 'identity.json') != identity(config):
-        raise ValueError('Config, source, external data or runtime changed')
+        raise ValueError('Config, source, P1 data or runtime changed')
 
 
 def train(config, run, *, resume=False, max_updates=None):

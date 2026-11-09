@@ -5,7 +5,7 @@ import pytest
 import scipy.sparse as sp
 import torch
 
-from adaptive_mg.pde import DiffusionCase, assemble_stiffness
+from neural_amg.fem import generate_mesh, assemble_p1
 from neural_amg.model import GraphAttentionTransfer
 from neural_amg.solver import (
     _runtime_cycle, build_hierarchy, multicycle_loss, vcycle,
@@ -27,12 +27,14 @@ def irregular_grounded_graph():
                     + rng.uniform(.01, .1, n)) - adjacency).tocsr()
 
 
-def rotated_anisotropic_q1():
-    return assemble_stiffness(DiffusionCase(
-        n=7, epsilon=.02, angle_deg=31., discretization='q1'))
+def rotated_anisotropic_p1():
+    angle = np.deg2rad(31.)
+    rotation = np.array([[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]])
+    tensor = rotation @ np.diag([1., .02]) @ rotation.T
+    return assemble_p1(generate_mesh(7, 123), tensor).a
 
 
-@pytest.mark.parametrize('problem', [irregular_grounded_graph, rotated_anisotropic_q1])
+@pytest.mark.parametrize('problem', [irregular_grounded_graph, rotated_anisotropic_p1])
 def test_multilevel_irregular_and_rotated_runtime_parity(problem):
     torch.manual_seed(127)
     a = problem()
@@ -53,7 +55,7 @@ def test_multilevel_irregular_and_rotated_runtime_parity(problem):
                                rtol=1e-11, atol=1e-11)
 
 
-@pytest.mark.parametrize('problem', [irregular_grounded_graph, rotated_anisotropic_q1])
+@pytest.mark.parametrize('problem', [irregular_grounded_graph, rotated_anisotropic_p1])
 def test_frozen_structure_multilevel_parameter_gradient_matches_finite_difference(problem):
     # Freeze discrete C/S through both perturbed forwards. The derivative must
     # still include every downstream A=P^T A P, its features and its smoother.

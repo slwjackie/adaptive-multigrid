@@ -1,0 +1,158 @@
+{
+  "version": "neural-amg-study-v1",
+  "seed": 6101,
+  "torch_threads": 1,
+  "model": {
+    "hidden": 16,
+    "depth": 3,
+    "heads": 2,
+    "feature_mode": "original"
+  },
+  "hierarchy": {
+    "max_levels": 20,
+    "max_coarse": 9,
+    "max_hops": 2,
+    "pre_steps": 2,
+    "post_steps": 2
+  },
+  "teacher": {
+    "strength": 10.0,
+    "count": 8,
+    "sweeps": 8,
+    "mu": 1e-06,
+    "l1_cap": 8.0,
+    "maxiter": 200,
+    "rtol": 1e-08,
+    "bootstrap_cycles": 2
+  },
+  "supervised": {
+    "epochs": 15,
+    "learning_rate": 0.001,
+    "gradient_clip": 2.0,
+    "action_weight": 0.1
+  },
+  "finetune": {
+    "epochs": 8,
+    "learning_rate": 0.0001,
+    "gradient_clip": 2.0,
+    "cycles": 6,
+    "probes": 3
+  },
+  "solve": {
+    "rtol": 1e-08,
+    "atol": 1e-12,
+    "max_cycles": 150
+  },
+  "benchmark": {
+    "repetitions": 3,
+    "failure_penalty_seconds": 300.0,
+    "methods": [
+      "classical",
+      "teacher",
+      "learned"
+    ]
+  },
+  "data": {
+    "kind": "generated",
+    "seed": 2026111001,
+    "families": [
+      "near_isotropic",
+      "aligned_anisotropy",
+      "rotated_anisotropy",
+      "local_patch",
+      "checkerboard",
+      "channel",
+      "variable_coefficient"
+    ],
+    "splits": {
+      "train": {
+        "sizes": [
+          15,
+          31,
+          63,
+          127
+        ],
+        "per_family": 20
+      },
+      "validation": {
+        "sizes": [
+          15,
+          31,
+          63,
+          127
+        ],
+        "per_family": 10
+      },
+      "final": {
+        "sizes": [
+          15,
+          31,
+          63,
+          127
+        ],
+        "per_family": 10
+      },
+      "ood_grid": {
+        "sizes": [
+          255
+        ],
+        "per_family": 2
+      },
+      "ood_rotation": {
+        "sizes": [
+          31,
+          63
+        ],
+        "per_family": 2,
+        "families": [
+          "rotated_anisotropy",
+          "local_patch",
+          "checkerboard",
+          "channel",
+          "variable_coefficient"
+        ]
+      },
+      "ood_anisotropy": {
+        "sizes": [
+          31,
+          63
+        ],
+        "per_family": 2,
+        "families": [
+          "aligned_anisotropy",
+          "rotated_anisotropy",
+          "local_patch",
+          "checkerboard",
+          "channel",
+          "variable_coefficient"
+        ]
+      },
+      "ood_contrast": {
+        "sizes": [
+          31,
+          63
+        ],
+        "per_family": 2,
+        "families": [
+          "local_patch",
+          "checkerboard",
+          "channel",
+          "variable_coefficient"
+        ]
+      },
+      "ood_topology": {
+        "sizes": [
+          31,
+          63
+        ],
+        "per_family": 2,
+        "families": [
+          "local_patch",
+          "checkerboard",
+          "channel",
+          "variable_coefficient"
+        ]
+      }
+    }
+  }
+}

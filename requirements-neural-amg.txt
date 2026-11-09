@@ -1,0 +1,3 @@
+# Install the base project first: pip install -e '.[dev]'
+# Classical C/F selection and interpolation; neural layers use sparse PyTorch.
+pyamg==5.4.1

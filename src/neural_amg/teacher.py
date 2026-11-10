@@ -38,7 +38,7 @@ def jacobi_omega(A):
 
 
 def generate_test_vectors(A, count=8, sweeps=8, seed=0, omega=None,
-                          bootstrap_cycles=0):
+                          bootstrap_cycles=0, bootstrap_max_levels=20):
     """Seeded homogeneous-error probes, mixing relaxed and random columns.
 
     All but the first column receive ``sweeps`` weighted-Jacobi steps; the first
@@ -46,6 +46,8 @@ def generate_test_vectors(A, count=8, sweeps=8, seed=0, omega=None,
     used. Optional bootstrap cycles refine the relaxed columns with a
     provisional *classical* AMG hierarchy and the same conservative Jacobi
     smoother as the learned solver. This hierarchy never calls the teacher.
+    ``bootstrap_max_levels`` is the provisional hierarchy's depth safety cap;
+    study callers pass their configured hierarchy limit explicitly.
     Normalization is Euclidean and each column must remain nonzero.
     """
     A = _matrix(A)
@@ -53,6 +55,8 @@ def generate_test_vectors(A, count=8, sweeps=8, seed=0, omega=None,
         raise ValueError("positive integer count and nonnegative sweeps required")
     if type(bootstrap_cycles) is not int or bootstrap_cycles < 0:
         raise ValueError("bootstrap_cycles must be a nonnegative integer")
+    if type(bootstrap_max_levels) is not int or bootstrap_max_levels < 1:
+        raise ValueError("bootstrap_max_levels must be a positive integer")
     step = jacobi_omega(A) if omega is None else float(omega)
     bound = np.max(np.asarray(abs(A).sum(axis=1)).ravel() / A.diagonal())
     if not math.isfinite(step) or not 0 < step < 2 / bound:
@@ -65,7 +69,8 @@ def generate_test_vectors(A, count=8, sweeps=8, seed=0, omega=None,
         if A.shape[0] < 2:
             raise ValueError("bootstrap requires at least two unknowns")
         from .solver import build_hierarchy, _runtime_cycle
-        hierarchy = build_hierarchy(A, method="classical", max_coarse=min(9, A.shape[0] - 1))
+        hierarchy = build_hierarchy(A, method="classical", max_levels=bootstrap_max_levels,
+                                    max_coarse=min(9, A.shape[0] - 1))
         for _ in range(bootstrap_cycles):
             probes = _runtime_cycle(hierarchy, np.zeros_like(Z[:, start:]), Z[:, start:])
             probe_norm = np.linalg.norm(probes, axis=0)
@@ -332,16 +337,19 @@ def minimize(objective, strength=10.0, maxiter=200, rtol=1e-8):
 
 def fit_teacher(A, structure, strength=10.0, *, vectors=None, count=8, sweeps=8,
                 seed=0, omega=None, mu=1e-6, l1_cap=8.0, maxiter=200, rtol=1e-8,
-                weighting="uniform", energy_weight_cap=100.0, bootstrap_cycles=0):
+                weighting="uniform", energy_weight_cap=100.0, bootstrap_cycles=0,
+                bootstrap_max_levels=20):
     supplied_bank = vectors is not None
     if vectors is None:
         vectors = generate_test_vectors(A, count=count, sweeps=sweeps, seed=seed,
-                                        omega=omega, bootstrap_cycles=bootstrap_cycles)
+                                        omega=omega, bootstrap_cycles=bootstrap_cycles,
+                                        bootstrap_max_levels=bootstrap_max_levels)
     objective = FixedObjective(A, structure, vectors, mu=mu, l1_cap=l1_cap,
                                weighting=weighting, energy_weight_cap=energy_weight_cap)
     p, report = minimize(objective, strength=strength, maxiter=maxiter, rtol=rtol)
     report.update(bank_method=("provided_frozen" if supplied_bank else
                                "classical_amg_bootstrap" if bootstrap_cycles else "random_jacobi"),
                   bootstrap_cycles=None if supplied_bank else bootstrap_cycles,
+                  bootstrap_max_levels=None if supplied_bank or not bootstrap_cycles else bootstrap_max_levels,
                   vector_count=int(objective.z.shape[1]))
     return TeacherResult(p, objective.z, objective.zc, objective.w, report)

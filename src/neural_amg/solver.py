@@ -103,8 +103,10 @@ def build_hierarchy(A, model=None, method='learned', *, max_levels=10,
             p = SparseTensor.from_scipy(structure.reference)
         elif method == 'teacher':
             from .teacher import fit_teacher
+            options = dict(teacher_options or {})
+            options.setdefault('bootstrap_max_levels', max_levels)
             result = fit_teacher(a.numpy(), structure, strength=strength,
-                                 seed=seed + index, **(teacher_options or {}))
+                                 seed=seed + index, **options)
             p = SparseTensor.from_scipy(result.p)
             level.teacher_report = result.report
         else:

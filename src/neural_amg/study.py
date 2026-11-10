@@ -291,6 +291,7 @@ def _labels(config, record, run):
     hierarchy = _hierarchy(config, case.a, method='classical', seed=record['spec']['seed'] % (2**31))
     labels = []
     kwargs = dict(config['teacher']); kwargs.pop('strength')
+    kwargs.setdefault('bootstrap_max_levels', config['hierarchy'].get('max_levels', 10))
     for level_index, level in enumerate(hierarchy.levels):
         if level.p is None:
             continue
@@ -429,6 +430,8 @@ def freeze(config, run):
     atomic_torch(model_path, dict(spec=_model(config).spec, state_dict=state['best_model']))
     files = ['frozen_model.pt', 'config.json', 'identity.json', 'data_plan.json',
              'data_train.json', 'data_validation.json', 'validation.json']
+    if (run / 'bootstrap_depth_recovery.json').exists():
+        files.append('bootstrap_depth_recovery.json')
     payload = dict(version=VERSION, identity=identity(config),
         files={f:file_hash(run/f) for f in files}, best_update=state['best_update'],
         best_score=state['best_score'], selection='failures_then_mean_case_median_setup_plus_solve')

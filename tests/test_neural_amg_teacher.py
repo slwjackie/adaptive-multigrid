@@ -166,3 +166,31 @@ def test_bootstrap_vectors_use_provisional_classical_vcycles():
     provided = fit_teacher(A, build_structure(A), vectors=after, bootstrap_cycles=2)
     assert provided.report["bank_method"] == "provided_frozen"
     assert provided.report["bootstrap_cycles"] is None
+
+
+def test_deep_p1_bootstrap_reproduces_twelfth_research_case():
+    from pathlib import Path
+    from neural_amg import study
+    from neural_amg.data import materialize
+    config = study.load_config(Path(__file__).resolve().parents[1] / 'configs/neural_amg_research.json')
+    specs = study._specifications(config)['train']
+    order = np.random.default_rng(np.random.SeedSequence([config['seed'], 0, 0])).permutation(len(specs))
+    spec = specs[int(order[11])]
+    assert spec['name'] == 'train_checkerboard_n127_4'
+    A = materialize(spec).a
+    with pytest.raises(ValueError, match='max_levels reached'):
+        generate_test_vectors(A, count=3, bootstrap_cycles=2, bootstrap_max_levels=10)
+    bank = generate_test_vectors(A, count=3, bootstrap_cycles=2, bootstrap_max_levels=20)
+    assert np.isfinite(bank).all()
+    np.testing.assert_allclose(np.linalg.norm(bank, axis=0), 1)
+
+
+def test_larger_bootstrap_cap_preserves_completed_labels():
+    import pyamg
+    from neural_amg.structure import build_structure
+    A = pyamg.gallery.poisson((7, 7), format='csr')
+    structure = build_structure(A)
+    old = fit_teacher(A, structure, bootstrap_cycles=2, bootstrap_max_levels=10)
+    fixed = fit_teacher(A, structure, bootstrap_cycles=2, bootstrap_max_levels=20)
+    np.testing.assert_array_equal(old.vectors, fixed.vectors)
+    np.testing.assert_array_equal(old.p.data, fixed.p.data)

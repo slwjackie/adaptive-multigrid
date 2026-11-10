@@ -37,6 +37,9 @@ Training and deployment share bounded weighted Jacobi pre/post smoothing and a
 sparse direct terminal solve. R=Pᵀ and Ac=PᵀAP; no coarse fill is stencil-truncated.
 The NN runs during setup, not inside V-cycles. `max_coarse=9` is the normal stopping
 threshold; `max_levels` is a safety cap (20 in research), not the desired depth.
+Teacher bootstrap hierarchies inherit this same depth cap in both offline label
+generation and runtime teacher benchmarks. The low-level teacher also accepts
+`bootstrap_max_levels` (default 20); an explicit teacher override takes precedence.
 The solver assumes SPD input. P1 assembly with SPD tensors and Dirichlet elimination
 provides SPD matrices; low-level solver symmetry/diagonal checks alone are not an
 SPD certificate for arbitrary external matrices.
@@ -107,6 +110,40 @@ update saves model, optimizer, phase/epoch/offset, best checkpoint and RNG state
 Teacher caches and data have checksums. Model/configuration/source/runtime changes
 reject resume. Freeze binds the selected model, development manifests, validation
 history and the future holdout specification; frozen runs cannot be trained.
+
+## Recover the bootstrap-depth crash from e9bfa4c
+
+That revision passed `max_levels=20` to the outer research hierarchy but omitted
+the argument in the teacher's provisional classical hierarchy, leaving its cap
+at 10. The twelfth seed-6101 training case, `train_checkerboard_n127_4`, needs
+11 levels. This fix forwards the cap into both teacher construction paths.
+
+For an interrupted run created by that exact revision, stop its process, pull
+the fix, keep the same Python environment, and run:
+
+```bash
+python scripts/recover_neural_amg_bootstrap.py \
+  --run-dir artifacts/neural_amg_p1_560_seed6101_lenovo \
+  --output-dir artifacts/neural_amg_p1_560_seed6101_lenovo_bootstrap_fix
+python scripts/run_neural_amg.py train \
+  --config configs/neural_amg_research.json \
+  --run-dir artifacts/neural_amg_p1_560_seed6101_lenovo_bootstrap_fix --resume
+```
+
+Recovery copies the run to a new folder, leaving the original intact. It accepts
+only pinned source hashes for the original revision and this fix, identical
+configuration/runtime, valid development data/mesh hashes and teacher checksums,
+and a matching unfinished checkpoint. Frozen/evaluated runs are rejected. The
+copy preserves weights, optimizer/RNG state, completed update count, labels and
+validation history. Successful old labels are unchanged numerically: increasing
+the safety cap does not alter any hierarchy that already terminated within ten
+levels. `bootstrap_depth_recovery.json` records both identities and the original
+checkpoint hash, and is bound by the later freeze. Normal resume hash checks
+remain strict. Use the new folder for all subsequent train/freeze/evaluate calls.
+
+The initial `validation update=0` evaluates an untrained model. Its failure
+count is separate from this teacher crash. `mean_total_ms` includes the configured
+300-second penalty per failed validation operator, not just measured wall time.
 
 ## Mesh, data and OOD meanings
 

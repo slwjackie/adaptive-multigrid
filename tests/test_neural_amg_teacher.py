@@ -194,3 +194,73 @@ def test_larger_bootstrap_cap_preserves_completed_labels():
     fixed = fit_teacher(A, structure, bootstrap_cycles=2, bootstrap_max_levels=20)
     np.testing.assert_array_equal(old.vectors, fixed.vectors)
     np.testing.assert_array_equal(old.p.data, fixed.p.data)
+
+
+def test_infeasible_reference_uses_feasible_start_and_original_normalizers():
+    from neural_amg.structure import Structure
+    A = sp.diags([-np.ones(2), np.full(3, 2.4), -np.ones(2)], [-1, 0, 1], format='csr')
+    reference = sp.csr_matrix([[1., 0.], [4.6, -3.6], [0., 1.]])
+    s = Structure(np.array([0, 2]), reference)
+    bank = generate_test_vectors(A, seed=7)
+    o = FixedObjective(A, s, bank, l1_cap=8.)
+    free = FixedObjective(A, s, bank, l1_cap=None)
+    assert o.scales == free.scales
+    initial = o.project(reference.data)
+    np.testing.assert_allclose(initial, [1., 4.5, -3.5, 1.])
+    result = fit_teacher(A, s, vectors=bank, l1_cap=8.)
+    assert result.report['projected_initialization']
+    assert result.report['reference_maximum_row_l1'] == pytest.approx(8.2)
+    assert result.report['reference_objective'] == pytest.approx(11.)
+    assert result.report['objective_before'] == pytest.approx(o.evaluate(initial))
+    assert result.report['objective_after'] <= result.report['objective_before'] + 1e-10
+    assert result.report['maximum_row_l1'] <= 8. + 1e-10
+    np.testing.assert_array_equal(s.reference.data, reference.data)
+    np.testing.assert_array_equal(o.base.data, reference.data)
+    np.testing.assert_allclose(np.asarray(result.p.sum(1)).ravel(), s.row_targets)
+    np.testing.assert_allclose(result.p[s.coarse].toarray(), np.eye(2))
+    assert result.report['initial_digest'] != result.report['reference_digest']
+
+
+def test_infeasible_row_sum_still_rejected():
+    from neural_amg.structure import Structure
+    A = sp.eye(3, format='csr')
+    s = Structure(np.array([0, 2]), sp.csr_matrix([[1., 0.], [9.25, -.25], [0., 1.]]))
+    with pytest.raises(ValueError, match='row sums make l1_cap infeasible'):
+        fit_teacher(A, s, l1_cap=8.)
+
+
+def test_constrained_teacher_may_exceed_infeasible_reference_objective():
+    from neural_amg.structure import Structure
+    A = sp.eye(3, format='csr')
+    s = Structure(np.array([0, 2]), sp.csr_matrix([[1., 0.], [4.6, -3.6], [0., 1.]]))
+    # P0 fits this probe exactly, but cap8 forces P[1,0] <= 4.5. The constrained
+    # optimum cannot match the infeasible reference's tiny fitting objective.
+    bank = np.array([1., 4.6, 0.])[:, None]
+    result = fit_teacher(A, s, vectors=bank, strength=0., mu=1e-6, l1_cap=8.)
+    report = result.report
+    assert report['projected_initialization']
+    assert report['objective_after'] > report['reference_objective']
+    assert report['objective_after'] <= report['objective_before'] + 1e-9
+    assert report['maximum_row_l1'] <= 8. + 1e-9
+
+
+def test_case62_teacher_labels_and_backward(tmp_path):
+    from pathlib import Path
+    import torch
+    from neural_amg import study
+    config = study.load_config(Path(__file__).resolve().parents[1] / 'configs/neural_amg_research.json')
+    specs = study._specifications(config)['train']
+    order = np.random.default_rng(np.random.SeedSequence([config['seed'], 0, 0])).permutation(len(specs))
+    spec = specs[int(order[61])]
+    assert spec['name'] == 'train_local_patch_n63_7'
+    records = study._prepare_split(tmp_path, 'train', [spec], set())
+    labels = study._labels(config, records[0], tmp_path)
+    report = labels[0]['report']
+    assert report['reference_maximum_row_l1'] == pytest.approx(8.0862399379, rel=1e-7)
+    assert report['projected_initialization']
+    assert all(label['report']['maximum_row_l1'] <= 8. + 1e-9 for label in labels)
+    model = study._model(config)
+    loss = study.supervised_loss(model, labels, config['supervised']['action_weight'])
+    loss.backward()
+    assert torch.isfinite(loss)
+    assert all(p.grad is None or torch.isfinite(p.grad).all() for p in model.parameters())

@@ -160,8 +160,9 @@ class FixedObjective:
         if self.l1_cap <= 0 or math.isnan(self.l1_cap):
             raise ValueError("invalid l1_cap")
         reference_l1 = np.asarray(abs(self.base).sum(axis=1)).ravel()
-        if np.max(reference_l1) > self.l1_cap + 1e-12:
-            raise ValueError("reference violates l1_cap; choose a feasible cap")
+        self.reference_maximum_row_l1 = float(np.max(reference_l1))
+        if np.max(np.abs(self.targets)) > self.l1_cap + 1e-12:
+            raise ValueError("reference row sums make l1_cap infeasible; choose a feasible cap")
         self.z = np.array(vectors, dtype=np.float64, copy=True)
         if self.z.ndim != 2 or self.z.shape[0] != n or self.z.shape[1] == 0:
             raise ValueError("vectors must have shape (N, positive count)")
@@ -278,7 +279,14 @@ def minimize(objective, strength=10.0, maxiter=200, rtol=1e-8):
         raise ValueError("invalid teacher optimizer controls")
     o = objective
     b, e = o.coefficients(strength)
-    base = o.base.data.copy()
+    # The classical reference defines the fixed normalizers and row targets,
+    # but signed classical weights can lie outside the feasible L1 ball.
+    # Change only the optimizer's starting point in that case; already feasible
+    # references follow exactly the original arithmetic and optimization path.
+    reference = o.base.data
+    projected_initialization = o.reference_maximum_row_l1 > o.l1_cap + 1e-12
+    base = o.project(reference) if projected_initialization else reference.copy()
+    o.validate(base)
     before = o.evaluate(base, strength)
     values = base.copy()
     iterations, pg_iterations, info = 0, 0, 0
@@ -324,13 +332,16 @@ def minimize(objective, strength=10.0, maxiter=200, rtol=1e-8):
     constraints = o.validate(values)
     after = o.evaluate(values, strength)
     if not math.isfinite(after) or after > before + 1e-9 * max(1.0, abs(before)):
-        raise FloatingPointError("teacher optimization increased reference objective")
+        raise FloatingPointError("teacher optimization increased feasible initial objective")
     report = dict(solver=solver, strength=float(strength), optimizer_converged=bool(converged),
                   cg_info=int(info), cg_iterations=iterations, projected_gradient_iterations=pg_iterations,
                   maxiter_per_solver=maxiter, rtol=rtol, objective_before=before,
                   objective_after=after, terms=o.raw_terms(values), s_B=o.scales.bamg,
                   s_E=o.scales.energy, normalizers_fixed=True, reference_policy="classical_amg",
-                  reference_digest=_digest(base), vectors_digest=_digest(o.z),
+                  reference_digest=_digest(reference), initial_digest=_digest(base),
+                  projected_initialization=projected_initialization,
+                  reference_maximum_row_l1=o.reference_maximum_row_l1,
+                  reference_objective=o.evaluate(reference, strength), vectors_digest=_digest(o.z),
                   vector_weights_digest=_digest(o.w), **constraints)
     return o.matrix(values), report
 

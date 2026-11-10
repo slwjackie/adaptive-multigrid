@@ -21,7 +21,7 @@
     "neural_amg/provenance.py": "3a2aa9504351961861288ea82d7b0bc18dc8acde6be21a72ba380283d0bc27df",
     "neural_amg/solver.py": "aa19558fe904ee42bb7bf6fffaf115e9f66af0c3808d9ce3b9b40d53d37b3328",
     "neural_amg/structure.py": "9989f54607cd95441fde8e623ae881f81a44ea8f67646f1530f27915e248fce7",
-    "neural_amg/study.py": "c41e68f4d40b5219bf6e40142f6c743421878291d64821c79a78cc7f4d55da2d",
-    "neural_amg/teacher.py": "e422082baab26f8c19efc63552827b9ee3f2fe9b21e9a0437420886a58dc8b61"
+    "neural_amg/study.py": "3d029702651bda2c748deab9e443af8c3c22ae32f3b7ce45a28fc49ba3492dc8",
+    "neural_amg/teacher.py": "6be3541c4dd73ef207f817fb1f4e815e2d23df1d05cd5c7f4bb0b7289401949f"
   }
 }

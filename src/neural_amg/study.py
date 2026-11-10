@@ -432,6 +432,8 @@ def freeze(config, run):
              'data_train.json', 'data_validation.json', 'validation.json']
     if (run / 'bootstrap_depth_recovery.json').exists():
         files.append('bootstrap_depth_recovery.json')
+    if (run / 'teacher_l1_recovery.json').exists():
+        files.append('teacher_l1_recovery.json')
     payload = dict(version=VERSION, identity=identity(config),
         files={f:file_hash(run/f) for f in files}, best_update=state['best_update'],
         best_score=state['best_score'], selection='failures_then_mean_case_median_setup_plus_solve')

@@ -19,22 +19,49 @@ from neural_amg import study
 
 
 def recover(run, output):
+    return _recover(run, output, repair='bootstrap_depth_limit')
+
+
+def recover_teacher_l1(run, output):
+    return _recover(run, output, repair='teacher_reference_l1')
+
+
+def _recover(run, output, *, repair):
+    policies = {
+        'bootstrap_depth_limit': ('bootstrap_depth_recovery_sources.json', 'bootstrap_depth_recovery.json'),
+        'teacher_reference_l1': ('teacher_l1_recovery_sources.json', 'teacher_l1_recovery.json'),
+    }
+    pins_name, report_name = policies[repair]
     run, output = Path(run).resolve(), Path(output).resolve()
     if output == run or run in output.parents or output in run.parents:
         raise ValueError('Recovery output must be separate from the original run')
     if output.exists():
         raise FileExistsError('Recovery output already exists; resume that run or choose a new path')
-    pins = study.read_json(Path(__file__).with_name('bootstrap_depth_recovery_sources.json'))
+    pins = study.read_json(Path(__file__).with_name(pins_name))
     config = study.load_config(run / 'config.json')
     previous = study.read_json(run / 'identity.json')
     current = study.identity(config)
     if previous.get('source') != pins['before'] or current['source'] != pins['after']:
-        raise ValueError('Recovery supports only the pinned e9bfa4c -> bootstrap-depth fix sources')
+        raise ValueError('Recovery supports only the pinned source transition for ' + repair)
     if previous.get('config') != current['config'] or previous.get('runtime') != current['runtime']:
         raise ValueError('Configuration or runtime changed; recovery rejected')
     cap = config['teacher'].get('bootstrap_max_levels', config['hierarchy'].get('max_levels', 10))
-    if type(cap) is not int or cap < 10:
+    if repair == 'bootstrap_depth_limit' and (type(cap) is not int or cap < 10):
         raise ValueError('Recovery must not reduce the old bootstrap depth cap of ten')
+    if (run / report_name).exists():
+        raise ValueError('This recovery has already been applied')
+    prior_audits = {}
+    if repair == 'teacher_reference_l1' and (run / 'bootstrap_depth_recovery.json').exists():
+        prior_path = run / 'bootstrap_depth_recovery.json'
+        prior = study.read_json(prior_path)
+        bootstrap_pins = study.read_json(Path(__file__).with_name('bootstrap_depth_recovery_sources.json'))
+        if (prior.get('repair') != 'bootstrap_depth_limit' or prior.get('new_identity') != previous
+                or prior.get('original_commit') != bootstrap_pins['commit']
+                or prior.get('previous_identity', {}).get('source') != bootstrap_pins['before']
+                or prior.get('previous_identity', {}).get('config') != previous['config']
+                or prior.get('previous_identity', {}).get('runtime') != previous['runtime']):
+            raise ValueError('Previous bootstrap recovery provenance differs from this run')
+        prior_audits[prior_path.name] = study.file_hash(prior_path)
     if (run / 'freeze.json').exists() or (run / 'frozen_model.pt').exists() or (run / 'evaluation.json').exists():
         raise ValueError('Frozen/evaluated runs cannot be recovered as interrupted training')
     plan = study.read_json(run / 'data_plan.json')
@@ -90,17 +117,26 @@ def recover(run, output):
         state['identity'] = current
         study.atomic_torch(staging / 'training.pt', state)
         study.atomic_json(staging / 'identity.json', current)
-        report = dict(repair='bootstrap_depth_limit', original_commit=pins['commit'],
+        report = dict(repair=repair, original_commit=pins['commit'],
                       original_run=str(run), original_checkpoint_sha256=checkpoint_hash,
                       previous_identity=previous, new_identity=current,
                       preserved_updates=state['updates'], preserved_teacher_caches=labels,
-                      old_bootstrap_max_levels=10, new_bootstrap_max_levels=cap)
-        study.atomic_json(staging / 'bootstrap_depth_recovery.json', report)
+                      preserved_recovery_provenance=prior_audits)
+        if repair == 'bootstrap_depth_limit':
+            report.update(old_bootstrap_max_levels=10, new_bootstrap_max_levels=cap)
+        else:
+            report.update(l1_cap=config['teacher'].get('l1_cap', 8.0),
+                          reference_policy='classical_amg',
+                          initialization_policy='project_infeasible_reference_only')
+        study.atomic_json(staging / report_name, report)
         # Exercise the normal resume checks on the copied data before publishing.
         study.prepare(config, staging, resume=True)
         for name, expected in labels.items():
             if study.file_hash(staging / 'labels' / name) != expected:
                 raise ValueError('Teacher cache changed during recovery')
+        for name, expected in prior_audits.items():
+            if study.file_hash(staging / name) != expected:
+                raise ValueError('Previous recovery provenance changed during copying')
         if output.exists():
             raise FileExistsError('Recovery output appeared during copying')
         staging.rename(output)

@@ -29,8 +29,14 @@ The numerical BAMG+EM teacher fits relaxed/bootstrap test vectors plus a ridge
 term and normalized trace(PᵀAP) energy on fixed C/S. Normalizers and constraints
 come from the algebraic reference P. Finite-iteration labels carry optimizer
 reports; they are not asserted to be exact minimizers. Supervision combines
-normalized weight and probe-action MSE on classical hierarchy levels. Fine-tuning
-builds the actual learned hierarchy and differentiates multicycle residual loss
+normalized weight and probe-action MSE on classical hierarchy levels. If the
+signed classical reference exceeds the row-L1 cap, teacher optimization starts
+from its feasible projection on the same support and row sums. Reference
+normalizers and model input features still use the original classical P. The
+objective decrease is measured from the feasible starting point; reports also
+record the original reference objective and whether initialization was projected.
+An absolute row-sum target above the cap is genuinely infeasible and is rejected.
+Fine-tuning builds the actual learned hierarchy and differentiates multicycle residual loss
 through all Galerkin levels, freezing the discrete C/S decisions per forward pass.
 
 Training and deployment share bounded weighted Jacobi pre/post smoothing and a
@@ -144,6 +150,36 @@ remain strict. Use the new folder for all subsequent train/freeze/evaluate calls
 The initial `validation update=0` evaluates an untrained model. Its failure
 count is separate from this teacher crash. `mean_total_ms` includes the configured
 300-second penalty per failed validation operator, not just measured wall time.
+
+## Recover the teacher reference L1 crash from 66e9f6d
+
+The seed-6101 62nd training case, `train_local_patch_n63_7`, has a classical
+reference row `[4.54311997, -3.54311997]`: its sum is one but its L1 norm is
+8.08624, above the configured cap of eight. The original teacher rejected that
+reference even though the feasible set is nonempty. The corrected teacher uses
+`[4.5, -3.5]` as that row's initial values, keeping the cap, support, injection,
+row sums and original reference normalizers. Already feasible references follow
+the same numerical path, so completed labels and updates remain reusable.
+
+After pulling the fix with the interrupted training process stopped, keep the
+same Python environment and run:
+
+```bash
+python scripts/recover_neural_amg_teacher_l1.py \
+  --run-dir artifacts/neural_amg_p1_560_seed6101_lenovo_bootstrap_fix \
+  --output-dir artifacts/neural_amg_p1_560_seed6101_lenovo_teacher_l1_fix
+python scripts/run_neural_amg.py train \
+  --config configs/neural_amg_research.json \
+  --run-dir artifacts/neural_amg_p1_560_seed6101_lenovo_teacher_l1_fix --resume
+```
+
+This recovery checks pinned source identities and the same data/checkpoint/cache
+integrity conditions as bootstrap recovery. It preserves the original run and
+all completed updates in a separate output folder, also preserving and checking
+the previous bootstrap recovery audit when present. The new
+`teacher_l1_recovery.json` and prior audit are both bound by freeze. Use the new
+folder for subsequent resume, freeze and evaluation. Do not manually increase
+the teacher cap or disable source checks to reuse an old run.
 
 ## Mesh, data and OOD meanings
 

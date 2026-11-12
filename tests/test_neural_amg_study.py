@@ -133,3 +133,55 @@ def test_failed_nonfinite_benchmark_is_json_safe(tmp_path, config, monkeypatch):
     assert not rows[0]['converged']
     assert rows[0]['repetitions'][0]['residuals'] == [1.0, None, None]
     json.dumps(rows, allow_nan=False)
+
+
+def test_finetune_retains_penalty_on_rejected_predictions(tmp_path, config, monkeypatch):
+    from neural_amg.model import constrain_weights
+    from neural_amg.autograd_sparse import SparseTensor
+
+    config['supervised']['epochs'] = 0
+    model = study._model(config)
+    parameter = model.edge_head[-1].bias
+    with torch.no_grad():
+        parameter.fill_(100.)
+
+    def signed_prediction(a, structure):
+        raw = parameter[0] * torch.arange(len(structure.rows), dtype=torch.float64)
+        return SparseTensor.from_coo(structure.rows, structure.cols,
+                                     constrain_weights(raw, structure), structure.shape)
+
+    monkeypatch.setattr(model, 'forward', signed_prediction)
+    monkeypatch.setattr(study, '_model', lambda cfg: model)
+    build = study.build_hierarchy
+
+    def hierarchy_with_prediction(cfg, a, **kwargs):
+        hierarchy = build(a, method='classical')
+        first = hierarchy.levels[0]
+        first.p = model(first.a, first.structure)
+        return hierarchy
+
+    def direct_fallback(hierarchy, probes, **kwargs):
+        hierarchy.levels[0].p = None
+        del hierarchy.levels[1:]
+        return torch.tensor(-20., dtype=torch.float64)
+
+    monkeypatch.setattr(study, '_hierarchy', hierarchy_with_prediction)
+    monkeypatch.setattr(study, 'multicycle_loss', direct_fallback)
+    monkeypatch.setattr(study, 'benchmark', lambda *a, **kw: [
+        {'converged': True, 'median_total_seconds': 1.}])
+    state = study.train(config, tmp_path / 'run')
+    assert state['complete']
+    assert float(parameter.detach()[0]) < 100.
+    assert state.get('direct_only_cases', 0) == 0
+
+
+def test_direct_only_case_does_not_step_optimizer(tmp_path, config, monkeypatch):
+    config['supervised']['epochs'] = 0
+    config['hierarchy']['max_coarse'] = 1000
+    monkeypatch.setattr(study, 'benchmark', lambda *a, **kw: [
+        {'converged': True, 'median_total_seconds': 1.}])
+    def unexpected_step(*args, **kwargs):
+        raise AssertionError('A parameter-independent direct case must not step Adam')
+    monkeypatch.setattr(torch.optim.Adam, 'step', unexpected_step)
+    state = study.train(config, tmp_path / 'run')
+    assert state['complete'] and state['direct_only_cases'] == 1

@@ -27,6 +27,9 @@ def recover_teacher_l1(run, output):
 
 
 def _recover(run, output, *, repair):
+    if study.VERSION != 'neural-amg-p1-study-v2':
+        raise ValueError('This historical recovery requires revision d5257e2. '
+                         'For d5257e2 weights use scripts/start_neural_amg_cancellation.py.')
     policies = {
         'bootstrap_depth_limit': ('bootstrap_depth_recovery_sources.json', 'bootstrap_depth_recovery.json'),
         'teacher_reference_l1': ('teacher_l1_recovery_sources.json', 'teacher_l1_recovery.json'),

@@ -24,13 +24,13 @@ from threadpoolctl import threadpool_limits
 
 from neural_amg.provenance import operator_digest
 from neural_amg.autograd_sparse import SparseTensor
-from .model import GraphAttentionTransfer
+from .model import GraphAttentionTransfer, cancellation_penalty
 from .solver import build_hierarchy, solve, multicycle_loss
 from .teacher import fit_teacher
 from .fem import DISCRETIZATION, TriangleMesh
 from .data import FAMILIES, validate_data_config, specification, materialize
 
-VERSION = 'neural-amg-p1-study-v2'
+VERSION = 'neural-amg-p1-study-v3'
 SPLITS = ('train', 'validation', 'final', 'ood_grid', 'ood_rotation',
           'ood_anisotropy', 'ood_contrast', 'ood_topology', 'ood_mesh')
 
@@ -90,8 +90,13 @@ def validate_config(config):
             raise ValueError('Epoch count must be nonnegative')
     if sum(config[p]['epochs'] for p in ('supervised', 'finetune')) == 0:
         raise ValueError('At least one training epoch is required')
-    if config['model'].get('l1_cap', 8.) != config['teacher'].get('l1_cap', 8.):
-        raise ValueError('Model and teacher row L1 caps must agree')
+    for component in ('model', 'teacher'):
+        if config[component].get('l1_cap') is not None:
+            raise ValueError('Hard L1 caps were removed; use the cancellation warm-start command')
+    for component in ('teacher', 'supervised', 'finetune'):
+        value = config[component].get('cancellation_weight', .1)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not np.isfinite(value) or value < 0:
+            raise ValueError('cancellation_weight must be finite and nonnegative')
     if config['benchmark']['repetitions'] < 1:
         raise ValueError('At least one timing repetition is required')
     methods = config['benchmark'].get('methods', ['classical', 'teacher', 'learned'])
@@ -214,6 +219,7 @@ def prepare(config, run, *, resume=False):
         atomic_json(run / 'config.json', config)
         atomic_json(run / 'identity.json', ident)
         atomic_json(run / 'data_plan.json', _specifications(config))
+    _verify_initialization(run)
     plan = read_json(run / 'data_plan.json')
     if digest(plan) != digest(_specifications(config)):
         raise ValueError('Data plan changed')
@@ -262,7 +268,13 @@ def benchmark(config, records, run, model, methods=('learned',)):
                         converged = bool(result['converged'] and warm['converged'] and finite)
                         timings.append(dict(converged=converged, setup_seconds=setup,
                             total_seconds=total, warm_seconds=warm_seconds,
-                            cycles=int(result['cycles']), residuals=[float(x) if np.isfinite(x) else None for x in result['residuals']]))
+                            cycles=int(result['cycles']), residuals=[float(x) if np.isfinite(x) else None for x in result['residuals']],
+                            guard_events=result.get('guard_events', []),
+                            warm_guard_events=warm.get('guard_events', []),
+                            level_sizes=result.get('level_sizes'),
+                            terminal_size=result.get('terminal_size'),
+                            operator_complexity=result.get('operator_complexity'),
+                            warm_terminal_size=warm.get('terminal_size')))
                     except (ValueError, RuntimeError, FloatingPointError, np.linalg.LinAlgError) as error:
                         timings.append(dict(converged=False, error=str(error),
                             total_seconds=time.perf_counter()-start))
@@ -292,6 +304,7 @@ def _labels(config, record, run):
     labels = []
     kwargs = dict(config['teacher']); kwargs.pop('strength')
     kwargs.setdefault('bootstrap_max_levels', config['hierarchy'].get('max_levels', 10))
+    kwargs.setdefault('bootstrap_first_cycle_max_growth', config['hierarchy'].get('first_cycle_max_growth', 10.))
     for level_index, level in enumerate(hierarchy.levels):
         if level.p is None:
             continue
@@ -307,7 +320,7 @@ def _labels(config, record, run):
     return labels
 
 
-def supervised_loss(model, labels, action_weight=.1):
+def supervised_loss(model, labels, action_weight=.1, cancellation_weight=.1):
     losses = []
     for sample in labels:
         p = model(SparseTensor.from_scipy(sample['a']), sample['structure'])
@@ -317,7 +330,8 @@ def supervised_loss(model, labels, action_weight=.1):
         coarse = torch.tensor(sample['coarse_vectors'], dtype=torch.float64)
         action = p.apply(coarse) - torch.as_tensor(sample['target'] @ sample['coarse_vectors'], dtype=torch.float64)
         scale = torch.tensor(sample['vectors'], dtype=torch.float64).square().mean().clamp_min(1e-12)
-        losses.append(weight + action_weight * action.square().mean() / scale)
+        losses.append(weight + action_weight * action.square().mean() / scale
+                      + cancellation_weight * cancellation_penalty(p, sample['structure']))
     return torch.stack(losses).mean()
 
 
@@ -332,6 +346,27 @@ def _state(model):
 def _check_run(config, run):
     if read_json(Path(run) / 'identity.json') != identity(config):
         raise ValueError('Config, source, P1 data or runtime changed')
+
+
+def _verify_initialization(run, state=None):
+    """Bind copied source-run evidence to its new experiment checkpoint."""
+    run = Path(run)
+    path = run / 'cancellation_start.json'
+    if state is None and (run / 'training.pt').exists():
+        state = torch.load(run / 'training.pt', map_location='cpu', weights_only=False)
+    expected = (state or {}).get('cancellation_start_digest')
+    if not path.exists():
+        if expected is not None:
+            raise ValueError('Cancellation initialization audit is missing')
+        return
+    report = read_json(path)
+    if expected != digest(report):
+        raise ValueError('Cancellation initialization audit changed')
+    for name, checksum in report['archived_files'].items():
+        if not (run / name).resolve().is_relative_to(run.resolve()):
+            raise ValueError('Initialization archive path escapes run directory')
+        if file_hash(run / name) != checksum:
+            raise ValueError('Initialization archive changed: ' + name)
 
 
 def train(config, run, *, resume=False, max_updates=None):
@@ -385,23 +420,40 @@ def train(config, run, *, resume=False, max_updates=None):
                     record = data['train'][int(order[offset])]
                     model.train(); optimizer.zero_grad(set_to_none=True)
                     if phase == 'supervised':
-                        loss = supervised_loss(model, _labels(config, record, run), pcfg.get('action_weight', .1))
+                        loss = supervised_loss(model, _labels(config, record, run),
+                                               pcfg.get('action_weight', .1),
+                                               pcfg.get('cancellation_weight', .1))
                     else:
                         case = _load_case(run, record)
                         hierarchy = _hierarchy(config, case.a, model=model, seed=record['spec']['seed'] % (2**31))
                         rng = np.random.default_rng(np.random.SeedSequence([seed, phase_index, epoch, offset]))
                         probes = torch.tensor(rng.normal(size=(case.a.shape[0], pcfg.get('probes', 3))), dtype=torch.float64)
-                        loss = multicycle_loss(hierarchy, probes, cycles=pcfg.get('cycles', 3))
+                        # Keep a penalty on rejected predictions too: the first
+                        # V-cycle may truncate the hierarchy after a guard fires.
+                        penalties = [cancellation_penalty(level.p, level.structure)
+                                     for level in hierarchy.levels if level.p is not None]
+                        cancellation = torch.stack(penalties).mean() if penalties else probes.new_zeros(())
+                        mg_loss = multicycle_loss(hierarchy, probes, cycles=pcfg.get('cycles', 3))
+                        loss = mg_loss + pcfg.get('cancellation_weight', .1) * cancellation
+                        for event in hierarchy.guard_events:
+                            print('hierarchy_guard ' + json.dumps(dict(case=case.name, **event)), flush=True)
                     if not torch.isfinite(loss):
                         raise FloatingPointError('Nonfinite training loss')
-                    loss.backward()
-                    grad = torch.nn.utils.clip_grad_norm_(model.parameters(), pcfg.get('gradient_clip', 2.))
-                    if not torch.isfinite(grad):
-                        raise FloatingPointError('Nonfinite training gradient')
-                    optimizer.step()
+                    optimized = loss.requires_grad
+                    if optimized:
+                        loss.backward()
+                        grad = torch.nn.utils.clip_grad_norm_(model.parameters(), pcfg.get('gradient_clip', 2.))
+                        if not torch.isfinite(grad):
+                            raise FloatingPointError('Nonfinite training gradient')
+                        optimizer.step()
+                    else:
+                        state['direct_only_cases'] = state.get('direct_only_cases', 0) + 1
                     state.update(epoch=epoch, offset=offset+1, updates=state['updates']+1)
                     done_here += 1; save()
-                    print(f"{phase} epoch={epoch+1}/{pcfg['epochs']} case={offset+1}/{len(order)} loss={float(loss.detach()):.6g}", flush=True)
+                    detail = ''
+                    if phase == 'finetune':
+                        detail = f' mg={float(mg_loss.detach()):.6g} cancellation={float(cancellation.detach()):.6g} optimized={int(optimized)}'
+                    print(f"{phase} epoch={epoch+1}/{pcfg['epochs']} case={offset+1}/{len(order)} loss={float(loss.detach()):.6g}{detail}", flush=True)
                     if max_updates is not None and done_here >= max_updates:
                         return state
                 validate()
@@ -421,6 +473,7 @@ def freeze(config, run):
     if path.exists():
         return verify_freeze(config, run)
     state = torch.load(run / 'training.pt', map_location='cpu', weights_only=False)
+    _verify_initialization(run, state)
     data = {s: read_json(run/f'data_{s}.json')['records'] for s in ('train','validation')}
     if state.get('identity') != identity(config) or state.get('development_digest') != digest(data):
         raise ValueError('Training checkpoint identity differs from this run')
@@ -434,6 +487,9 @@ def freeze(config, run):
         files.append('bootstrap_depth_recovery.json')
     if (run / 'teacher_l1_recovery.json').exists():
         files.append('teacher_l1_recovery.json')
+    if (run / 'cancellation_start.json').exists():
+        files.append('cancellation_start.json')
+        files.extend(read_json(run / 'cancellation_start.json')['archived_files'])
     payload = dict(version=VERSION, identity=identity(config),
         files={f:file_hash(run/f) for f in files}, best_update=state['best_update'],
         best_score=state['best_score'], selection='failures_then_mean_case_median_setup_plus_solve')

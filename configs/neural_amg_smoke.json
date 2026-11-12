@@ -1,5 +1,5 @@
 {
-  "version": "neural-amg-p1-study-v2",
+  "version": "neural-amg-p1-study-v3",
   "seed": 6101,
   "torch_threads": 1,
   "model": {
@@ -13,30 +13,33 @@
     "max_coarse": 9,
     "max_hops": 2,
     "pre_steps": 2,
-    "post_steps": 2
+    "post_steps": 2,
+    "first_cycle_max_growth": 10.0
   },
   "teacher": {
     "strength": 10.0,
     "count": 4,
     "sweeps": 4,
     "mu": 1e-06,
-    "l1_cap": 8.0,
     "maxiter": 50,
     "rtol": 1e-08,
-    "bootstrap_cycles": 1
+    "bootstrap_cycles": 1,
+    "cancellation_weight": 0.1
   },
   "supervised": {
     "epochs": 1,
     "learning_rate": 0.001,
     "gradient_clip": 2.0,
-    "action_weight": 0.1
+    "action_weight": 0.1,
+    "cancellation_weight": 0.1
   },
   "finetune": {
     "epochs": 1,
     "learning_rate": 0.0001,
     "gradient_clip": 2.0,
     "cycles": 2,
-    "probes": 2
+    "probes": 2,
+    "cancellation_weight": 0.1
   },
   "solve": {
     "rtol": 1e-08,

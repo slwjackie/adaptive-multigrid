@@ -1,7 +1,7 @@
 # Neural AMG: unstructured P1 study
 
 This branch provides one discretization: **continuous P1 FEM on unstructured
-triangular meshes**. Its protocol is `neural-amg-p1-study-v2`. Q1, fixed-diagonal
+triangular meshes**. Its protocol is `neural-amg-p1-study-v3`. Q1, fixed-diagonal
 structured triangles, old geometric/CNN runners and arbitrary preassembled A/b
 study inputs have been removed from this branch. Earlier work remains in Git
 history and on `residual-u-net-teacher`.
@@ -21,34 +21,91 @@ interpolation support S from that level's actual A. S is checked to reach at mos
 two hops in the same A graph. Three one-hop graph attention layers encode A;
 sparse fine-query/coarse-key-value attention then operates over S. A signed edge
 head predicts P weights; softmax attention weights are not used directly as P.
-Coarse injection, reference interpolation row sums and a signed L1 cap are enforced.
+Coarse injection and reference interpolation row sums are enforced. Hard row-L1
+caps have been removed from both the network and numerical teacher.
 The encoder has a three-hop receptive field; encoded coarse candidates can extend
 the complete prediction's receptive field beyond three hops around a fine node.
 
-The numerical BAMG+EM teacher fits relaxed/bootstrap test vectors plus a ridge
-term and normalized trace(PᵀAP) energy on fixed C/S. Normalizers and constraints
-come from the algebraic reference P. Finite-iteration labels carry optimizer
-reports; they are not asserted to be exact minimizers. Supervision combines
-normalized weight and probe-action MSE on classical hierarchy levels. If the
-signed classical reference exceeds the row-L1 cap, teacher optimization starts
-from its feasible projection on the same support and row sums. Reference
-normalizers and model input features still use the original classical P. The
-objective decrease is measured from the feasible starting point; reports also
-record the original reference objective and whether initialization was projected.
-An absolute row-sum target above the cap is genuinely infeasible and is rejected.
-Fine-tuning builds the actual learned hierarchy and differentiates multicycle residual loss
-through all Galerkin levels, freezing the discrete C/S decisions per forward pass.
+The numerical BAMG+EM teacher fits relaxed/bootstrap test vectors, a small ridge
+term and normalized trace(PᵀAP) energy on fixed C/S. The original classical P
+provides fixed normalization constants and row-sum targets. Let F be the fine
+rows, excluding coarse injection rows, and let sᵢ be the fixed reference row sum.
+The soft cancellation penalty at a level is
+
+```text
+C(P) = mean over i in F of [ (sum_j |P_ij| - |s_i|) / (1 + |s_i|) ]²
+```
+
+Teacher optimization, NN supervision and MG fine-tuning each use a configurable
+`cancellation_weight`, with **η=0.1** in both supplied configurations. This is an
+initial experimental choice, not a validated optimum or a stability guarantee.
+For `[100,-99]`, the normalized squared penalty is 9801 and its weighted
+contribution is 980.1 before averaging across rows. For `[11.175]`, it is zero.
+The penalty permits necessary signed weights while discouraging cancellation.
+For a single permitted connection, the preserved row sum still fixes its weight.
+
+The teacher first solves the quadratic part with CG and then, when mixed signs
+require it, uses ADMM with an exact cancellation proximal update and sparse CG
+subproblems. Iteration budgets are finite. Reports contain optimizer convergence,
+CG/ADMM iterations, primal/dual residuals and cancellation before/after; a returned
+label must not be described as an exact optimum merely because it is feasible.
+The old `l1_cap=8` setting is rejected by v3; `None` has no cap semantics.
+
+Supervision combines normalized weight MSE, `0.1 ×` normalized probe-action MSE
+and `η C(P)`, averaged over classical hierarchy levels. Fine-tuning builds the
+actual learned hierarchy and optimizes multicycle log residual reduction plus
+`η C(P)`, averaged over predicted nonterminal levels. C/S and reference row sums
+are frozen for each forward/backward pass. Predicted levels that are subsequently
+rejected by a first-cycle guard still contribute their cancellation penalty.
+The fine-tuning log prints `loss`, `mg`, `cancellation` and `optimized`; if a case has
+no differentiable prediction after setup truncation, it is recorded as a direct
+case without an optimizer step. The `updates` counter records processed cases.
 
 Training and deployment share bounded weighted Jacobi pre/post smoothing and a
-sparse direct terminal solve. R=Pᵀ and Ac=PᵀAP; no coarse fill is stencil-truncated.
-The NN runs during setup, not inside V-cycles. `max_coarse=9` is the normal stopping
-threshold; `max_levels` is a safety cap (20 in research), not the desired depth.
-Teacher bootstrap hierarchies inherit this same depth cap in both offline label
-generation and runtime teacher benchmarks. The low-level teacher also accepts
-`bootstrap_max_levels` (default 20); an explicit teacher override takes precedence.
-The solver assumes SPD input. P1 assembly with SPD tensors and Dirichlet elimination
-provides SPD matrices; low-level solver symmetry/diagonal checks alone are not an
-SPD certificate for arbitrary external matrices.
+sparse direct terminal solve. R=Pᵀ and Ac=PᵀAP; coarse fill is retained. NN inference
+runs during setup. `max_coarse=9` is the normal stopping threshold and
+`max_levels` is an explicit safety limit (20 in research). Teacher bootstrap
+hierarchies inherit this depth limit during both label generation and runtime
+benchmarks; an explicit `teacher.bootstrap_max_levels` override takes precedence.
+If bootstrap stops coarsening at the finest level, a homogeneous direct solve
+would erase every test vector. The teacher retains the preceding relaxed vector
+bank instead and records incomplete bootstrap cycles and the guard reason. It
+does not create replacement diagnostic probes.
+
+### Numerical checks and direct fallback
+
+Every method (classical, teacher and learned) uses the same numerical guards.
+During setup, P is checked for finite values, shape, injection and preserved row
+sums. Generated coarse matrices are checked for finite entries, symmetry and
+positive diagonal; the terminal LU factor is inspected. These inexpensive checks
+assume SPD input and do not constitute a full SPD certificate. P1 assembly with
+SPD tensors and Dirichlet elimination supplies the study's SPD matrices.
+
+If a proposed interpolation/coarse matrix fails a numerical check, coarsening
+stops at the current valid level and its A is factored directly. If terminal LU
+fails, the solver returns to an earlier valid level. A failure of the finest
+matrix's direct solve is reported as a failure rather than silently accepted.
+
+At each visited level, the **first actual V-cycle** compares its incoming and
+outgoing residuals. The configurable `hierarchy.first_cycle_max_growth=10.0`
+allows a modest transient increase and triggers direct fallback for more than
+tenfold residual growth (with rounding tolerance), nonfinite values or numerical
+cycle failure. Ten is a heuristic safety threshold. No extra diagnostic vectors
+or V-cycles are run. Training's existing random probes remain the input to its
+MG loss. Each runtime solve, including a warm solve, performs its first-cycle
+checks on the actual RHS. Truncation persists in the reused hierarchy.
+
+On a failure, the bad cycle result is discarded, the offending level becomes a
+terminal level, and the actual correction equation at that level is solved by
+sparse LU. This preserves preceding learned interpolation. It is not a switch to
+a separately constructed classical hierarchy. A large direct level can cost
+substantial time and memory. Setup factorization is charged to setup, while
+first-cycle fallback factorization is charged to solve time. `guard_events` and
+`warm_guard_events` record stages, levels, sizes, reasons and residuals where
+available. Benchmark repetitions also record the resulting `level_sizes`,
+`terminal_size`, `warm_terminal_size` and `operator_complexity`, so direct-solve
+fallbacks remain visible in performance comparisons. First-cycle tests do not
+prove convergence for every later cycle.
 
 ## Input features
 
@@ -64,122 +121,154 @@ changes edge normalization to Aij/sqrt(di*dj). These are optional graph feature
 experiments, not validated improvements. They do not select another discretization.
 Change the mode in a copied configuration and use a new run directory.
 
-## Install and smoke
+## Lenovo WSL update and smoke
 
-From the repository root on Linux/macOS or Lenovo Ubuntu/WSL:
+For the existing environment at the Windows Desktop project folder, stop its
+training process and run the following in the VS Code WSL terminal. The migration
+requires the source run's NumPy/SciPy/PyTorch/PyAMG versions, so update the editable
+project without upgrading its installed dependencies.
 
 ```bash
+cd /mnt/c/Users/user/Desktop/adaptive-multigrid-neural-amg
+source .venv/bin/activate
+
+git status --short
 git fetch origin
 git switch neural-amg
 git pull --ff-only origin neural-amg
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -e '.[dev]'
+python -m pip install --no-deps -e .
 
-python scripts/run_neural_amg.py train \
-  --config configs/neural_amg_smoke.json --run-dir artifacts/neural_amg_p1_smoke
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export PYTHONUNBUFFERED=1
+set -o pipefail
+mkdir -p logs
+```
+
+Use a new smoke directory:
+
+```bash
+SMOKE="artifacts/neural_amg_p1_v3_smoke_lenovo"
+python -u scripts/run_neural_amg.py train \
+  --config configs/neural_amg_smoke.json --run-dir "$SMOKE" \
+  2>&1 | tee logs/cancellation_smoke_train.log
 python scripts/run_neural_amg.py freeze \
-  --config configs/neural_amg_smoke.json --run-dir artifacts/neural_amg_p1_smoke
-python scripts/run_neural_amg.py evaluate \
-  --config configs/neural_amg_smoke.json --run-dir artifacts/neural_amg_p1_smoke
+  --config configs/neural_amg_smoke.json --run-dir "$SMOKE"
+python -u scripts/run_neural_amg.py evaluate \
+  --config configs/neural_amg_smoke.json --run-dir "$SMOKE" \
+  2>&1 | tee logs/cancellation_smoke_evaluate.log
 ```
 
-The current backend is CPU FP64; GPU execution is not implemented. Smoke verifies
-execution, not research-scale speed improvement. Use a new output directory;
-previous Q1 study outputs, labels and checkpoints cannot be resumed as P1 runs.
+Smoke runs on CPU FP64 and verifies execution. It does not establish research
+speed improvement. For an entirely new installation, create `.venv` with
+`python3 -m venv .venv`, activate it and install `python -m pip install -e '.[dev]'`.
+The complete test command is `python -m pytest -ra`.
 
-## Research training and evaluation
+## Initialize from the interrupted Lenovo checkpoint
 
-The research config specifies 560 TRAIN operators (four densities × seven families
-× twenty cases), 280 validation, 280 final and six independently seeded OOD groups.
-The first run uses one model seed (6101) and teacher lambda=10. Optimal old CNN
-lambdas and routing policies are not assumed transferable. Final/OOD cases are
-not used to choose architecture, lambda, features or checkpoints.
+The helper supports source revision **d5257e2** with its v2 configuration and
+original runtime versions. It checks source/configuration/checkpoint identities,
+P1 meshes, operator hashes, development splits and prior recovery audits. The
+source must have completed supervised training and must not be frozen/evaluated
+or contain assembled holdout cases.
 
 ```bash
-python scripts/run_neural_amg.py train \
-  --config configs/neural_amg_research.json --run-dir artifacts/neural_amg_p1_560_seed6101
-# Resume training with exactly the same configuration, source and runtime:
-python scripts/run_neural_amg.py train \
-  --config configs/neural_amg_research.json --run-dir artifacts/neural_amg_p1_560_seed6101 --resume
+OLD_RUN="artifacts/neural_amg_p1_560_seed6101_lenovo_teacher_l1_fix"
+RUN="artifacts/neural_amg_p1_560_seed6101_lenovo_cancellation"
+CFG="configs/neural_amg_research.json"
+
+python scripts/start_neural_amg_cancellation.py \
+  --run-dir "$OLD_RUN" --output-dir "$RUN" --config "$CFG"
+
+python -u scripts/run_neural_amg.py train \
+  --config "$CFG" --run-dir "$RUN" --resume \
+  2>&1 | tee logs/research_train_cancellation.log
+```
+
+This creates a **new experiment** using the latest model weights from the old
+checkpoint. For the reported crash it records 11,060 source updates, then starts
+8 complete fine-tuning epochs over the same 560 training operators (4,480 new
+case visits). The new counter starts at zero. Optimizer/RNG state and validation
+selection restart; the initial validation is remeasured under the new solver.
+Old teacher labels are not copied. Old config, identity, validation history and
+recovery audits are archived under `initialization/` and linked by
+`cancellation_start.json`. The original folder is unchanged. This is a warm-start
+experiment, distinct from training all v3 teacher labels and weights from scratch.
+
+If interrupted after initialization, rerun only the training command with
+`--resume`; the initializer requires a nonexistent output directory. After
+opening a new WSL terminal, repeat environment activation/thread exports and
+set `RUN` and `CFG` again, then use:
+
+```bash
+RUN="artifacts/neural_amg_p1_560_seed6101_lenovo_cancellation"
+CFG="configs/neural_amg_research.json"
+python -u scripts/run_neural_amg.py train \
+  --config "$CFG" --run-dir "$RUN" --resume \
+  2>&1 | tee -a logs/research_train_cancellation.log
+```
+
+The previous bootstrap-depth and feasible-initialization recovery procedures
+belong to the archived
+[v2 runbook at d5257e2](https://github.com/slwjackie/adaptive-multigrid/blob/d5257e2db441600f1afe95de4355b0be38c2443a/docs/neural_amg.md).
+They are pinned to historical sources; use the v3 initializer above for the
+current cancellation experiment.
+
+## Freeze and final/OOD evaluation
+
+After training has completed successfully, freeze its newly selected checkpoint
+and run actual final/OOD measurements:
+
+```bash
 python scripts/run_neural_amg.py freeze \
-  --config configs/neural_amg_research.json --run-dir artifacts/neural_amg_p1_560_seed6101
-python scripts/run_neural_amg.py evaluate \
-  --config configs/neural_amg_research.json --run-dir artifacts/neural_amg_p1_560_seed6101
-python scripts/run_neural_amg.py evaluate \
-  --config configs/neural_amg_research.json --run-dir artifacts/neural_amg_p1_560_seed6101 --resume
+  --config "$CFG" --run-dir "$RUN"
+python -u scripts/run_neural_amg.py evaluate \
+  --config "$CFG" --run-dir "$RUN" \
+  2>&1 | tee logs/research_evaluate_cancellation.log
 ```
 
-`prepare` optionally assembles development data separately; `train` then needs
-`--resume`. `train --max-updates N` stops after N updates for resume checks. Each
-update saves model, optimizer, phase/epoch/offset, best checkpoint and RNG states.
-Teacher caches and data have checksums. Model/configuration/source/runtime changes
-reject resume. Freeze binds the selected model, development manifests, validation
-history and the future holdout specification; frozen runs cannot be trained.
-
-## Recover the bootstrap-depth crash from e9bfa4c
-
-That revision passed `max_levels=20` to the outer research hierarchy but omitted
-the argument in the teacher's provisional classical hierarchy, leaving its cap
-at 10. The twelfth seed-6101 training case, `train_checkerboard_n127_4`, needs
-11 levels. This fix forwards the cap into both teacher construction paths.
-
-For an interrupted run created by that exact revision, stop its process, pull
-the fix, keep the same Python environment, and run:
+To resume interrupted evaluation:
 
 ```bash
-python scripts/recover_neural_amg_bootstrap.py \
-  --run-dir artifacts/neural_amg_p1_560_seed6101_lenovo \
-  --output-dir artifacts/neural_amg_p1_560_seed6101_lenovo_bootstrap_fix
-python scripts/run_neural_amg.py train \
-  --config configs/neural_amg_research.json \
-  --run-dir artifacts/neural_amg_p1_560_seed6101_lenovo_bootstrap_fix --resume
+python -u scripts/run_neural_amg.py evaluate \
+  --config "$CFG" --run-dir "$RUN" --resume \
+  2>&1 | tee -a logs/research_evaluate_cancellation.log
 ```
 
-Recovery copies the run to a new folder, leaving the original intact. It accepts
-only pinned source hashes for the original revision and this fix, identical
-configuration/runtime, valid development data/mesh hashes and teacher checksums,
-and a matching unfinished checkpoint. Frozen/evaluated runs are rejected. The
-copy preserves weights, optimizer/RNG state, completed update count, labels and
-validation history. Successful old labels are unchanged numerically: increasing
-the safety cap does not alter any hierarchy that already terminated within ten
-levels. `bootstrap_depth_recovery.json` records both identities and the original
-checkpoint hash, and is bound by the later freeze. Normal resume hash checks
-remain strict. Use the new folder for all subsequent train/freeze/evaluate calls.
+Freeze binds the selected weights, source/runtime/configuration, development
+manifests, validation history, initialization audit and future holdout
+specifications. Final/OOD data are assembled only after freeze. Frozen runs
+cannot be trained. A protocol/source/runtime change requires a distinct
+experiment rather than editing identity hashes to bypass resume checks.
 
-The initial `validation update=0` evaluates an untrained model. Its failure
-count is separate from this teacher crash. `mean_total_ms` includes the configured
-300-second penalty per failed validation operator, not just measured wall time.
+## Fresh v3 research training
 
-## Recover the teacher reference L1 crash from 66e9f6d
-
-The seed-6101 62nd training case, `train_local_patch_n63_7`, has a classical
-reference row `[4.54311997, -3.54311997]`: its sum is one but its L1 norm is
-8.08624, above the configured cap of eight. The original teacher rejected that
-reference even though the feasible set is nonempty. The corrected teacher uses
-`[4.5, -3.5]` as that row's initial values, keeping the cap, support, injection,
-row sums and original reference normalizers. Already feasible references follow
-the same numerical path, so completed labels and updates remain reusable.
-
-After pulling the fix with the interrupted training process stopped, keep the
-same Python environment and run:
+For a new experiment with v3 teacher labels and all 15 supervised plus 8
+fine-tuning epochs, choose a separate output folder and omit initialization:
 
 ```bash
-python scripts/recover_neural_amg_teacher_l1.py \
-  --run-dir artifacts/neural_amg_p1_560_seed6101_lenovo_bootstrap_fix \
-  --output-dir artifacts/neural_amg_p1_560_seed6101_lenovo_teacher_l1_fix
-python scripts/run_neural_amg.py train \
-  --config configs/neural_amg_research.json \
-  --run-dir artifacts/neural_amg_p1_560_seed6101_lenovo_teacher_l1_fix --resume
+FRESH="artifacts/neural_amg_p1_560_seed6101_lenovo_cancellation_scratch"
+CFG="configs/neural_amg_research.json"
+python -u scripts/run_neural_amg.py train \
+  --config "$CFG" --run-dir "$FRESH" \
+  2>&1 | tee logs/research_train_cancellation_scratch.log
 ```
 
-This recovery checks pinned source identities and the same data/checkpoint/cache
-integrity conditions as bootstrap recovery. It preserves the original run and
-all completed updates in a separate output folder, also preserving and checking
-the previous bootstrap recovery audit when present. The new
-`teacher_l1_recovery.json` and prior audit are both bound by freeze. Use the new
-folder for subsequent resume, freeze and evaluation. Do not manually increase
-the teacher cap or disable source checks to reuse an old run.
+Resume this run with the same command and `--resume`, using `tee -a`. After
+completion, set `RUN="$FRESH"` for the freeze/evaluate commands above.
+
+The research configuration uses 560 TRAIN operators (four densities × seven
+families × twenty cases), 280 validation, 280 final and six independently seeded
+OOD groups. Model seed is 6101 and teacher lambda is 10. Final/OOD data do not
+select architecture, regularization, features or checkpoints. `prepare` can
+assemble development data separately, followed by `train --resume`.
+`train --max-updates N` stops after N processed cases for resume checks.
+
+Every processed case saves the model, optimizer, phase/epoch/offset, best
+checkpoint and RNG state. Teacher caches and data have checksums. The initial
+`validation update=0` measures the initialized model. `mean_total_ms` includes
+the configured 300-second penalty per failed validation operator.
 
 ## Mesh, data and OOD meanings
 
@@ -218,7 +307,7 @@ seconds. Graph construction, NN inference, Galerkin products and terminal
 factorization count toward setup. Same-hierarchy warm solves are measured separately.
 FEM data assembly, disk loading, offline label creation and offline training are
 excluded for every method; timing measures the linear-solver task given A and b.
-Fine-tuning optimizes residual reduction, not a differentiable wall clock.
+Fine-tuning optimizes residual reduction plus cancellation, not a differentiable wall clock.
 
 Evaluation compares classical, numerical BAMG+EM teacher and learned interpolation
 under the same controls. Each method coarsens its own actual generated coarse
@@ -229,4 +318,4 @@ are recorded, with evaluation resumable by case/method.
 `python -m pytest -ra` runs the complete current-branch tests, including P1 FEM
 accuracy, algebraic constraints, finite-difference gradients, actual P1 multilevel
 runtime parity, source/mesh/checkpoint identities and resume. These checks do not
-replace the unexecuted 560-operator research study.
+replace a complete v3 research training and timing evaluation.

@@ -1,0 +1,15 @@
+{
+  "commit": "d5257e2db441600f1afe95de4355b0be38c2443a",
+  "source": {
+    "neural_amg/__init__.py": "a5cc06c85288b49e9dbb049bbc954dd49f4bc40af4c4d87a5268e3f11e367699",
+    "neural_amg/autograd_sparse.py": "08711eb09c8511c6f7419d91044489743aed0ed57e8fbab1d9a33db14422a942",
+    "neural_amg/data.py": "7bd0cba3bb9501967658f92c30ff37edd90aeea0e1a3f56d177382cb1bd57b99",
+    "neural_amg/fem.py": "2ae79087bec51e7cc7b97a913a32968cb9ef23ecaa04324bc1ba05a83d8d0d10",
+    "neural_amg/model.py": "b1c69d429b63bed1d498a56661e6ce4a80c4cab82e32fa521ccd528a95775d22",
+    "neural_amg/provenance.py": "3a2aa9504351961861288ea82d7b0bc18dc8acde6be21a72ba380283d0bc27df",
+    "neural_amg/solver.py": "aa19558fe904ee42bb7bf6fffaf115e9f66af0c3808d9ce3b9b40d53d37b3328",
+    "neural_amg/structure.py": "9989f54607cd95441fde8e623ae881f81a44ea8f67646f1530f27915e248fce7",
+    "neural_amg/study.py": "3d029702651bda2c748deab9e443af8c3c22ae32f3b7ce45a28fc49ba3492dc8",
+    "neural_amg/teacher.py": "6be3541c4dd73ef207f817fb1f4e815e2d23df1d05cd5c7f4bb0b7289401949f"
+  }
+}

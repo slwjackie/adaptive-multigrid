@@ -76,24 +76,18 @@ def test_probe_generation_reproducible_and_jacobi_matches_formula():
         generate_test_vectors(A, omega=10)
 
 
-def test_signed_l1_constraints_with_active_cap():
-    A, structure = problem()
-    vectors = np.array([.1, .1, 4, .2, -4, .3, .1])[:, None]
-    o = FixedObjective(A, structure, vectors, l1_cap=1.0)
-    projected = o.project(np.linspace(-30, 30, o.base.nnz))
-    o.validate(projected)
-    result = fit_teacher(A, structure, strength=0, vectors=vectors, l1_cap=1.0, maxiter=1000)
-    assert result.report["solver"] == "tangent_cg_then_projected_gradient"
-    assert result.report["maximum_row_l1"] <= 1 + 1e-10
-    assert result.report["objective_after"] <= result.report["objective_before"]
-
-
-def test_signed_teacher_is_not_softmax_interpolation():
+def test_cancellation_penalty_reduces_signed_weights_without_a_hard_cap():
     A, structure = problem()
     vectors = np.array([.1, .1, 1, .2, -.5, .3, .1])[:, None]
-    result = fit_teacher(A, structure, strength=0, vectors=vectors, l1_cap=8)
+    free = fit_teacher(A, structure, strength=0, vectors=vectors, cancellation_weight=0)
+    result = fit_teacher(A, structure, strength=0, vectors=vectors, cancellation_weight=.1)
+    assert free.report["maximum_row_l1"] > 8
+    assert result.report["optimizer_converged"]
+    assert result.report["solver"] == "tangent_cg_then_cancellation_admm"
+    assert result.report["cancellation_after"] < free.report["cancellation_after"] / 10
     assert np.any(result.p.data < 0)
-    assert result.report["maximum_row_l1"] <= 8 + 1e-9
+    assert result.report["objective_after"] < result.report["objective_before"]
+    np.testing.assert_allclose(np.asarray(result.p.sum(1)).ravel(), structure.row_targets)
 
 
 def test_finite_budget_reports_without_claiming_exact_optimum():
@@ -196,52 +190,70 @@ def test_larger_bootstrap_cap_preserves_completed_labels():
     np.testing.assert_array_equal(old.p.data, fixed.p.data)
 
 
-def test_infeasible_reference_uses_feasible_start_and_original_normalizers():
+def test_reference_l1_above_eight_keeps_original_initialization_and_normalizers():
     from neural_amg.structure import Structure
     A = sp.diags([-np.ones(2), np.full(3, 2.4), -np.ones(2)], [-1, 0, 1], format='csr')
     reference = sp.csr_matrix([[1., 0.], [4.6, -3.6], [0., 1.]])
-    s = Structure(np.array([0, 2]), reference)
+    structure = Structure(np.array([0, 2]), reference)
     bank = generate_test_vectors(A, seed=7)
-    o = FixedObjective(A, s, bank, l1_cap=8.)
-    free = FixedObjective(A, s, bank, l1_cap=None)
-    assert o.scales == free.scales
-    initial = o.project(reference.data)
-    np.testing.assert_allclose(initial, [1., 4.5, -3.5, 1.])
-    result = fit_teacher(A, s, vectors=bank, l1_cap=8.)
-    assert result.report['projected_initialization']
+    regularized = FixedObjective(A, structure, bank, cancellation_weight=.1)
+    free = FixedObjective(A, structure, bank, cancellation_weight=0)
+    assert regularized.scales == free.scales
+    result = fit_teacher(A, structure, vectors=bank)
+    assert not result.report['projected_initialization']
     assert result.report['reference_maximum_row_l1'] == pytest.approx(8.2)
-    assert result.report['reference_objective'] == pytest.approx(11.)
-    assert result.report['objective_before'] == pytest.approx(o.evaluate(initial))
-    assert result.report['objective_after'] <= result.report['objective_before'] + 1e-10
-    assert result.report['maximum_row_l1'] <= 8. + 1e-10
-    np.testing.assert_array_equal(s.reference.data, reference.data)
-    np.testing.assert_array_equal(o.base.data, reference.data)
-    np.testing.assert_allclose(np.asarray(result.p.sum(1)).ravel(), s.row_targets)
-    np.testing.assert_allclose(result.p[s.coarse].toarray(), np.eye(2))
-    assert result.report['initial_digest'] != result.report['reference_digest']
+    assert result.report['reference_objective'] == pytest.approx(11 + .1 * 3.6 ** 2)
+    assert result.report['objective_after'] <= result.report['objective_before']
+    np.testing.assert_array_equal(structure.reference.data, reference.data)
+    assert result.report['initial_digest'] == result.report['reference_digest']
 
 
-def test_infeasible_row_sum_still_rejected():
+def test_single_connection_above_eight_is_feasible_and_has_no_cancellation():
     from neural_amg.structure import Structure
     A = sp.eye(3, format='csr')
-    s = Structure(np.array([0, 2]), sp.csr_matrix([[1., 0.], [9.25, -.25], [0., 1.]]))
-    with pytest.raises(ValueError, match='row sums make l1_cap infeasible'):
-        fit_teacher(A, s, l1_cap=8.)
+    reference = sp.csr_matrix([[1., 0.], [11.175457867653781, 0.], [0., 1.]])
+    structure = Structure(np.array([0, 2]), reference)
+    result = fit_teacher(A, structure)
+    np.testing.assert_array_equal(result.p.data, reference.data)
+    assert result.report['cancellation_after'] == 0
+    assert result.report['maximum_row_l1'] > 11
+    assert result.report['optimizer_converged']
 
 
-def test_constrained_teacher_may_exceed_infeasible_reference_objective():
+@pytest.mark.parametrize('target', [0., 1., -1.])
+def test_cancellation_teacher_matches_independent_scalar_minimization(target):
+    from scipy.optimize import minimize_scalar
     from neural_amg.structure import Structure
-    A = sp.eye(3, format='csr')
-    s = Structure(np.array([0, 2]), sp.csr_matrix([[1., 0.], [4.6, -3.6], [0., 1.]]))
-    # P0 fits this probe exactly, but cap8 forces P[1,0] <= 4.5. The constrained
-    # optimum cannot match the infeasible reference's tiny fitting objective.
-    bank = np.array([1., 4.6, 0.])[:, None]
-    result = fit_teacher(A, s, vectors=bank, strength=0., mu=1e-6, l1_cap=8.)
-    report = result.report
-    assert report['projected_initialization']
-    assert report['objective_after'] > report['reference_objective']
-    assert report['objective_after'] <= report['objective_before'] + 1e-9
-    assert report['maximum_row_l1'] <= 8. + 1e-9
+    A = sp.csr_matrix([[2., -.2, 0.], [-.2, 2., -.3], [0., -.3, 2.]])
+    structure = Structure(np.array([0, 2]),
+                          sp.csr_matrix([[1., 0.], [3., target - 3.], [0., 1.]]))
+    bank = np.array([[1., .1], [4., -2.], [.1, 1.]])
+    objective = FixedObjective(A, structure, bank, cancellation_weight=.2)
+    def independent(x):
+        p = np.array([[1., 0.], [x, target - x], [0., 1.]])
+        error = objective.z - p @ objective.zc
+        bamg = np.sum(error ** 2 * objective.w) + objective.mu * np.sum(p ** 2)
+        energy = np.trace(p.T @ A @ p)
+        cancellation = ((abs(x) + abs(target - x) - abs(target)) / (1 + abs(target))) ** 2
+        return bamg / objective.scales.bamg + .3 * energy / objective.scales.energy + .2 * cancellation
+    expected = minimize_scalar(independent, bounds=(-30, 30), method='bounded',
+                               options={'xatol': 1e-12})
+    result = fit_teacher(A, structure, vectors=bank, cancellation_weight=.2,
+                         strength=.3, maxiter=1000, rtol=1e-10)
+    assert result.report['optimizer_converged']
+    assert result.p[1, 0] == pytest.approx(expected.x, abs=2e-7)
+    assert result.report['objective_after'] == pytest.approx(expected.fun, abs=1e-9)
+
+
+def test_cancellation_gradient_matches_directional_difference_on_affine_space():
+    A, structure = problem()
+    objective = FixedObjective(A, structure, generate_test_vectors(A), cancellation_weight=.3)
+    values = objective.base.data + objective.tangent @ np.array([8., -5.])
+    direction = objective.tangent @ np.array([.7, -.4])
+    step = 1e-6
+    difference = (objective.evaluate(values + step * direction) -
+                  objective.evaluate(values - step * direction)) / (2 * step)
+    assert objective.gradient(values) @ direction == pytest.approx(difference, rel=2e-7)
 
 
 def test_case62_teacher_labels_and_backward(tmp_path):
@@ -257,10 +269,59 @@ def test_case62_teacher_labels_and_backward(tmp_path):
     labels = study._labels(config, records[0], tmp_path)
     report = labels[0]['report']
     assert report['reference_maximum_row_l1'] == pytest.approx(8.0862399379, rel=1e-7)
-    assert report['projected_initialization']
-    assert all(label['report']['maximum_row_l1'] <= 8. + 1e-9 for label in labels)
+    assert not report['projected_initialization']
+    assert all(label['report']['objective_after'] <= label['report']['objective_before'] + 1e-9
+               for label in labels)
     model = study._model(config)
     loss = study.supervised_loss(model, labels, config['supervised']['action_weight'])
     loss.backward()
     assert torch.isfinite(loss)
     assert all(p.grad is None or torch.isfinite(p.grad).all() for p in model.parameters())
+
+
+def test_bootstrap_guard_setting_reaches_provisional_hierarchy(monkeypatch):
+    from neural_amg import solver
+    A, structure = problem()
+    captured = []
+    original = solver.build_hierarchy
+    def build(*args, **kwargs):
+        captured.append(kwargs)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(solver, 'build_hierarchy', build)
+    result = fit_teacher(A, structure, bootstrap_cycles=1,
+                         bootstrap_max_levels=17, bootstrap_first_cycle_max_growth=2.5)
+    assert len(captured) == 1
+    assert captured[0]['max_levels'] == 17
+    assert captured[0]['first_cycle_max_growth'] == 2.5
+    assert result.report['bootstrap_first_cycle_max_growth'] == 2.5
+    with pytest.raises(ValueError, match='bootstrap_first_cycle_max_growth'):
+        generate_test_vectors(A, bootstrap_cycles=1, bootstrap_first_cycle_max_growth=.5)
+
+
+@pytest.mark.parametrize('at_setup', [False, True])
+def test_root_direct_bootstrap_preserves_relaxed_vectors_and_reports_incomplete(monkeypatch, at_setup):
+    from neural_amg import solver
+    A, structure = problem()
+    before = generate_test_vectors(A, count=3, sweeps=2, seed=12)
+    if at_setup:
+        original = solver.build_hierarchy
+        def root_direct(a, **kwargs):
+            kwargs['max_coarse'] = a.shape[0]
+            return original(a, **kwargs)
+        monkeypatch.setattr(solver, 'build_hierarchy', root_direct)
+    else:
+        monkeypatch.setattr(solver, '_first_cycle_bad', lambda *args, **kwargs: (True, {}))
+    after, diagnostics = generate_test_vectors(A, count=3, sweeps=2, seed=12,
+                                               bootstrap_cycles=2, return_report=True)
+    np.testing.assert_array_equal(after, before)
+    assert diagnostics['bootstrap_incomplete']
+    assert diagnostics['bootstrap_completed_cycles'] == 0
+    assert diagnostics['bootstrap_stop_reason'] == (
+        'root_direct_at_setup' if at_setup else 'root_direct_during_cycle')
+    if not at_setup:
+        assert any(event['level'] == 0 for event in diagnostics['bootstrap_guard_events'])
+    result = fit_teacher(A, structure, count=3, sweeps=2, seed=12, bootstrap_cycles=2)
+    np.testing.assert_allclose(result.vectors, before, atol=1e-15)
+    assert result.report['bootstrap_incomplete']
+    assert result.report['bootstrap_completed_cycles'] == 0
+    assert result.report['bootstrap_stop_reason'] == diagnostics['bootstrap_stop_reason']

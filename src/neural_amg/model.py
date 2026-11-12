@@ -106,12 +106,10 @@ class AttentionLayer(nn.Module):
         return self.activation(target + self.output(aggregate))
 
 
-def constrain_weights(raw, structure, l1_cap=8.):
-    """Enforce reference row sums, injection and an optional signed L1 cap.
-
-    The cap uses contraction toward the minimum-L1 uniform row, a piecewise
-    differentiable feasible map (not an asserted Euclidean projection).
-    """
+def constrain_weights(raw, structure, l1_cap=None):
+    """Enforce reference row sums and injection without clipping signed values."""
+    if l1_cap is not None:
+        raise ValueError("Hard L1 caps were removed; start a new cancellation-regularized run")
     if raw.ndim != 1 or len(raw) != len(structure.rows):
         raise ValueError("Expected one scalar per support edge")
     rows = torch.as_tensor(structure.rows, dtype=torch.long, device=raw.device)
@@ -122,20 +120,32 @@ def constrain_weights(raw, structure, l1_cap=8.):
     mean = raw.new_zeros(n).index_add(0, rows, raw) / counts
     residual = raw - mean[rows]
     values = center + residual
-    if l1_cap is not None:
-        if not math.isfinite(l1_cap) or l1_cap < max(1., float(target.abs().max())):
-            raise ValueError("Infeasible row L1 cap")
-        norm = raw.new_zeros(n).index_add(0, rows, values.abs())
-        scale = ((l1_cap - target.abs()) / (norm - target.abs()).clamp_min(1e-30)).clamp(max=1.)
-        values = center + scale[rows] * residual
     coarse_mask = torch.zeros(n, dtype=torch.bool, device=raw.device)
     coarse_mask[torch.as_tensor(structure.coarse, device=raw.device)] = True
     return torch.where(coarse_mask[rows], torch.ones_like(values), values)
 
 
+def cancellation_penalty(p, structure):
+    """Mean squared normalized cancellation over F rows, including singleton rows.
+
+    Row targets are fixed classical decisions during differentiation. The actual
+    row sums equal these targets by the affine decoder. No dense P is formed.
+    """
+    rows = torch.as_tensor(p.rows, dtype=torch.long, device=p.values.device)
+    row_l1 = p.values.new_zeros(p.shape[0]).index_add(0, rows, p.values.abs())
+    targets = torch.as_tensor(structure.row_targets, dtype=p.values.dtype,
+                              device=p.values.device)
+    fine = torch.ones(p.shape[0], dtype=torch.bool, device=p.values.device)
+    fine[torch.as_tensor(structure.coarse, device=p.values.device)] = False
+    cancellation = (row_l1 - targets.abs()).clamp_min(0.) / (1. + targets.abs())
+    return cancellation[fine].square().mean()
+
+
 class GraphAttentionTransfer(nn.Module):
-    def __init__(self, hidden=16, depth=3, heads=2, feature_mode="original", l1_cap=8.):
+    def __init__(self, hidden=16, depth=3, heads=2, feature_mode="original", l1_cap=None):
         super().__init__()
+        if l1_cap is not None:
+            raise ValueError("Hard L1 caps were removed; migrate old weights into a new run")
         if type(hidden) is not int or hidden < 1 or type(depth) is not int or depth < 1:
             raise ValueError("hidden and depth must be positive integers")
         if type(heads) is not int or heads < 1 or hidden % heads:

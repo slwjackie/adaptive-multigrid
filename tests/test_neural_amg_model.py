@@ -3,7 +3,7 @@ import pytest
 import scipy.sparse as sp
 import torch
 from neural_amg.structure import Structure, build_structure, validate_support_hops
-from neural_amg.model import GraphAttentionTransfer, graph_features, constrain_weights
+from neural_amg.model import GraphAttentionTransfer, graph_features, constrain_weights, cancellation_penalty
 from neural_amg.autograd_sparse import SparseTensor
 
 
@@ -46,18 +46,42 @@ def test_model_constraints_gradients_and_full_coarse_fill(mode):
     assert m(ac, sc).shape[0] == len(s.coarse)
 
 
-def test_signed_head_constraints_and_l1_cap():
+def test_signed_head_constraints_without_clipping():
     reference = sp.csr_matrix([[1., 0.], [.5, .5], [0., 1.]])
     s = Structure(np.array([0, 2]), reference)
     raw = torch.tensor([0., -10., 10., 0.], dtype=torch.float64, requires_grad=True)
-    values = constrain_weights(raw, s, 3.)
+    values = constrain_weights(raw, s)
     assert values[1] < 0
     assert torch.allclose(values[1:3].sum(), torch.tensor(1., dtype=torch.float64))
-    assert values[1:3].abs().sum() <= 3. + 1e-12
+    torch.testing.assert_close(values[1:3], torch.tensor([-9.5, 10.5], dtype=torch.float64))
     values.square().sum().backward()
     assert torch.isfinite(raw.grad).all()
-    with pytest.raises(ValueError, match="Infeasible"):
+    with pytest.raises(ValueError, match="removed"):
         constrain_weights(raw, s, .5)
+
+
+def test_cancellation_penalty_matches_examples_and_has_finite_gradients():
+    s = Structure(np.array([0, 2]), sp.csr_matrix([[1., 0.], [.5, .5], [0., 1.]]))
+    for pair, expected in [([.5, .5], 0.), ([2., -1.], 1.), ([100., -99.], 9801.)]:
+        values = torch.tensor([1., *pair, 1.], dtype=torch.float64, requires_grad=True)
+        p = SparseTensor.from_coo(s.rows, s.cols, values, s.shape)
+        loss = cancellation_penalty(p, s)
+        assert loss.item() == pytest.approx(expected)
+        loss.backward()
+        assert torch.isfinite(values.grad).all()
+        assert values.grad[0] == values.grad[-1] == 0
+    raw = torch.tensor([0., 2., -1., 0.], dtype=torch.float64, requires_grad=True)
+    def penalty(v):
+        return cancellation_penalty(SparseTensor.from_coo(s.rows, s.cols, constrain_weights(v, s), s.shape), s)
+    assert torch.autograd.gradcheck(penalty, raw)
+
+
+def test_large_singleton_target_is_feasible_and_has_no_cancellation():
+    s = Structure(np.array([0]), sp.csr_matrix([[1.], [11.175457867653781]]))
+    values = constrain_weights(torch.tensor([4., -100.], dtype=torch.float64), s)
+    torch.testing.assert_close(values, torch.tensor([1., 11.175457867653781], dtype=torch.float64))
+    p = SparseTensor.from_coo(s.rows, s.cols, values, s.shape)
+    assert cancellation_penalty(p, s).item() == 0
 
 
 def test_permutation_equivariance_with_same_classical_decisions():
